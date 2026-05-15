@@ -1,0 +1,8 @@
+{
+  "hotkey": "ctrl+alt",
+  "model": "small",
+  "language": "en",
+  "min_record_seconds": 0.5,
+  "filler_words": ["um", "uh", "you know", "like"],
+  "clipboard_restore_delay_ms": 150
+}

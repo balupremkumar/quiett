@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+.env
+*.env
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Outputs
+output/
+graphify-out/
+inspect/
+
+# Claude
+.claude/worktrees/
+
+# OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
