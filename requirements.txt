@@ -1,8 +1,8 @@
-faster-whisper
-sounddevice
-numpy
-pyperclip
-keyboard
-pywin32
-pystray
-Pillow
+faster-whisper>=1.0.3
+sounddevice>=0.4.7
+numpy>=1.26
+pyperclip>=1.9.0
+keyboard>=0.13.5
+pywin32>=310
+pystray>=0.19.5
+Pillow>=11.0

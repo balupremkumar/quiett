@@ -25,6 +25,7 @@ def run(
     language: str,
     min_seconds: float,
     filler_words: list,
+    vad_filter: bool = False,
 ) -> str | None:
     """Return postprocessed text, or None if audio was too short / empty."""
     if not chunks:
@@ -33,7 +34,7 @@ def run(
     if len(audio) / SAMPLE_RATE < min_seconds:
         return None
     _ready.wait()  # safety net — hotkey already guards this
-    segments, _ = _model.transcribe(audio, language=language)
+    segments, _ = _model.transcribe(audio, language=language, vad_filter=vad_filter)
     raw = " ".join(seg.text for seg in segments).strip()
     return _postprocess(raw, filler_words)
 
@@ -49,6 +50,6 @@ def _strip_fillers(text: str, fillers: list) -> str:
     # Longest fillers first so multi-word phrases match before their sub-words
     for fw in sorted(fillers, key=len, reverse=True):
         escaped = re.escape(fw)
-        pattern = (r"\b" + escaped + r"\b") if " " not in fw else escaped
+        pattern = r"\b" + escaped + r"\b"
         text = re.sub(pattern, "", text, flags=re.IGNORECASE)
     return " ".join(text.split())

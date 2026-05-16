@@ -9,12 +9,18 @@ recording  red    — mic is active
 processing yellow — transcribing audio
 """
 
+import os
+import threading
+
 import pystray
 from PIL import Image, ImageDraw
 
 _state = "loading"
 _icon: pystray.Icon | None = None
 _on_view_history = None
+_on_toggle_pause = None
+_paused = False
+_lock = threading.Lock()
 
 # Shown in the greyed-out status menu item
 _LABELS = {
@@ -57,10 +63,11 @@ def _make_icon(bg: tuple) -> Image.Image:
 _ICONS = {state: _make_icon(bg) for state, bg in _BG.items()}
 
 
-def configure(on_view_history) -> None:
+def configure(on_view_history, on_toggle_pause=None) -> None:
     """Wire optional callbacks before calling run()."""
-    global _on_view_history
+    global _on_view_history, _on_toggle_pause
     _on_view_history = on_view_history
+    _on_toggle_pause = on_toggle_pause
 
 
 def _label() -> str:
@@ -70,11 +77,21 @@ def _label() -> str:
 def set_state(state: str) -> None:
     """Update icon colour and tooltip. Safe to call from any thread."""
     global _state
-    _state = state
+    with _lock:
+        _state = state
+        if _icon is not None:
+            _icon.icon = _ICONS[state]
+            _icon.title = _TOOLTIPS.get(state, f"VoiceDictate — {state}")
+            _icon.update_menu()
+
+
+def notify(title: str, message: str) -> None:
+    """Show a Windows tray notification. Safe to call from any thread."""
     if _icon is not None:
-        _icon.icon = _ICONS[state]
-        _icon.title = _TOOLTIPS.get(state, f"VoiceDictate — {state}")
-        _icon.update_menu()
+        try:
+            _icon.notify(message, title)
+        except Exception:
+            pass  # notify unsupported on some pystray backends
 
 
 def run() -> None:
@@ -85,9 +102,24 @@ def run() -> None:
         if _on_view_history:
             _on_view_history()
 
+    def _toggle_pause(icon, item):
+        global _paused
+        _paused = not _paused
+        if _on_toggle_pause:
+            _on_toggle_pause(_paused)
+        icon.update_menu()
+
+    def _open_config(icon, item):
+        try:
+            os.startfile("config.json")
+        except Exception:
+            pass
+
     menu = pystray.Menu(
         pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
         pystray.MenuItem("View History", _view_history),
+        pystray.MenuItem(lambda _: "Resume" if _paused else "Pause", _toggle_pause),
+        pystray.MenuItem("Open Config", _open_config),
         pystray.MenuItem("Quit", lambda icon, item: icon.stop()),
     )
     _icon = pystray.Icon(

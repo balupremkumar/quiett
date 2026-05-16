@@ -21,6 +21,8 @@ def capture_foreground() -> int:
 def inject_text(text: str, hwnd: int) -> None:
     """Swap clipboard to text, restore target window focus, send Ctrl+V,
     then restore the original clipboard contents after the configured delay."""
+    if not hwnd or not win32gui.IsWindow(hwnd):
+        return
     original = pyperclip.paste()
     pyperclip.copy(text)
     try:

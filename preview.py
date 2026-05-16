@@ -11,6 +11,7 @@ import threading
 import tkinter as tk
 from datetime import date, datetime
 
+import pyperclip
 import win32api
 
 import history as hist
@@ -100,21 +101,23 @@ def _open_window(text: str, hwnd: int, empty: bool = False) -> None:
     frame = tk.Frame(win, bg=_BG, padx=16, pady=14)
     frame.pack(fill=tk.BOTH, expand=True)
 
-    # ── Text entry ─────────────────────────────────────────────────────────
+    # ── Text entry (multi-line, word-wrap) ────────────────────────────────
     display = "Nothing detected — try again" if empty else text
-    var = tk.StringVar(value=display)
-    entry = tk.Entry(
-        frame, textvariable=var, font=("Segoe UI", 11),
+    entry = tk.Text(
+        frame, font=("Segoe UI", 11), wrap=tk.WORD,
         bg=_BG2, fg=_FG, insertbackground=_FG,
         relief="flat", bd=0,
         highlightthickness=1,
         highlightbackground="#3d3d3d",
         highlightcolor=_BLUE,
+        height=4,
+        undo=True,
     )
+    entry.insert("1.0", display)
     entry.pack(fill=tk.X, pady=(0, 3))
     if not empty:
-        entry.select_range(0, tk.END)
-        entry.icursor(tk.END)
+        entry.tag_add("sel", "1.0", tk.END)
+        entry.mark_set(tk.INSERT, tk.END)
     entry.focus_set()
 
     # ── Character count ────────────────────────────────────────────────────
@@ -125,10 +128,11 @@ def _open_window(text: str, hwnd: int, empty: bool = False) -> None:
     ).pack(fill=tk.X, pady=(0, 5))
 
     def _update_count(*_):
-        n = len(var.get())
+        n = len(entry.get("1.0", "end-1c"))
         count_var.set(f"{n} character{'s' if n != 1 else ''}")
+        entry.edit_modified(False)
 
-    var.trace_add("write", _update_count)
+    entry.bind("<<Modified>>", _update_count)
     _update_count()
 
     # ── Append checkbox ────────────────────────────────────────────────────
@@ -151,7 +155,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False) -> None:
         win.destroy()
 
     def on_insert() -> None:
-        result = var.get()
+        result = entry.get("1.0", "end-1c")
         _close()
         inject.inject_text((" " + result) if append_var.get() else result, hwnd)
 
@@ -186,6 +190,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False) -> None:
 
     # ── Keybindings ────────────────────────────────────────────────────────
     if not empty:
+        # "break" stops the Text widget from inserting a newline
+        entry.bind("<Return>", lambda e: (on_insert(), "break"))
         win.bind("<Return>", lambda _: on_insert())
     win.bind("<Escape>", lambda _: on_cancel())
     win.protocol("WM_DELETE_WINDOW", on_cancel)
@@ -219,8 +225,12 @@ def _open_window(text: str, hwnd: int, empty: bool = False) -> None:
 def _fmt_ts(iso: str) -> str:
     try:
         dt = datetime.fromisoformat(iso)
-        prefix = "Today" if dt.date() == date.today() else dt.strftime("%a")
-        return f"{prefix}  {dt.strftime('%H:%M')}"
+        if dt.date() == date.today():
+            return f"Today  {dt.strftime('%H:%M')}"
+        elif (date.today() - dt.date()).days < 7:
+            return dt.strftime("%a  %H:%M")
+        else:
+            return dt.strftime("%d %b %Y  %H:%M")
     except Exception:
         return iso
 
@@ -250,7 +260,7 @@ def _open_history() -> None:
         list_frame, bg=_BG2, fg=_FG,
         font=("Segoe UI", 10), wrap=tk.WORD,
         relief="flat", bd=0, padx=10, pady=8,
-        yscrollcommand=sb.set, cursor="arrow",
+        yscrollcommand=sb.set, cursor="ibeam",
     )
     txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     sb.config(command=txt.yview)
@@ -258,14 +268,27 @@ def _open_history() -> None:
     txt.tag_configure("ts",   foreground="#888888", font=("Segoe UI", 9))
     txt.tag_configure("body", foreground=_FG,       font=("Segoe UI", 10))
     txt.tag_configure("sep",  foreground="#383838")
+    txt.tag_configure("copy", foreground=_FG2,      font=("Segoe UI", 8), underline=True)
 
     def _populate(data: list) -> None:
         txt.config(state="normal")
         txt.delete("1.0", tk.END)
         if data:
             for i, entry in enumerate(data):
+                body_text = entry.get("text", "").strip()
                 txt.insert(tk.END, _fmt_ts(entry.get("timestamp", "")) + "\n", "ts")
-                txt.insert(tk.END, entry.get("text", "").strip() + "\n", "body")
+                txt.insert(tk.END, body_text + "\n", "body")
+
+                # Inline copy link
+                tag = f"copy_{i}"
+                txt.insert(tk.END, "· copy\n", ("copy", tag))
+                txt.tag_bind(tag, "<Button-1>",
+                             lambda e, t=body_text: pyperclip.copy(t))
+                txt.tag_bind(tag, "<Enter>",
+                             lambda e: txt.config(cursor="hand2"))
+                txt.tag_bind(tag, "<Leave>",
+                             lambda e: txt.config(cursor="ibeam"))
+
                 if i < len(data) - 1:
                     txt.insert(tk.END, "─" * 55 + "\n", "sep")
         else:

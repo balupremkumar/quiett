@@ -9,12 +9,15 @@ _recording = False
 _session_chunks = None  # new list per session — avoids start/stop race
 _stream = None
 _on_stop = None
+_timer = None
+_max_duration = 60.0
 _lock = threading.Lock()
 
 
-def configure(on_stop) -> None:
-    global _on_stop
+def configure(on_stop, max_duration_seconds: float = 60.0) -> None:
+    global _on_stop, _max_duration
     _on_stop = on_stop
+    _max_duration = max_duration_seconds
 
 
 def is_recording() -> bool:
@@ -22,7 +25,7 @@ def is_recording() -> bool:
 
 
 def start() -> None:
-    global _recording, _session_chunks, _stream
+    global _recording, _session_chunks, _stream, _timer
     with _lock:
         if _recording:
             return
@@ -35,16 +38,23 @@ def start() -> None:
         callback=_callback,
     )
     _stream.start()
+    _timer = threading.Timer(_max_duration, stop)
+    _timer.daemon = True
+    _timer.start()
     threading.Thread(target=winsound.Beep, args=(1000, 150), daemon=True).start()
 
 
 def stop() -> None:
-    global _recording, _stream
+    global _recording, _stream, _timer
     with _lock:
         if not _recording:
             return
         _recording = False
         captured = _session_chunks  # snapshot reference inside lock
+        t = _timer
+        _timer = None
+    if t:
+        t.cancel()
     s = _stream
     _stream = None
     if s:

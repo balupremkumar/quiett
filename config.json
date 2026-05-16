@@ -3,6 +3,8 @@
   "model": "small",
   "language": "en",
   "min_record_seconds": 0.5,
+  "max_record_seconds": 60,
   "filler_words": ["um", "uh", "you know", "like"],
-  "clipboard_restore_delay_ms": 150
+  "clipboard_restore_delay_ms": 150,
+  "vad_filter": false
 }
