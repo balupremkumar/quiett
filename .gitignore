@@ -18,6 +18,9 @@ output/
 graphify-out/
 inspect/
 
+# Runtime data
+history.json
+
 # Claude
 .claude/worktrees/
 
