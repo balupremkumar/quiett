@@ -144,13 +144,17 @@ def main() -> None:
                     if key in fresh:
                         _cfg[key] = fresh[key]
             inject.configure(
-                restore_delay_ms=_cfg.get("clipboard_restore_delay_ms", 150)
+                restore_delay_ms=fresh.get("clipboard_restore_delay_ms", 150)
             )
         except Exception:
             pass  # keep running with last good config
-        threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config).start()
+        t = threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config)
+        t.daemon = True
+        t.start()
 
-    threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config).start()
+    t0 = threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config)
+    t0.daemon = True
+    t0.start()
 
     # ------------------------------------------------------------------
     # Tray

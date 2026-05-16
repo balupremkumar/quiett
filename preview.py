@@ -116,7 +116,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False) -> None:
     entry.insert("1.0", display)
     entry.pack(fill=tk.X, pady=(0, 3))
     if not empty:
-        entry.tag_add("sel", "1.0", tk.END)
+        entry.tag_add("sel", "1.0", "end-1c")
         entry.mark_set(tk.INSERT, tk.END)
     entry.focus_set()
 
@@ -190,9 +190,10 @@ def _open_window(text: str, hwnd: int, empty: bool = False) -> None:
 
     # ── Keybindings ────────────────────────────────────────────────────────
     if not empty:
-        # "break" stops the Text widget from inserting a newline
-        entry.bind("<Return>", lambda e: (on_insert(), "break"))
-        win.bind("<Return>", lambda _: on_insert())
+        def _on_return(e):
+            on_insert()
+            return "break"  # prevent Text widget from inserting a newline
+        entry.bind("<Return>", _on_return)
     win.bind("<Escape>", lambda _: on_cancel())
     win.protocol("WM_DELETE_WINDOW", on_cancel)
 
