@@ -94,11 +94,16 @@ def _stop_pulse() -> None:
         _pulse_timer = None
 
 
-def configure(on_view_history, on_toggle_pause=None, on_view_profile=None) -> None:
-    global _on_view_history, _on_toggle_pause, _on_view_profile
-    _on_view_history = on_view_history
-    _on_toggle_pause = on_toggle_pause
-    _on_view_profile = on_view_profile
+_on_open_settings = None
+
+
+def configure(on_view_history, on_toggle_pause=None,
+              on_view_profile=None, on_open_settings=None) -> None:
+    global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
+    _on_view_history  = on_view_history
+    _on_toggle_pause  = on_toggle_pause
+    _on_view_profile  = on_view_profile
+    _on_open_settings = on_open_settings
 
 
 def _label() -> str:
@@ -154,10 +159,15 @@ def run() -> None:
         if _on_view_profile:
             _on_view_profile()
 
+    def _open_settings(icon, item):
+        if _on_open_settings:
+            _on_open_settings()
+
     menu = pystray.Menu(
         pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
         pystray.MenuItem("View History",    _view_history),
         pystray.MenuItem("Speech Profile",  _view_profile),
+        pystray.MenuItem("Settings",        _open_settings),
         pystray.MenuItem(lambda _: "Resume" if _paused else "Pause", _toggle_pause),
         pystray.MenuItem("Open Config",     _open_config),
         pystray.MenuItem("Quit",            lambda icon, item: icon.stop()),

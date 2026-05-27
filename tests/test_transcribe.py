@@ -5,10 +5,11 @@ import sys
 from unittest.mock import MagicMock
 
 # Stub heavy deps before import
-sys.modules.setdefault("faster_whisper", MagicMock())
+sys.modules["faster_whisper"] = MagicMock()
 _audio_stub = MagicMock()
 _audio_stub.SAMPLE_RATE = 16000
-sys.modules.setdefault("audio", _audio_stub)
+sys.modules["audio"] = _audio_stub
+sys.modules.pop("transcribe", None)
 
 import transcribe  # noqa: E402
 

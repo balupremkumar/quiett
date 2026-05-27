@@ -27,6 +27,7 @@ def run(
     filler_words: list,
     vad_filter: bool = False,
     profile_rules: dict | None = None,
+    corrections: dict | None = None,
 ) -> tuple[str | None, float | None]:
     """Return (postprocessed_text, confidence) or (None, None) if audio too short/empty.
 
@@ -51,7 +52,9 @@ def run(
     else:
         confidence = None
 
-    text = _postprocess(raw, filler_words, profile_rules or {})
+    # Config corrections override profile rules when both define the same key
+    all_rules = {**(profile_rules or {}), **(corrections or {})}
+    text = _postprocess(raw, filler_words, all_rules)
     return (text if text else None), confidence
 
 

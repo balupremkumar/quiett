@@ -35,9 +35,54 @@ _cfg_lock = threading.Lock()
 _HOT_RELOAD_INTERVAL = 30  # seconds
 
 
+_CONFIG_DEFAULTS = {
+    "hotkey":                    "ctrl+alt",
+    "model":                     "small",
+    "language":                  "en",
+    "min_record_seconds":        0.5,
+    "max_record_seconds":        120.0,
+    "filler_words":              [],
+    "clipboard_restore_delay_ms": 150,
+    "vad_filter":                False,
+    "corrections":               {},
+    "silence_auto_stop_seconds": 3.0,
+    "preview_position":          "cursor",
+}
+
+_VALID_POSITIONS = {"cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"}
+
+
 def _load_config() -> dict:
     with open("config.json") as f:
         return json.load(f)
+
+
+def _validate_config(raw: dict) -> dict:
+    cfg = {**_CONFIG_DEFAULTS, **raw}
+    # Type clamps
+    try:
+        cfg["min_record_seconds"] = max(0.1, float(cfg["min_record_seconds"]))
+    except (TypeError, ValueError):
+        cfg["min_record_seconds"] = 0.5
+    try:
+        cfg["max_record_seconds"] = max(5.0, min(300.0, float(cfg["max_record_seconds"])))
+    except (TypeError, ValueError):
+        cfg["max_record_seconds"] = 120.0
+    try:
+        cfg["clipboard_restore_delay_ms"] = max(50, int(cfg["clipboard_restore_delay_ms"]))
+    except (TypeError, ValueError):
+        cfg["clipboard_restore_delay_ms"] = 150
+    try:
+        cfg["silence_auto_stop_seconds"] = max(0.0, float(cfg["silence_auto_stop_seconds"]))
+    except (TypeError, ValueError):
+        cfg["silence_auto_stop_seconds"] = 3.0
+    if not isinstance(cfg["filler_words"], list):
+        cfg["filler_words"] = []
+    if not isinstance(cfg["corrections"], dict):
+        cfg["corrections"] = {}
+    if cfg["preview_position"] not in _VALID_POSITIONS:
+        cfg["preview_position"] = "cursor"
+    return cfg
 
 
 def _get_cfg() -> dict:
@@ -47,10 +92,11 @@ def _get_cfg() -> dict:
 
 def main() -> None:
     global _cfg
-    _cfg = _load_config()
+    _cfg = _validate_config(_load_config())
 
     profile.init()
     inject.configure(restore_delay_ms=_cfg["clipboard_restore_delay_ms"])
+    preview.configure_position(_cfg["preview_position"])
     preview.start()
 
     # ------------------------------------------------------------------
@@ -67,6 +113,7 @@ def main() -> None:
                 filler_words=cfg["filler_words"],
                 vad_filter=cfg.get("vad_filter", False),
                 profile_rules=profile.get_active_rules(),
+                corrections=cfg.get("corrections", {}),
             )
         except Exception as exc:
             msg = f"Transcription error: {exc}"
@@ -105,6 +152,7 @@ def main() -> None:
     audio.configure(
         on_stop=_on_audio_stop,
         max_duration_seconds=_cfg.get("max_record_seconds", 120),
+        silence_timeout_seconds=_cfg.get("silence_auto_stop_seconds", 3.0),
     )
 
     hotkey.configure(
@@ -143,13 +191,19 @@ def main() -> None:
         try:
             fresh = _load_config()
             with _cfg_lock:
+                validated = _validate_config(fresh)
+            with _cfg_lock:
                 for key in ("language", "filler_words", "min_record_seconds",
                             "clipboard_restore_delay_ms", "max_record_seconds",
-                            "vad_filter"):
-                    if key in fresh:
-                        _cfg[key] = fresh[key]
-            inject.configure(
-                restore_delay_ms=fresh.get("clipboard_restore_delay_ms", 150)
+                            "vad_filter", "corrections", "silence_auto_stop_seconds",
+                            "preview_position"):
+                    _cfg[key] = validated[key]
+            inject.configure(restore_delay_ms=validated["clipboard_restore_delay_ms"])
+            preview.configure_position(validated["preview_position"])
+            audio.configure(
+                on_stop=_on_audio_stop,
+                max_duration_seconds=validated["max_record_seconds"],
+                silence_timeout_seconds=validated["silence_auto_stop_seconds"],
             )
         except Exception:
             pass
@@ -169,6 +223,7 @@ def main() -> None:
         on_view_history=preview.show_history,
         on_toggle_pause=hotkey.set_paused,
         on_view_profile=preview.show_profile,
+        on_open_settings=preview.show_settings,
     )
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()

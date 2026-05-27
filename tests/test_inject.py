@@ -10,9 +10,10 @@ _win32con = MagicMock()
 _win32con.WM_PASTE = 0x0302
 _pyperclip = MagicMock()
 
-sys.modules.setdefault("win32gui",   _win32gui)
-sys.modules.setdefault("win32con",   _win32con)
-sys.modules.setdefault("pyperclip",  _pyperclip)
+sys.modules["win32gui"]  = _win32gui
+sys.modules["win32con"]  = _win32con
+sys.modules["pyperclip"] = _pyperclip
+sys.modules.pop("inject", None)
 
 import inject  # noqa: E402  (import after stubs)
 

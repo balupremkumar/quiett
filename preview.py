@@ -6,6 +6,7 @@ pystray owns the main thread, so we spin up a persistent hidden Tk root here.
 Queues are polled every 50 ms so all windows can coexist simultaneously.
 """
 
+import json
 import queue
 import threading
 import tkinter as tk
@@ -18,20 +19,27 @@ import history as hist
 import inject
 import profile
 
+_CONFIG_FILE = "config.json"
+
 # ---------------------------------------------------------------------------
 # Public API — safe to call from any thread
 # ---------------------------------------------------------------------------
 
-_preview_q:  queue.Queue = queue.Queue()
-_history_q:  queue.Queue = queue.Queue()
-_profile_q:  queue.Queue = queue.Queue()
-_badge_q:    queue.Queue = queue.Queue()
-_root:       tk.Tk | None = None
+_preview_q:   queue.Queue = queue.Queue()
+_history_q:   queue.Queue = queue.Queue()
+_profile_q:   queue.Queue = queue.Queue()
+_settings_q:  queue.Queue = queue.Queue()
+_badge_q:     queue.Queue = queue.Queue()
+_root:        tk.Tk | None = None
 _ready = threading.Event()
 
-_preview_open = False   # only touched on the tkinter thread
-_history_open = False
-_profile_open = False
+_preview_open  = False   # only touched on the tkinter thread
+_history_open  = False
+_profile_open  = False
+_settings_open = False
+
+# Preview position: "cursor" | "top-right" | "bottom-right" | "top-left" | "bottom-left"
+_preview_position = "cursor"
 
 # Dark-theme palette
 _BG      = "#1e1e1e"
@@ -75,6 +83,16 @@ def hide_badge() -> None:
     _badge_q.put(None)
 
 
+def show_settings() -> None:
+    _settings_q.put(True)
+
+
+def configure_position(position: str) -> None:
+    """Update preview window placement. Safe to call from any thread."""
+    global _preview_position
+    _preview_position = position
+
+
 # ---------------------------------------------------------------------------
 # Internal — everything below runs exclusively on the tkinter worker thread
 # ---------------------------------------------------------------------------
@@ -94,7 +112,7 @@ _badge_dot:   tk.Label | None = None
 
 
 def _tick() -> None:
-    global _preview_open, _history_open, _profile_open
+    global _preview_open, _history_open, _profile_open, _settings_open
 
     if not _preview_open:
         try:
@@ -120,6 +138,14 @@ def _tick() -> None:
             _profile_q.get_nowait()
             _profile_open = True
             _open_profile()
+        except queue.Empty:
+            pass
+
+    if not _settings_open:
+        try:
+            _settings_q.get_nowait()
+            _settings_open = True
+            _open_settings()
         except queue.Empty:
             pass
 
@@ -188,6 +214,20 @@ def _handle_badge(cmd: str | None) -> None:
 # ---------------------------------------------------------------------------
 # Dictation preview window
 # ---------------------------------------------------------------------------
+
+def _calc_position(cx: int, cy: int, w: int, h: int,
+                   sw: int, sh: int, mode: str) -> tuple[int, int]:
+    pad = 16
+    positions = {
+        "cursor":       (max(0, min(cx + 12, sw - w)), max(0, min(cy + 12, sh - h))),
+        "top-right":    (sw - w - pad,   pad),
+        "bottom-right": (sw - w - pad,   sh - h - 56),
+        "top-left":     (pad,            pad),
+        "bottom-left":  (pad,            sh - h - 56),
+        "center":       ((sw - w) // 2,  (sh - h) // 2),
+    }
+    return positions.get(mode, positions["cursor"])
+
 
 def _border_colour(confidence: float | None) -> str:
     if confidence is None:
@@ -375,8 +415,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     w = max(420, win.winfo_reqwidth())
     h = win.winfo_reqheight()
     sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-    x = max(0, min(cx + 12, sw - w))
-    y = max(0, min(cy + 12, sh - h))
+    x, y = _calc_position(cx, cy, w, h, sw, sh, _preview_position)
     win.geometry(f"{w}x{h}+{x}+{y}")
 
 
@@ -579,6 +618,181 @@ def _open_profile() -> None:
         font=("Segoe UI", 10), padx=10, pady=4, cursor="hand2",
     ).pack()
     close_wrap.pack(side=tk.LEFT)
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
+    win.bind("<Escape>", lambda _: on_close())
+
+
+# ---------------------------------------------------------------------------
+# Settings UI
+# ---------------------------------------------------------------------------
+
+_POSITIONS = ["cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"]
+
+
+def _open_settings() -> None:
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+
+    win = tk.Toplevel(_root)
+    win.title("VoiceDictate — Settings")
+    win.configure(bg=_BG)
+    win.geometry("500x560")
+    win.minsize(420, 460)
+    win.resizable(True, True)
+
+    canvas = tk.Canvas(win, bg=_BG, highlightthickness=0)
+    sb = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=sb.set)
+    sb.pack(side=tk.RIGHT, fill=tk.Y)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    content = tk.Frame(canvas, bg=_BG)
+    content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+    def _on_configure(e):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.itemconfig(content_window, width=canvas.winfo_width())
+
+    content.bind("<Configure>", _on_configure)
+    canvas.bind("<Configure>", _on_configure)
+
+    def _section(label: str) -> None:
+        tk.Label(content, text=label, bg=_BG, fg=_FG,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16, pady=(12, 0))
+
+    def _note(text: str) -> None:
+        tk.Label(content, text=text, bg=_BG, fg="#888888",
+                 font=("Segoe UI", 8)).pack(anchor="w", padx=16, pady=(0, 4))
+
+    def _field(label: str, var) -> None:
+        tk.Label(content, text=label, bg=_BG, fg=_FG2,
+                 font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 0))
+        tk.Entry(content, textvariable=var, bg=_BG2, fg=_FG,
+                 insertbackground=_FG, relief="flat", bd=0,
+                 highlightthickness=1, highlightbackground="#3d3d3d",
+                 font=("Segoe UI", 10)).pack(fill=tk.X, padx=16, pady=(2, 0))
+
+    tk.Label(content, text="Settings", bg=_BG, fg=_FG,
+             font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=16, pady=(14, 0))
+    _note("Model and Hotkey changes require a restart.")
+
+    _section("Transcription")
+    lang_var = tk.StringVar(value=cfg.get("language", "en"))
+    _field("Language (e.g. en, fr, es)", lang_var)
+    model_var = tk.StringVar(value=cfg.get("model", "small"))
+    _field("Model (small / medium / large)  — restart required", model_var)
+
+    _section("Recording")
+    max_var = tk.StringVar(value=str(cfg.get("max_record_seconds", 120)))
+    _field("Max recording time (seconds)", max_var)
+    silence_var = tk.StringVar(value=str(cfg.get("silence_auto_stop_seconds", 3)))
+    _field("Silence auto-stop (seconds, 0 = disabled)", silence_var)
+    vad_var = tk.BooleanVar(value=bool(cfg.get("vad_filter", False)))
+    tk.Checkbutton(content, text="VAD filter (suppress background noise)",
+                   variable=vad_var, bg=_BG, fg=_FG2,
+                   activebackground=_BG, activeforeground=_FG,
+                   selectcolor=_BG2, font=("Segoe UI", 9)
+                   ).pack(anchor="w", padx=16, pady=(10, 0))
+
+    _section("Preview window")
+    pos_var = tk.StringVar(value=cfg.get("preview_position", "cursor"))
+    tk.Label(content, text="Position", bg=_BG, fg=_FG2,
+             font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 0))
+    om = tk.OptionMenu(content, pos_var, *_POSITIONS)
+    om.config(bg=_BG2, fg=_FG, activebackground=_BORDER,
+              relief="flat", highlightthickness=0, font=("Segoe UI", 10))
+    om.pack(anchor="w", padx=16, pady=(2, 0))
+
+    _section("Filler words")
+    _note("One per line — removed from every transcription.")
+    fillers_txt = tk.Text(content, bg=_BG2, fg=_FG, insertbackground=_FG,
+                          relief="flat", bd=0, highlightthickness=1,
+                          highlightbackground="#3d3d3d",
+                          font=("Segoe UI", 10), height=4, undo=True)
+    fillers_txt.insert("1.0", "\n".join(cfg.get("filler_words", [])))
+    fillers_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
+
+    _section("Custom corrections")
+    _note('One per line: "wrong → correct"  (applied immediately, no training needed)')
+    corrections_txt = tk.Text(content, bg=_BG2, fg=_FG, insertbackground=_FG,
+                               relief="flat", bd=0, highlightthickness=1,
+                               highlightbackground="#3d3d3d",
+                               font=("Segoe UI", 10), height=5, undo=True)
+    corr_dict = cfg.get("corrections", {})
+    corr_lines = "\n".join(f"{k} → {v}" for k, v in corr_dict.items())
+    corrections_txt.insert("1.0", corr_lines)
+    corrections_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
+
+    # ── Buttons ─────────────────────────────────────────────────────────────
+    btns = tk.Frame(content, bg=_BG)
+    btns.pack(anchor="w", padx=16, pady=(16, 4))
+
+    err_var = tk.StringVar()
+    tk.Label(content, textvariable=err_var, bg=_BG, fg="#cc4444",
+             font=("Segoe UI", 8)).pack(anchor="w", padx=16, pady=(0, 12))
+
+    def on_save() -> None:
+        try:
+            max_secs     = float(max_var.get())
+            silence_secs = float(silence_var.get())
+        except ValueError:
+            err_var.set("Max recording and silence fields must be numbers.")
+            return
+
+        fillers = [w.strip() for w in fillers_txt.get("1.0", "end-1c").splitlines()
+                   if w.strip()]
+
+        corrections: dict = {}
+        for line in corrections_txt.get("1.0", "end-1c").splitlines():
+            if "→" in line:
+                parts = line.split("→", 1)
+                k, v = parts[0].strip(), parts[1].strip()
+                if k:
+                    corrections[k] = v
+
+        new_cfg = dict(cfg)
+        new_cfg.update({
+            "language":                  lang_var.get().strip(),
+            "model":                     model_var.get().strip(),
+            "max_record_seconds":        max(5.0, min(300.0, max_secs)),
+            "silence_auto_stop_seconds": max(0.0, silence_secs),
+            "vad_filter":                vad_var.get(),
+            "preview_position":          pos_var.get(),
+            "filler_words":              fillers,
+            "corrections":               corrections,
+        })
+
+        try:
+            with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(new_cfg, f, indent=2, ensure_ascii=False)
+            configure_position(pos_var.get())
+            err_var.set("Saved.")
+        except Exception as exc:
+            err_var.set(f"Save failed: {exc}")
+
+    def on_close() -> None:
+        global _settings_open
+        _settings_open = False
+        win.destroy()
+
+    save_btn = tk.Button(btns, text="Save", command=on_save, width=10,
+                         bg=_BLUE, fg=_FG, activebackground=_BLUE_HV,
+                         activeforeground=_FG, relief="flat", bd=0,
+                         font=("Segoe UI", 10), padx=6, pady=4, cursor="hand2")
+    save_btn.bind("<Enter>", lambda e: save_btn.config(bg=_BLUE_HV))
+    save_btn.bind("<Leave>", lambda e: save_btn.config(bg=_BLUE))
+    save_btn.pack(side=tk.LEFT)
+
+    cancel_wrap = tk.Frame(btns, bg=_BORDER, padx=1, pady=1)
+    tk.Button(cancel_wrap, text="Cancel", command=on_close, width=10,
+              bg=_BG, fg=_FG2, activebackground=_BG2, activeforeground=_FG,
+              relief="flat", bd=0,
+              font=("Segoe UI", 10), padx=6, pady=4, cursor="hand2").pack()
+    cancel_wrap.pack(side=tk.LEFT, padx=(8, 0))
 
     win.protocol("WM_DELETE_WINDOW", on_close)
     win.bind("<Escape>", lambda _: on_close())
