@@ -1,8 +1,8 @@
 import threading
 import time
 
-import keyboard
 import pyperclip
+import win32con
 import win32gui
 
 _restore_delay_ms = 150
@@ -19,8 +19,12 @@ def capture_foreground() -> int:
 
 
 def inject_text(text: str, hwnd: int) -> None:
-    """Swap clipboard to text, restore target window focus, send Ctrl+V,
-    then restore the original clipboard contents after the configured delay."""
+    """Copy text to clipboard, refocus target window, send WM_PASTE,
+    then restore the original clipboard contents after the configured delay.
+
+    WM_PASTE bypasses the keyboard library entirely — no modifier-key state
+    contamination from the Ctrl+Alt hotkey that triggered the recording.
+    """
     if not hwnd or not win32gui.IsWindow(hwnd):
         return
     original = pyperclip.paste()
@@ -29,8 +33,8 @@ def inject_text(text: str, hwnd: int) -> None:
         win32gui.SetForegroundWindow(hwnd)
     except Exception:
         pass
-    time.sleep(0.08)  # allow focus switch before keystrokes arrive
-    keyboard.send("ctrl+v")
+    time.sleep(0.08)  # allow focus switch before message arrives
+    win32gui.PostMessage(hwnd, win32con.WM_PASTE, 0, 0)
 
     def _restore():
         time.sleep(_restore_delay_ms / 1000)

@@ -5,7 +5,7 @@ States
 ------
 loading    grey   — Whisper model is downloading / initialising
 idle       green  — ready, waiting for hotkey
-recording  red    — mic is active
+recording  red    — mic is active (icon pulses)
 processing yellow — transcribing audio
 """
 
@@ -17,12 +17,12 @@ from PIL import Image, ImageDraw
 
 _state = "loading"
 _icon: pystray.Icon | None = None
-_on_view_history = None
-_on_toggle_pause = None
+_on_view_history  = None
+_on_toggle_pause  = None
+_on_view_profile  = None
 _paused = False
 _lock = threading.Lock()
 
-# Shown in the greyed-out status menu item
 _LABELS = {
     "loading":    "Loading model...",
     "idle":       "Idle — ready to dictate",
@@ -30,7 +30,6 @@ _LABELS = {
     "processing": "Processing...",
 }
 
-# Shown as the tray tooltip on hover
 _TOOLTIPS = {
     "loading":    "VoiceDictate — Loading...",
     "idle":       "VoiceDictate — Ready",
@@ -39,15 +38,15 @@ _TOOLTIPS = {
 }
 
 _BG = {
-    "loading":    (110, 110, 110),
-    "idle":       (30,  140,  30),
-    "recording":  (200,  30,  30),
-    "processing": (200, 160,   0),
+    "loading":      (110, 110, 110),
+    "idle":         (30,  140,  30),
+    "recording":    (210,  30,  30),
+    "recording_dim":(140,  18,  18),
+    "processing":   (200, 160,   0),
 }
 
 
 def _make_icon(bg: tuple) -> Image.Image:
-    """64×64 RGBA icon: coloured circle with a white microphone silhouette."""
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -62,12 +61,44 @@ def _make_icon(bg: tuple) -> Image.Image:
 
 _ICONS = {state: _make_icon(bg) for state, bg in _BG.items()}
 
+# Pulse state
+_pulse_timer: threading.Timer | None = None
+_pulse_bright = True
 
-def configure(on_view_history, on_toggle_pause=None) -> None:
-    """Wire optional callbacks before calling run()."""
-    global _on_view_history, _on_toggle_pause
+
+def _pulse_step() -> None:
+    global _pulse_timer, _pulse_bright
+    if _state != "recording" or _icon is None:
+        return
+    _pulse_bright = not _pulse_bright
+    key = "recording" if _pulse_bright else "recording_dim"
+    try:
+        _icon.icon = _ICONS[key]
+    except Exception:
+        pass
+    _pulse_timer = threading.Timer(0.6, _pulse_step)
+    _pulse_timer.daemon = True
+    _pulse_timer.start()
+
+
+def _start_pulse() -> None:
+    global _pulse_bright
+    _pulse_bright = True
+    _pulse_step()
+
+
+def _stop_pulse() -> None:
+    global _pulse_timer
+    if _pulse_timer:
+        _pulse_timer.cancel()
+        _pulse_timer = None
+
+
+def configure(on_view_history, on_toggle_pause=None, on_view_profile=None) -> None:
+    global _on_view_history, _on_toggle_pause, _on_view_profile
     _on_view_history = on_view_history
     _on_toggle_pause = on_toggle_pause
+    _on_view_profile = on_view_profile
 
 
 def _label() -> str:
@@ -75,27 +106,31 @@ def _label() -> str:
 
 
 def set_state(state: str) -> None:
-    """Update icon colour and tooltip. Safe to call from any thread."""
     global _state
     with _lock:
+        prev = _state
         _state = state
+        if state != "recording" and prev == "recording":
+            _stop_pulse()
         if _icon is not None:
-            _icon.icon = _ICONS[state]
+            if state == "recording":
+                _icon.icon = _ICONS["recording"]
+                _start_pulse()
+            else:
+                _icon.icon = _ICONS.get(state, _ICONS["idle"])
             _icon.title = _TOOLTIPS.get(state, f"VoiceDictate — {state}")
             _icon.update_menu()
 
 
 def notify(title: str, message: str) -> None:
-    """Show a Windows tray notification. Safe to call from any thread."""
     if _icon is not None:
         try:
             _icon.notify(message, title)
         except Exception:
-            pass  # notify unsupported on some pystray backends
+            pass
 
 
 def run() -> None:
-    """Block the calling thread on the pystray event loop."""
     global _icon
 
     def _view_history(icon, item):
@@ -115,12 +150,17 @@ def run() -> None:
         except Exception:
             pass
 
+    def _view_profile(icon, item):
+        if _on_view_profile:
+            _on_view_profile()
+
     menu = pystray.Menu(
         pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
-        pystray.MenuItem("View History", _view_history),
+        pystray.MenuItem("View History",    _view_history),
+        pystray.MenuItem("Speech Profile",  _view_profile),
         pystray.MenuItem(lambda _: "Resume" if _paused else "Pause", _toggle_pause),
-        pystray.MenuItem("Open Config", _open_config),
-        pystray.MenuItem("Quit", lambda icon, item: icon.stop()),
+        pystray.MenuItem("Open Config",     _open_config),
+        pystray.MenuItem("Quit",            lambda icon, item: icon.stop()),
     )
     _icon = pystray.Icon(
         name="dictation",

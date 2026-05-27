@@ -25,6 +25,7 @@ import history
 import hotkey
 import inject
 import preview
+import profile
 import tray
 import transcribe
 
@@ -48,8 +49,9 @@ def main() -> None:
     global _cfg
     _cfg = _load_config()
 
+    profile.init()
     inject.configure(restore_delay_ms=_cfg["clipboard_restore_delay_ms"])
-    preview.start()  # spin up tkinter worker thread
+    preview.start()
 
     # ------------------------------------------------------------------
     # Callbacks wired between audio → transcription → preview → inject
@@ -58,31 +60,33 @@ def main() -> None:
     def _run_transcription(chunks: list, hwnd: int) -> None:
         cfg = _get_cfg()
         try:
-            text = transcribe.run(
+            text, confidence = transcribe.run(
                 chunks,
                 language=cfg["language"],
                 min_seconds=cfg["min_record_seconds"],
                 filler_words=cfg["filler_words"],
                 vad_filter=cfg.get("vad_filter", False),
+                profile_rules=profile.get_active_rules(),
             )
         except Exception as exc:
             msg = f"Transcription error: {exc}"
             print(msg)
             tray.notify("VoiceDictate", msg)
             tray.set_state("idle")
+            preview.hide_badge()
             return
         tray.set_state("idle")
+        preview.hide_badge()
         if text is None:
-            return  # recording was too short — discard silently
+            return
         if text.strip():
             history.save(text.strip())
-        preview.show(text, hwnd, empty=not text.strip())
+        preview.show(text, hwnd, empty=not text.strip(), confidence=confidence)
 
     def _on_audio_stop(chunks: list) -> None:
-        # Called synchronously from the hotkey thread the instant the user
-        # releases the hotkey — capture the target window before anything moves.
         hwnd = inject.capture_foreground()
         tray.set_state("processing")
+        preview.show_badge("processing")
         threading.Thread(
             target=_run_transcription,
             args=(chunks, hwnd),
@@ -91,6 +95,7 @@ def main() -> None:
 
     def _on_recording_start() -> None:
         tray.set_state("recording")
+        preview.show_badge("recording")
         audio.start()
 
     # ------------------------------------------------------------------
@@ -99,7 +104,7 @@ def main() -> None:
 
     audio.configure(
         on_stop=_on_audio_stop,
-        max_duration_seconds=_cfg.get("max_record_seconds", 60),
+        max_duration_seconds=_cfg.get("max_record_seconds", 120),
     )
 
     hotkey.configure(
@@ -112,7 +117,7 @@ def main() -> None:
     hotkey.start()
 
     # ------------------------------------------------------------------
-    # Model loading — background thread, flips tray to idle when done
+    # Model loading
     # ------------------------------------------------------------------
 
     def _load_model() -> None:
@@ -130,7 +135,7 @@ def main() -> None:
     threading.Thread(target=_load_model, daemon=True).start()
 
     # ------------------------------------------------------------------
-    # Config hot-reload — polls every 30 s; reloads safe fields only
+    # Config hot-reload
     # ------------------------------------------------------------------
 
     def _reload_config() -> None:
@@ -147,7 +152,7 @@ def main() -> None:
                 restore_delay_ms=fresh.get("clipboard_restore_delay_ms", 150)
             )
         except Exception:
-            pass  # keep running with last good config
+            pass
         t = threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config)
         t.daemon = True
         t.start()
@@ -163,9 +168,10 @@ def main() -> None:
     tray.configure(
         on_view_history=preview.show_history,
         on_toggle_pause=hotkey.set_paused,
+        on_view_profile=preview.show_profile,
     )
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
-    tray.run()  # blocks until user clicks Quit
+    tray.run()
 
 
 if __name__ == "__main__":
