@@ -105,6 +105,7 @@ def main() -> None:
 
     def _run_transcription(chunks: list, hwnd: int) -> None:
         cfg = _get_cfg()
+        text, confidence = None, None
         try:
             text, confidence = transcribe.run(
                 chunks,
@@ -119,11 +120,9 @@ def main() -> None:
             msg = f"Transcription error: {exc}"
             print(msg)
             tray.notify("VoiceDictate", msg)
+        finally:
             tray.set_state("idle")
             preview.hide_badge()
-            return
-        tray.set_state("idle")
-        preview.hide_badge()
         if text is None:
             return
         if text.strip():

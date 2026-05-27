@@ -24,10 +24,11 @@ class TestSilenceDetection:
     def setup_method(self):
         """Reset audio module state before each test."""
         audio._recording_event.clear()
-        audio._session_chunks = []
-        audio._had_voice      = False
-        audio._last_voice_t   = 0.0
-        audio._on_stop        = None
+        audio._session_chunks    = []
+        audio._had_voice         = False
+        audio._last_voice_t      = 0.0
+        audio._silence_triggered = False
+        audio._on_stop           = None
         audio._silence_timeout   = 3.0
         audio._silence_threshold = 0.01
 

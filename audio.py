@@ -19,8 +19,9 @@ _silence_timeout    = 3.0
 _silence_threshold  = 0.01
 
 # Silence tracking — written only from the sounddevice callback thread
-_had_voice     = False
-_last_voice_t  = 0.0
+_had_voice       = False
+_last_voice_t    = 0.0
+_silence_triggered = False  # prevents spawning multiple stop threads
 
 
 def configure(on_stop, max_duration_seconds: float = 120.0,
@@ -38,13 +39,14 @@ def is_recording() -> bool:
 
 
 def start() -> None:
-    global _session_chunks, _stream, _timer, _had_voice, _last_voice_t
+    global _session_chunks, _stream, _timer, _had_voice, _last_voice_t, _silence_triggered
     with _lock:
         if _recording_event.is_set():
             return
-        _session_chunks = []
-        _had_voice      = False
-        _last_voice_t   = time.time()
+        _session_chunks    = []
+        _had_voice         = False
+        _last_voice_t      = time.time()
+        _silence_triggered = False
         _recording_event.set()
 
     _stream = sd.InputStream(
@@ -86,7 +88,7 @@ def stop() -> None:
 
 
 def _callback(indata, frames, time_info, status) -> None:
-    global _had_voice, _last_voice_t
+    global _had_voice, _last_voice_t, _silence_triggered
     if not _recording_event.is_set() or _session_chunks is None:
         return
     _session_chunks.append(indata.copy())
@@ -95,8 +97,9 @@ def _callback(indata, frames, time_info, status) -> None:
     if _silence_timeout > 0:
         rms = float(np.sqrt(np.mean(indata ** 2)))
         if rms > _silence_threshold:
-            _had_voice    = True
-            _last_voice_t = time.time()
-        elif _had_voice and (time.time() - _last_voice_t) > _silence_timeout:
-            # Spawn stop() off the callback thread to avoid deadlock
+            _had_voice         = True
+            _last_voice_t      = time.time()
+            _silence_triggered = False
+        elif _had_voice and not _silence_triggered and (time.time() - _last_voice_t) > _silence_timeout:
+            _silence_triggered = True
             threading.Thread(target=stop, daemon=True).start()
