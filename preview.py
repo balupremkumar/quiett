@@ -118,10 +118,14 @@ def _tick() -> None:
         try:
             item = _preview_q.get_nowait()
             _preview_open = True
-            _open_window(
-                item["text"], item["hwnd"],
-                item.get("empty", False), item.get("confidence"),
-            )
+            try:
+                _open_window(
+                    item["text"], item["hwnd"],
+                    item.get("empty", False), item.get("confidence"),
+                )
+            except Exception as e:
+                print(f"preview window error: {e}")
+                _preview_open = False
         except queue.Empty:
             pass
 
@@ -149,11 +153,14 @@ def _tick() -> None:
         except queue.Empty:
             pass
 
-    try:
-        badge_cmd = _badge_q.get_nowait()
-        _handle_badge(badge_cmd)
-    except queue.Empty:
-        pass
+    # Drain the entire badge queue each tick so a late "processing" item
+    # cannot reappear after a None already cleared the badge.
+    while True:
+        try:
+            badge_cmd = _badge_q.get_nowait()
+            _handle_badge(badge_cmd)
+        except queue.Empty:
+            break
 
     _root.after(50, _tick)
 
@@ -168,11 +175,29 @@ _BADGE_CFG = {
 }
 
 
+def _badge_alive() -> bool:
+    """Return True only if _badge_win is a live Tkinter window."""
+    global _badge_win, _badge_label, _badge_dot
+    if _badge_win is None:
+        return False
+    try:
+        _badge_win.winfo_exists()  # raises TclError if already destroyed
+        return True
+    except Exception:
+        _badge_win = None
+        _badge_label = None
+        _badge_dot = None
+        return False
+
+
 def _handle_badge(cmd: str | None) -> None:
     global _badge_win, _badge_label, _badge_dot
     if cmd is None:
-        if _badge_win is not None:
-            _badge_win.destroy()
+        if _badge_alive():
+            try:
+                _badge_win.destroy()
+            except Exception:
+                pass
             _badge_win = None
             _badge_label = None
             _badge_dot = None
@@ -180,7 +205,7 @@ def _handle_badge(cmd: str | None) -> None:
 
     cfg = _BADGE_CFG.get(cmd, _BADGE_CFG["processing"])
 
-    if _badge_win is None:
+    if not _badge_alive():
         _badge_win = tk.Toplevel(_root)
         _badge_win.overrideredirect(True)
         _badge_win.attributes("-topmost", True)
@@ -205,10 +230,13 @@ def _handle_badge(cmd: str | None) -> None:
         sh = _badge_win.winfo_screenheight()
         _badge_win.geometry(f"{w}x{h}+{sw - w - 16}+{sh - h - 56}")
     else:
-        if _badge_dot:
-            _badge_dot.config(fg=cfg["dot"])
-        if _badge_label:
-            _badge_label.config(text=cfg["text"])
+        try:
+            if _badge_dot:
+                _badge_dot.config(fg=cfg["dot"])
+            if _badge_label:
+                _badge_label.config(text=cfg["text"])
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +421,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
     # Redo bindings (Tkinter Text only auto-binds Ctrl+Z for undo)
     entry.bind("<Control-y>",       lambda e: (entry.edit_redo(), "break")[1])
-    entry.bind("<Control-shift-z>", lambda e: (entry.edit_redo(), "break")[1])
+    entry.bind("<Control-Shift-z>", lambda e: (entry.edit_redo(), "break")[1])
 
     win.bind("<Escape>", lambda _: on_cancel())
     win.protocol("WM_DELETE_WINDOW", on_cancel)
