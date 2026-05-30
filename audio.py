@@ -17,21 +17,38 @@ _lock = threading.Lock()
 _max_duration       = 120.0
 _silence_timeout    = 3.0
 _silence_threshold  = 0.01
+_input_device       = None  # None = system default; int or str (device name/index)
 
 # Silence tracking — written only from the sounddevice callback thread
 _had_voice       = False
 _last_voice_t    = 0.0
 _silence_triggered = False  # prevents spawning multiple stop threads
 
+_start_time: float = 0.0
+
 
 def configure(on_stop, max_duration_seconds: float = 120.0,
               silence_timeout_seconds: float = 3.0,
-              silence_threshold: float = 0.01) -> None:
-    global _on_stop, _max_duration, _silence_timeout, _silence_threshold
+              silence_threshold: float = 0.01,
+              input_device=None) -> None:
+    global _on_stop, _max_duration, _silence_timeout, _silence_threshold, _input_device
     _on_stop           = on_stop
     _max_duration      = max_duration_seconds
     _silence_timeout   = silence_timeout_seconds
     _silence_threshold = silence_threshold
+    _input_device      = input_device
+
+
+def list_input_devices() -> list[dict]:
+    """Return [{index, name}] for input-capable devices."""
+    out = []
+    try:
+        for i, d in enumerate(sd.query_devices()):
+            if d.get("max_input_channels", 0) > 0:
+                out.append({"index": i, "name": d.get("name", f"Device {i}")})
+    except Exception:
+        pass
+    return out
 
 
 def is_recording() -> bool:
@@ -39,12 +56,13 @@ def is_recording() -> bool:
 
 
 def start() -> None:
-    global _session_chunks, _stream, _timer, _had_voice, _last_voice_t, _silence_triggered
+    global _session_chunks, _stream, _timer, _had_voice, _last_voice_t, _silence_triggered, _start_time
     with _lock:
         if _recording_event.is_set():
             return
         _session_chunks    = []
         _had_voice         = False
+        _start_time        = time.time()
         _last_voice_t      = time.time()
         _silence_triggered = False
         _recording_event.set()
@@ -53,6 +71,7 @@ def start() -> None:
         samplerate=SAMPLE_RATE,
         channels=1,
         dtype="float32",
+        device=_input_device,
         callback=_callback,
     )
     _stream.start()
@@ -85,6 +104,45 @@ def stop() -> None:
     threading.Thread(target=winsound.Beep, args=(500, 150), daemon=True).start()
     if _on_stop and captured is not None:
         _on_stop(captured)
+
+
+def cancel() -> None:
+    """Stop recording silently — no transcription triggered (used for too-short presses)."""
+    global _stream, _timer
+    with _lock:
+        if not _recording_event.is_set():
+            return
+        _recording_event.clear()
+        t = _timer
+        _timer = None
+    if t:
+        t.cancel()
+    s = _stream
+    _stream = None
+    if s:
+        try:
+            s.stop()
+            s.close()
+        except Exception:
+            pass
+
+
+def get_elapsed() -> float:
+    """Seconds since recording started. 0 if not recording."""
+    if not _recording_event.is_set():
+        return 0.0
+    return time.time() - _start_time
+
+
+def get_silence_elapsed() -> float:
+    """Seconds of continuous silence since last voice detected. 0 if none."""
+    if not _recording_event.is_set() or not _had_voice:
+        return 0.0
+    return max(0.0, time.time() - _last_voice_t)
+
+
+def get_silence_timeout() -> float:
+    return _silence_timeout
 
 
 def _callback(indata, frames, time_info, status) -> None:

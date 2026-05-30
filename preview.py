@@ -9,12 +9,14 @@ Queues are polled every 50 ms so all windows can coexist simultaneously.
 import json
 import queue
 import threading
+import time
 import tkinter as tk
 from datetime import date, datetime
 
 import pyperclip
 import win32api
 
+import audio
 import history as hist
 import inject
 import profile
@@ -38,8 +40,13 @@ _history_open  = False
 _profile_open  = False
 _settings_open = False
 
+_current_preview_win: tk.Toplevel | None = None  # live preview window reference
+
 # Preview position: "cursor" | "top-right" | "bottom-right" | "top-left" | "bottom-left"
 _preview_position = "cursor"
+
+# Re-record callback — set by main.py
+_on_rerecord = None
 
 # Dark-theme palette
 _BG      = "#1e1e1e"
@@ -59,10 +66,13 @@ def start() -> None:
 
 
 def show(text: str, hwnd: int, empty: bool = False,
-         confidence: float | None = None) -> None:
+         confidence: float | None = None,
+         words: list | None = None,
+         auto_dismiss: float = 0.0) -> None:
     """Queue a dictation preview window."""
     _preview_q.put({"text": text, "hwnd": hwnd, "empty": empty,
-                    "confidence": confidence})
+                    "confidence": confidence, "words": words,
+                    "auto_dismiss": auto_dismiss})
 
 
 def show_history() -> None:
@@ -74,7 +84,7 @@ def show_profile() -> None:
 
 
 def show_badge(state: str) -> None:
-    """Show the recording/processing status badge. state: 'recording'|'processing'"""
+    """Show the recording/processing status badge. state: 'recording'|'processing'|'too_short'|'not_ready'"""
     _badge_q.put(state)
 
 
@@ -93,6 +103,12 @@ def configure_position(position: str) -> None:
     _preview_position = position
 
 
+def set_rerecord_callback(fn) -> None:
+    """Set the callback invoked when user presses Ctrl+R in the preview panel."""
+    global _on_rerecord
+    _on_rerecord = fn
+
+
 # ---------------------------------------------------------------------------
 # Internal — everything below runs exclusively on the tkinter worker thread
 # ---------------------------------------------------------------------------
@@ -109,24 +125,64 @@ def _tk_main() -> None:
 _badge_win:   tk.Toplevel | None = None
 _badge_label: tk.Label | None = None
 _badge_dot:   tk.Label | None = None
+_badge_state: str | None = None
 
 
 def _tick() -> None:
     global _preview_open, _history_open, _profile_open, _settings_open
+    global _current_preview_win
 
-    if not _preview_open:
+    # Drain the entire preview queue — keep only the latest item.
+    # If a new transcription arrives while a preview is open, replace it.
+    latest_preview = None
+    while True:
         try:
-            item = _preview_q.get_nowait()
+            latest_preview = _preview_q.get_nowait()
+        except queue.Empty:
+            break
+
+    if latest_preview is not None:
+        # Close existing preview (replace-in-place instead of queuing behind it)
+        if _preview_open and _current_preview_win is not None:
+            try:
+                _current_preview_win.destroy()
+            except Exception:
+                pass
+            _preview_open = False
+            _current_preview_win = None
+
+        if not _preview_open:
             _preview_open = True
             try:
                 _open_window(
-                    item["text"], item["hwnd"],
-                    item.get("empty", False), item.get("confidence"),
+                    latest_preview["text"], latest_preview["hwnd"],
+                    latest_preview.get("empty", False),
+                    latest_preview.get("confidence"),
+                    latest_preview.get("auto_dismiss", 0.0),
+                    latest_preview.get("words"),
                 )
             except Exception as e:
                 print(f"preview window error: {e}")
                 _preview_open = False
-        except queue.Empty:
+
+    # Live-update badge text when recording
+    if _badge_state == "recording" and _badge_alive():
+        try:
+            elapsed  = int(audio.get_elapsed())
+            silence  = audio.get_silence_elapsed()
+            timeout  = audio.get_silence_timeout()
+            if timeout > 0 and silence > 1.5:
+                remaining = max(0.0, timeout - silence)
+                new_text = f"Silence... {remaining:.0f}s"
+                new_dot  = "#c8a000"
+            else:
+                new_text = f"Recording... {elapsed}s"
+                new_dot  = "#e03030"
+            if _badge_label and _badge_label.cget("text") != new_text:
+                _badge_label.config(text=new_text)
+            if _badge_dot and _badge_dot.cget("fg") != new_dot:
+                _badge_dot.config(fg=new_dot)
+        except Exception:
             pass
 
     if not _history_open:
@@ -166,12 +222,14 @@ def _tick() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Status badge (recording / processing)
+# Status badge (recording / processing / feedback)
 # ---------------------------------------------------------------------------
 
 _BADGE_CFG = {
     "recording":  {"dot": "#e03030", "text": "Recording..."},
     "processing": {"dot": "#c8a000", "text": "Transcribing..."},
+    "too_short":  {"dot": "#888888", "text": "Hold longer to record"},
+    "not_ready":  {"dot": "#888888", "text": "Model loading — please wait"},
 }
 
 
@@ -191,7 +249,9 @@ def _badge_alive() -> bool:
 
 
 def _handle_badge(cmd: str | None) -> None:
-    global _badge_win, _badge_label, _badge_dot
+    global _badge_win, _badge_label, _badge_dot, _badge_state
+    _badge_state = cmd
+
     if cmd is None:
         if _badge_alive():
             try:
@@ -268,13 +328,18 @@ def _border_colour(confidence: float | None) -> str:
 
 
 def _open_window(text: str, hwnd: int, empty: bool = False,
-                 confidence: float | None = None) -> None:
+                 confidence: float | None = None,
+                 auto_dismiss: float = 0.0,
+                 words: list | None = None) -> None:
+    global _current_preview_win
+
     try:
         cx, cy = win32api.GetCursorPos()
     except Exception:
         cx, cy = 200, 200
 
     win = tk.Toplevel(_root)
+    _current_preview_win = win
     win.overrideredirect(True)
     win.configure(bg=_BG)
     win.attributes("-topmost", True)
@@ -300,6 +365,25 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         entry.tag_add("sel", "1.0", "end-1c")
         entry.mark_set(tk.INSERT, tk.END)
     entry.focus_set()
+
+    # Word-level confidence highlighting (low-prob words tinted red/amber)
+    if words and not empty:
+        entry.tag_configure("conf_low",    foreground="#ff6b6b")
+        entry.tag_configure("conf_medium", foreground="#e8c547")
+        search_start = "1.0"
+        for w in words:
+            wtext = (w.get("text") or "").strip()
+            if not wtext:
+                continue
+            prob = w.get("prob", 1.0)
+            if prob >= 0.7:
+                continue
+            tag = "conf_low" if prob < 0.4 else "conf_medium"
+            idx = entry.search(wtext, search_start, tk.END, nocase=True)
+            if idx:
+                end = f"{idx}+{len(wtext)}c"
+                entry.tag_add(tag, idx, end)
+                search_start = end
 
     # ── Confidence hint ────────────────────────────────────────────────────
     if confidence is not None and not empty:
@@ -350,9 +434,13 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     btns.pack(anchor=tk.W)
 
     def _close() -> None:
-        global _preview_open
+        global _preview_open, _current_preview_win
         _preview_open = False
-        win.destroy()
+        _current_preview_win = None
+        try:
+            win.destroy()
+        except Exception:
+            pass
 
     def on_insert() -> None:
         result = entry.get("1.0", "end-1c").rstrip()
@@ -406,8 +494,9 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         cancel_wrap.pack(side=tk.LEFT, padx=(8, 0))
 
     # ── Keyboard hint strip ────────────────────────────────────────────────
+    hint = "↵ / Ins Insert  ·  Esc Cancel  ·  Ctrl+R Re-record  ·  Ctrl+Z Undo  ·  Shift+↵ Newline"
     tk.Label(
-        frame, text="↵ Insert  ·  Esc Cancel  ·  Ctrl+Z Undo  ·  Shift+↵ Newline",
+        frame, text=hint,
         bg=_BG, fg="#555555", font=("Segoe UI", 8), anchor="w",
     ).pack(fill=tk.X, pady=(8, 0))
 
@@ -416,12 +505,22 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         def _on_return(e):
             on_insert()
             return "break"
-        entry.bind("<Return>", _on_return)
-        entry.bind("<Shift-Return>", lambda e: None)  # allow literal newline via default
+        entry.bind("<Return>",  _on_return)
+        entry.bind("<Insert>",  _on_return)   # Insert key also pastes
+        entry.bind("<Shift-Return>", lambda e: None)  # allow literal newline
 
     # Redo bindings (Tkinter Text only auto-binds Ctrl+Z for undo)
     entry.bind("<Control-y>",       lambda e: (entry.edit_redo(), "break")[1])
     entry.bind("<Control-Shift-z>", lambda e: (entry.edit_redo(), "break")[1])
+
+    # Ctrl+R — close preview and start a new recording
+    def _on_rerecord_key(e):
+        on_cancel()
+        if _on_rerecord:
+            _root.after(200, _on_rerecord)
+        return "break"
+    entry.bind("<Control-r>", _on_rerecord_key)
+    win.bind("<Control-r>",   _on_rerecord_key)
 
     win.bind("<Escape>", lambda _: on_cancel())
     win.protocol("WM_DELETE_WINDOW", on_cancel)
@@ -445,6 +544,10 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
     x, y = _calc_position(cx, cy, w, h, sw, sh, _preview_position)
     win.geometry(f"{w}x{h}+{x}+{y}")
+
+    # ── Auto-dismiss ───────────────────────────────────────────────────────
+    if auto_dismiss > 0:
+        win.after(int(auto_dismiss * 1000), _close)
 
 
 # ---------------------------------------------------------------------------
@@ -668,8 +771,8 @@ def _open_settings() -> None:
     win = tk.Toplevel(_root)
     win.title("VoiceDictate — Settings")
     win.configure(bg=_BG)
-    win.geometry("500x560")
-    win.minsize(420, 460)
+    win.geometry("520x780")
+    win.minsize(440, 520)
     win.resizable(True, True)
 
     canvas = tk.Canvas(win, bg=_BG, highlightthickness=0)
@@ -708,20 +811,73 @@ def _open_settings() -> None:
              font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=16, pady=(14, 0))
     _note("Model and Hotkey changes require a restart.")
 
+    _section("Hotkey")
+    hotkey_var = tk.StringVar(value=cfg.get("hotkey", "ctrl+alt"))
+    _field("Hotkey combo (e.g. ctrl+alt, ctrl+shift, alt+space)", hotkey_var)
+    _note("Hot-reloads on save. Use lowercase modifier names joined with '+'.")
+
     _section("Transcription")
     lang_var = tk.StringVar(value=cfg.get("language", "en"))
     _field("Language (e.g. en, fr, es)", lang_var)
     model_var = tk.StringVar(value=cfg.get("model", "small"))
-    _field("Model (small / medium / large)  — restart required", model_var)
+    _field("Model (tiny / base / small / medium / large)  — restart required", model_var)
+
+    _section("Whisper biasing")
+    _note("initial_prompt seeds Whisper with context — improves accuracy for domain terms.")
+    prompt_txt = tk.Text(content, bg=_BG2, fg=_FG, insertbackground=_FG,
+                         relief="flat", bd=0, highlightthickness=1,
+                         highlightbackground="#3d3d3d",
+                         font=("Segoe UI", 10), height=3, undo=True)
+    prompt_txt.insert("1.0", cfg.get("initial_prompt", "") or "")
+    prompt_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
+
+    _note("Custom vocabulary — one term per line. Fed into initial_prompt as a hint.")
+    vocab_txt = tk.Text(content, bg=_BG2, fg=_FG, insertbackground=_FG,
+                        relief="flat", bd=0, highlightthickness=1,
+                        highlightbackground="#3d3d3d",
+                        font=("Segoe UI", 10), height=4, undo=True)
+    vocab_txt.insert("1.0", "\n".join(cfg.get("custom_vocabulary", []) or []))
+    vocab_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
 
     _section("Recording")
     max_var = tk.StringVar(value=str(cfg.get("max_record_seconds", 120)))
     _field("Max recording time (seconds)", max_var)
     silence_var = tk.StringVar(value=str(cfg.get("silence_auto_stop_seconds", 3)))
     _field("Silence auto-stop (seconds, 0 = disabled)", silence_var)
+    sthresh_var = tk.StringVar(value=str(cfg.get("silence_threshold", 0.01)))
+    _field("Silence threshold (RMS, 0.001-0.5, lower = more sensitive)", sthresh_var)
     vad_var = tk.BooleanVar(value=bool(cfg.get("vad_filter", False)))
     tk.Checkbutton(content, text="VAD filter (suppress background noise)",
                    variable=vad_var, bg=_BG, fg=_FG2,
+                   activebackground=_BG, activeforeground=_FG,
+                   selectcolor=_BG2, font=("Segoe UI", 9)
+                   ).pack(anchor="w", padx=16, pady=(10, 0))
+
+    # ── Microphone dropdown ────────────────────────────────────────────────
+    _section("Microphone")
+    try:
+        devices = audio.list_input_devices()
+    except Exception:
+        devices = []
+    dev_labels = ["System default"] + [f"[{d['index']}] {d['name']}" for d in devices]
+    current_dev = cfg.get("input_device")
+    if current_dev is None:
+        current_label = "System default"
+    else:
+        match = next((f"[{d['index']}] {d['name']}" for d in devices
+                      if d["index"] == current_dev), "System default")
+        current_label = match
+    mic_var = tk.StringVar(value=current_label)
+    mic_om = tk.OptionMenu(content, mic_var, *dev_labels)
+    mic_om.config(bg=_BG2, fg=_FG, activebackground=_BORDER,
+                  relief="flat", highlightthickness=0, font=("Segoe UI", 10))
+    mic_om.pack(anchor="w", padx=16, pady=(2, 0), fill=tk.X)
+
+    # ── Privacy ────────────────────────────────────────────────────────────
+    _section("Privacy")
+    history_paused_var = tk.BooleanVar(value=bool(cfg.get("history_paused", False)))
+    tk.Checkbutton(content, text="Pause history — don't save transcriptions",
+                   variable=history_paused_var, bg=_BG, fg=_FG2,
                    activebackground=_BG, activeforeground=_FG,
                    selectcolor=_BG2, font=("Segoe UI", 9)
                    ).pack(anchor="w", padx=16, pady=(10, 0))
@@ -734,6 +890,12 @@ def _open_settings() -> None:
     om.config(bg=_BG2, fg=_FG, activebackground=_BORDER,
               relief="flat", highlightthickness=0, font=("Segoe UI", 10))
     om.pack(anchor="w", padx=16, pady=(2, 0))
+
+    auto_dismiss_var = tk.StringVar(value=str(cfg.get("preview_auto_dismiss_seconds", 0)))
+    _field("Auto-dismiss after (seconds, 0 = never)", auto_dismiss_var)
+
+    auto_paste_var = tk.StringVar(value=str(cfg.get("auto_paste_threshold", 0.0)))
+    _field("Auto-paste threshold 0–1 (skip preview when confidence ≥ this, 0 = always show)", auto_paste_var)
 
     _section("Filler words")
     _note("One per line — removed from every transcription.")
@@ -765,10 +927,13 @@ def _open_settings() -> None:
 
     def on_save() -> None:
         try:
-            max_secs     = float(max_var.get())
-            silence_secs = float(silence_var.get())
+            max_secs      = float(max_var.get())
+            silence_secs  = float(silence_var.get())
+            sthresh       = float(sthresh_var.get())
+            dismiss_secs  = float(auto_dismiss_var.get())
+            paste_thresh  = float(auto_paste_var.get())
         except ValueError:
-            err_var.set("Max recording and silence fields must be numbers.")
+            err_var.set("Numeric fields must be numbers.")
             return
 
         fillers = [w.strip() for w in fillers_txt.get("1.0", "end-1c").splitlines()
@@ -782,16 +947,37 @@ def _open_settings() -> None:
                 if k:
                     corrections[k] = v
 
+        vocab = [w.strip() for w in vocab_txt.get("1.0", "end-1c").splitlines()
+                 if w.strip()]
+
+        # Parse mic selection back to device index (or None for default)
+        sel = mic_var.get()
+        if sel == "System default":
+            mic_idx = None
+        else:
+            try:
+                mic_idx = int(sel.split("]")[0].lstrip("["))
+            except Exception:
+                mic_idx = None
+
         new_cfg = dict(cfg)
         new_cfg.update({
-            "language":                  lang_var.get().strip(),
-            "model":                     model_var.get().strip(),
-            "max_record_seconds":        max(5.0, min(300.0, max_secs)),
-            "silence_auto_stop_seconds": max(0.0, silence_secs),
-            "vad_filter":                vad_var.get(),
-            "preview_position":          pos_var.get(),
-            "filler_words":              fillers,
-            "corrections":               corrections,
+            "hotkey":                      hotkey_var.get().strip() or "ctrl+alt",
+            "language":                    lang_var.get().strip(),
+            "model":                       model_var.get().strip(),
+            "max_record_seconds":          max(5.0, min(300.0, max_secs)),
+            "silence_auto_stop_seconds":   max(0.0, silence_secs),
+            "silence_threshold":           max(0.001, min(0.5, sthresh)),
+            "vad_filter":                  vad_var.get(),
+            "preview_position":            pos_var.get(),
+            "preview_auto_dismiss_seconds": max(0.0, dismiss_secs),
+            "auto_paste_threshold":        max(0.0, min(1.0, paste_thresh)),
+            "filler_words":                fillers,
+            "corrections":                 corrections,
+            "initial_prompt":              prompt_txt.get("1.0", "end-1c").strip(),
+            "custom_vocabulary":           vocab,
+            "input_device":                mic_idx,
+            "history_paused":              history_paused_var.get(),
         })
 
         try:

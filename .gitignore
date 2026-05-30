@@ -20,6 +20,11 @@ inspect/
 
 # Runtime data
 history.json
+app.log
+app.log.*
+run.log
+stdout.txt
+stderr.txt
 
 # Claude
 .claude/worktrees/

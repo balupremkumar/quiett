@@ -37,5 +37,9 @@ def _load() -> list:
 
 
 def _write(entries: list) -> None:
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+    tmp = HISTORY_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(entries, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, HISTORY_FILE)

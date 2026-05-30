@@ -9,5 +9,8 @@
   "vad_filter": false,
   "corrections": {},
   "silence_auto_stop_seconds": 3,
-  "preview_position": "cursor"
+  "preview_position": "cursor",
+  "initial_prompt": "",
+  "custom_vocabulary": [],
+  "input_device": null
 }
