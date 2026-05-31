@@ -13,5 +13,7 @@
   "initial_prompt": "",
   "custom_vocabulary": [],
   "input_device": null,
-  "per_app_paste": {}
+  "per_app_paste": {},
+  "vibe_mode": false,
+  "vibe_mode_backend": "api"
 }

@@ -26,6 +26,7 @@ import hotkey
 import inject
 import preview
 import profile
+import reformat
 import tray
 import transcribe
 from logger import log, error as log_error
@@ -56,6 +57,8 @@ _CONFIG_DEFAULTS = {
     "history_paused":              False,
     "silence_threshold":           0.01,
     "per_app_paste":               {},
+    "vibe_mode":                   False,
+    "vibe_mode_backend":           "api",
 }
 
 _VALID_POSITIONS = {"cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"}
@@ -175,12 +178,26 @@ def main() -> None:
                 and confidence >= threshold and text.strip()):
             inject.inject_text(text.strip(), hwnd)
             return
+
+        # Vibe mode: reformat raw Whisper text into a structured coding prompt.
+        # raw_text preserved so the preview Raw toggle can show the original.
+        raw_text = text
+        if cfg.get("vibe_mode") and text.strip() and reformat.is_ready():
+            preview.show_badge("reformatting")
+            try:
+                text = reformat.run(text)
+            except Exception as exc:
+                log_error("main", f"reformat error: {exc}")
+            finally:
+                preview.hide_badge()
+
         preview.show(
             text, hwnd,
             empty=not text.strip(),
             confidence=confidence,
             words=words,
             auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
+            raw=raw_text if cfg.get("vibe_mode") and raw_text != text else None,
         )
 
     def _on_audio_stop(chunks: list) -> None:
@@ -265,6 +282,11 @@ def main() -> None:
         tray.notify("VoiceDictate", "Model load failed after 3 attempts. Check app.log.")
 
     threading.Thread(target=_load_model, daemon=True).start()
+
+    def _load_reformat() -> None:
+        reformat.load(backend=_cfg.get("vibe_mode_backend", "api"))
+
+    threading.Thread(target=_load_reformat, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Config hot-reload

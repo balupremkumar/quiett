@@ -202,6 +202,86 @@ def prime_foreground(hwnd: int) -> None:
         _force_foreground(hwnd)
 
 
+class _GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize",        wintypes.DWORD),
+        ("flags",         wintypes.DWORD),
+        ("hwndActive",    wintypes.HWND),
+        ("hwndFocus",     wintypes.HWND),
+        ("hwndCapture",   wintypes.HWND),
+        ("hwndMenuOwner", wintypes.HWND),
+        ("hwndMoveSize",  wintypes.HWND),
+        ("hwndCaret",     wintypes.HWND),
+        ("rcCaret",       wintypes.RECT),
+    ]
+
+
+def _get_focused_child(hwnd: int) -> int:
+    """Find the focused Chrome_RenderWidgetHostHWND in an Electron window.
+
+    VS Code is multi-process: the renderer widgets live in separate processes with
+    their own thread IDs. GetGUIThreadInfo on the browser-process thread won't see
+    them, so we enumerate child windows by class name instead.
+    """
+    candidates = []
+
+    def _enum(child, _):
+        try:
+            if win32gui.GetClassName(child) == "Chrome_RenderWidgetHostHWND":
+                candidates.append(child)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, _enum, None)
+    except Exception:
+        pass
+
+    if not candidates:
+        return hwnd
+
+    # Check each renderer's own thread for which one reports itself as focused
+    for child in candidates:
+        try:
+            tid = _user32.GetWindowThreadProcessId(child, None)
+            info = _GUITHREADINFO()
+            info.cbSize = ctypes.sizeof(_GUITHREADINFO)
+            if _user32.GetGUIThreadInfo(tid, ctypes.byref(info)):
+                if info.hwndActive == child or info.hwndFocus == child:
+                    return child
+        except Exception:
+            pass
+
+    # None self-reported as focused — use first visible candidate
+    for child in candidates:
+        try:
+            if win32gui.IsWindowVisible(child):
+                return child
+        except Exception:
+            pass
+
+    return candidates[0]
+
+
+def _set_focus_on_child(child_hwnd: int) -> None:
+    """Attach to the child widget's own thread and call SetFocus + SetActiveWindow."""
+    cur = _kernel32.GetCurrentThreadId()
+    tid = _user32.GetWindowThreadProcessId(child_hwnd, None)
+    attached = False
+    if tid and tid != cur:
+        _user32.AttachThreadInput(tid, cur, True)
+        attached = True
+    try:
+        _user32.SetFocus(child_hwnd)
+        _user32.SetActiveWindow(child_hwnd)
+    except Exception:
+        pass
+    finally:
+        if attached:
+            _user32.AttachThreadInput(tid, cur, False)
+
+
 def _force_foreground(hwnd: int) -> None:
     cur_thread = _kernel32.GetCurrentThreadId()
     fg_hwnd    = _user32.GetForegroundWindow()
@@ -237,21 +317,8 @@ def _try_wm_paste(hwnd: int) -> bool:
     a cheap last resort for the cases where SendInput is blocked.
     """
     try:
-        # Find the focused control. GetGUIThreadInfo gives us the actual focus hwnd.
-        class GUITHREADINFO(ctypes.Structure):
-            _fields_ = [
-                ("cbSize",        wintypes.DWORD),
-                ("flags",         wintypes.DWORD),
-                ("hwndActive",    wintypes.HWND),
-                ("hwndFocus",     wintypes.HWND),
-                ("hwndCapture",   wintypes.HWND),
-                ("hwndMenuOwner", wintypes.HWND),
-                ("hwndMoveSize",  wintypes.HWND),
-                ("hwndCaret",     wintypes.HWND),
-                ("rcCaret",       wintypes.RECT),
-            ]
-        info = GUITHREADINFO()
-        info.cbSize = ctypes.sizeof(GUITHREADINFO)
+        info = _GUITHREADINFO()
+        info.cbSize = ctypes.sizeof(_GUITHREADINFO)
         tid = _user32.GetWindowThreadProcessId(hwnd, None)
         if not _user32.GetGUIThreadInfo(tid, ctypes.byref(info)):
             return False
@@ -284,17 +351,27 @@ def inject_text(text: str, hwnd: int) -> None:
 
     _force_foreground(hwnd)
 
-    # Settle delay — longer for Electron/Chromium/RDP. These hosts have multiple
-    # internal focus targets (web frame, devtools, sidebar) and need time for
-    # the inner focus to land in the actual input element.
-    settle = 0.30 if _needs_slow_settle(hwnd) else 0.15
+    # Settle delay: Electron needs extra time for internal focus to restore after
+    # the VS Code window regains OS focus (JavaScript focus events are async).
+    settle = 0.15
+    if _needs_slow_settle(hwnd):
+        settle = 0.60   # Electron: was 0.30, increased — JS focus restoration is slow
     if _is_rdp(hwnd):
         settle = 0.40
     time.sleep(settle)
 
-    # Drain any stuck modifier from the Ctrl+Alt hotkey. Critical: without this,
-    # the OS thinks Alt is still held when we tap Ctrl+V, which produces Ctrl+Alt+V
-    # (often a no-op or app-specific shortcut) instead of paste.
+    # For Electron apps: enumerate Chrome_RenderWidgetHostHWND child windows
+    # (each lives in its own renderer process/thread) and SetFocus on the active
+    # one directly, then let SendInput deliver Ctrl+V to that exact widget.
+    is_electron = any(s in target_cls for s in _SLOW_FOCUS_CLASSES_SUBSTR)
+    if is_electron and not _is_rdp(hwnd):
+        child = _get_focused_child(hwnd)
+        _set_focus_on_child(child)
+        log("inject", f"electron child: hwnd={child} class={_get_class(child)!r}")
+        time.sleep(0.05)
+
+    # Drain any stuck modifier from the Ctrl+Alt hotkey. Without this, Alt is still
+    # logically held when we send Ctrl+V, producing Ctrl+Alt+V (often a no-op).
     _flush_all_modifiers()
     time.sleep(0.05)
 
@@ -303,16 +380,13 @@ def inject_text(text: str, hwnd: int) -> None:
     else:
         _send_keystroke([_VK_CONTROL], _VK_V)
 
-    # Verify: most apps consume the clipboard during paste (briefly), but a reliable
-    # signal that paste worked is hard. Instead, if the foreground window changed
-    # away during settle (focus stolen), retry once.
+    # If focus was stolen during settle, retry once.
     time.sleep(0.05)
     if win32gui.GetForegroundWindow() != hwnd:
         warn("inject", "focus lost mid-paste, retrying with WM_PASTE fallback")
         _force_foreground(hwnd)
         time.sleep(0.20)
         if not _try_wm_paste(hwnd):
-            # Last-resort retry of the keystroke path
             _flush_all_modifiers()
             time.sleep(0.05)
             if _is_terminal(hwnd):

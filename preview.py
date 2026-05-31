@@ -69,11 +69,12 @@ def start() -> None:
 def show(text: str, hwnd: int, empty: bool = False,
          confidence: float | None = None,
          words: list | None = None,
-         auto_dismiss: float = 0.0) -> None:
-    """Queue a dictation preview window."""
+         auto_dismiss: float = 0.0,
+         raw: str | None = None) -> None:
+    """Queue a dictation preview window. raw= is the pre-vibe-mode Whisper text."""
     _preview_q.put({"text": text, "hwnd": hwnd, "empty": empty,
                     "confidence": confidence, "words": words,
-                    "auto_dismiss": auto_dismiss})
+                    "auto_dismiss": auto_dismiss, "raw": raw})
 
 
 def show_history() -> None:
@@ -177,6 +178,7 @@ def _tick() -> None:
                     latest_preview.get("confidence"),
                     latest_preview.get("auto_dismiss", 0.0),
                     latest_preview.get("words"),
+                    latest_preview.get("raw"),
                 )
             except Exception as e:
                 print(f"preview window error: {e}")
@@ -254,10 +256,11 @@ def _tick() -> None:
 # ---------------------------------------------------------------------------
 
 _BADGE_CFG = {
-    "recording":  {"dot": "#e03030", "text": "Recording..."},
-    "processing": {"dot": "#c8a000", "text": "Transcribing..."},
-    "too_short":  {"dot": "#888888", "text": "Hold longer to record"},
-    "not_ready":  {"dot": "#888888", "text": "Model loading — please wait"},
+    "recording":    {"dot": "#e03030", "text": "Recording..."},
+    "processing":   {"dot": "#c8a000", "text": "Transcribing..."},
+    "reformatting": {"dot": "#7b5ea7", "text": "Structuring prompt..."},
+    "too_short":    {"dot": "#888888", "text": "Hold longer to record"},
+    "not_ready":    {"dot": "#888888", "text": "Model loading — please wait"},
 }
 
 
@@ -358,7 +361,8 @@ def _border_colour(confidence: float | None) -> str:
 def _open_window(text: str, hwnd: int, empty: bool = False,
                  confidence: float | None = None,
                  auto_dismiss: float = 0.0,
-                 words: list | None = None) -> None:
+                 words: list | None = None,
+                 raw: str | None = None) -> None:
     global _current_preview_win
 
     try:
@@ -524,6 +528,28 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
             font=("Segoe UI", 10), padx=6, pady=4, cursor="hand2",
         ).pack()
         cancel_wrap.pack(side=tk.LEFT, padx=(8, 0))
+
+    # ── Raw / Prompt toggle (only when vibe mode produced a different text) ──
+    if raw and raw.strip() != text.strip() and not empty:
+        _showing_raw = [False]
+
+        def _toggle_raw():
+            _showing_raw[0] = not _showing_raw[0]
+            new_content = raw if _showing_raw[0] else text
+            new_label   = "Prompt" if _showing_raw[0] else "Raw"
+            entry.config(state="normal")
+            entry.delete("1.0", tk.END)
+            entry.insert("1.0", new_content)
+            toggle_btn.config(text=new_label)
+
+        toggle_btn = tk.Button(
+            frame, text="Raw", command=_toggle_raw,
+            bg=_BG2, fg=_FG2,
+            activebackground=_BORDER, activeforeground=_FG,
+            relief="flat", bd=1,
+            font=("Segoe UI", 8), padx=6, pady=2, cursor="hand2",
+        )
+        toggle_btn.pack(anchor=tk.E, pady=(4, 0))
 
     # ── Keyboard hint strip ────────────────────────────────────────────────
     hint = "↵ / Ins Insert  ·  Esc Cancel  ·  Ctrl+R Re-record  ·  Ctrl+Z Undo  ·  Shift+↵ Newline"
@@ -938,6 +964,23 @@ def _open_settings() -> None:
     fillers_txt.insert("1.0", "\n".join(cfg.get("filler_words", [])))
     fillers_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
 
+    _section("Vibe Coding")
+    _note("Restructures your dictation into a focused coding prompt using Claude Haiku.")
+    vibe_var = tk.BooleanVar(value=bool(cfg.get("vibe_mode", False)))
+    tk.Checkbutton(content, text="Enable vibe mode (adds ~300-500ms via API)",
+                   variable=vibe_var, bg=_BG, fg=_FG2,
+                   activebackground=_BG, activeforeground=_FG,
+                   selectcolor=_BG2, font=("Segoe UI", 9)
+                   ).pack(anchor="w", padx=16, pady=(6, 0))
+    backend_var = tk.StringVar(value=cfg.get("vibe_mode_backend", "api"))
+    tk.Label(content, text="Backend", bg=_BG, fg=_FG2,
+             font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 0))
+    tk.OptionMenu(content, backend_var, "api", "rules").configure(
+        bg=_BG2, fg=_FG, activebackground=_BORDER,
+        relief="flat", highlightthickness=0, font=("Segoe UI", 10))
+    tk.OptionMenu(content, backend_var, "api", "rules").pack(
+        anchor="w", padx=16, pady=(2, 0))
+
     _section("Custom corrections")
     _note('One per line: "wrong → correct"  (applied immediately, no training needed)')
     corrections_txt = tk.Text(content, bg=_BG2, fg=_FG, insertbackground=_FG,
@@ -1010,6 +1053,8 @@ def _open_settings() -> None:
             "custom_vocabulary":           vocab,
             "input_device":                mic_idx,
             "history_paused":              history_paused_var.get(),
+            "vibe_mode":                   vibe_var.get(),
+            "vibe_mode_backend":           backend_var.get(),
         })
 
         try:
