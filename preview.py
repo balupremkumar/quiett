@@ -965,7 +965,7 @@ def _open_settings() -> None:
     fillers_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
 
     _section("Vibe Coding")
-    _note("Restructures your dictation into a focused coding prompt using Claude Haiku.")
+    _note("Restructures dictation into a coding prompt via LM Studio (local) or Claude API.")
     vibe_var = tk.BooleanVar(value=bool(cfg.get("vibe_mode", False)))
     tk.Checkbutton(content, text="Enable vibe mode (adds ~300-500ms via API)",
                    variable=vibe_var, bg=_BG, fg=_FG2,
@@ -975,11 +975,10 @@ def _open_settings() -> None:
     backend_var = tk.StringVar(value=cfg.get("vibe_mode_backend", "api"))
     tk.Label(content, text="Backend", bg=_BG, fg=_FG2,
              font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 0))
-    tk.OptionMenu(content, backend_var, "api", "rules").configure(
-        bg=_BG2, fg=_FG, activebackground=_BORDER,
-        relief="flat", highlightthickness=0, font=("Segoe UI", 10))
-    tk.OptionMenu(content, backend_var, "api", "rules").pack(
-        anchor="w", padx=16, pady=(2, 0))
+    be_menu = tk.OptionMenu(content, backend_var, "lmstudio", "api", "rules")
+    be_menu.config(bg=_BG2, fg=_FG, activebackground=_BORDER,
+                   relief="flat", highlightthickness=0, font=("Segoe UI", 10))
+    be_menu.pack(anchor="w", padx=16, pady=(2, 0))
 
     _section("Custom corrections")
     _note('One per line: "wrong → correct"  (applied immediately, no training needed)')

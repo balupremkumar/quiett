@@ -15,5 +15,5 @@
   "input_device": null,
   "per_app_paste": {},
   "vibe_mode": false,
-  "vibe_mode_backend": "api"
+  "vibe_mode_backend": "lmstudio"
 }
