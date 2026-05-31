@@ -12,5 +12,6 @@
   "preview_position": "cursor",
   "initial_prompt": "",
   "custom_vocabulary": [],
-  "input_device": null
+  "input_device": null,
+  "per_app_paste": {}
 }

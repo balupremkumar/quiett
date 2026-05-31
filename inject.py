@@ -14,6 +14,7 @@ Strategy per paste:
   7. Restore original clipboard after configurable delay
 """
 import ctypes
+import os
 import threading
 import time
 from ctypes import wintypes
@@ -26,6 +27,7 @@ import win32gui
 from logger import log, warn
 
 _restore_delay_ms = 150
+_per_app_paste: dict = {}   # exe_name_lower → "ctrl_v" | "ctrl_shift_v"
 
 _VK_CONTROL = 0x11
 _VK_MENU    = 0x12  # Alt
@@ -134,9 +136,11 @@ def _flush_all_modifiers() -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def configure(restore_delay_ms: int) -> None:
-    global _restore_delay_ms
+def configure(restore_delay_ms: int, per_app_paste: dict | None = None) -> None:
+    global _restore_delay_ms, _per_app_paste
     _restore_delay_ms = restore_delay_ms
+    if per_app_paste is not None:
+        _per_app_paste = {k.lower(): v for k, v in per_app_paste.items()}
 
 
 def capture_foreground() -> int:
@@ -150,8 +154,31 @@ def _get_class(hwnd: int) -> str:
         return ""
 
 
+def _get_exe_name(hwnd: int) -> str:
+    """Return the lowercase exe filename (e.g. 'code.exe') for the process owning hwnd."""
+    try:
+        pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        h = _kernel32.OpenProcess(0x0410, False, pid.value)  # QUERY_INFORMATION | VM_READ
+        if not h:
+            return ""
+        buf = ctypes.create_unicode_buffer(512)
+        ctypes.windll.psapi.GetModuleFileNameExW(h, None, buf, 512)
+        _kernel32.CloseHandle(h)
+        return os.path.basename(buf.value).lower()
+    except Exception:
+        return ""
+
+
 def _is_terminal(hwnd: int) -> bool:
-    return _get_class(hwnd) in _TERMINAL_CLASSES
+    if _get_class(hwnd) in _TERMINAL_CLASSES:
+        return True
+    # Check per-app override first — if user pinned this exe to ctrl_shift_v it acts as terminal
+    exe = _get_exe_name(hwnd)
+    override = _per_app_paste.get(exe)
+    if override == "ctrl_shift_v":
+        return True
+    return False
 
 
 def _needs_slow_settle(hwnd: int) -> bool:
@@ -162,6 +189,17 @@ def _needs_slow_settle(hwnd: int) -> bool:
 def _is_rdp(hwnd: int) -> bool:
     cls = _get_class(hwnd)
     return "TscShellContainer" in cls or "RAIL_WINDOW" in cls
+
+
+def prime_foreground(hwnd: int) -> None:
+    """Call this BEFORE closing the preview window so we still own the foreground.
+
+    Windows blocks SetForegroundWindow from processes that don't own the foreground.
+    By calling this while the Tkinter preview is still alive (and thus the foreground),
+    the focus transfer to hwnd succeeds reliably.
+    """
+    if hwnd and win32gui.IsWindow(hwnd):
+        _force_foreground(hwnd)
 
 
 def _force_foreground(hwnd: int) -> None:
@@ -230,8 +268,12 @@ def inject_text(text: str, hwnd: int) -> None:
         log("inject", "no target hwnd")
         return
 
-    target_cls = _get_class(hwnd)
-    log("inject", f"target hwnd={hwnd} class={target_cls!r} chars={len(text)}")
+    target_cls  = _get_class(hwnd)
+    target_exe  = _get_exe_name(hwnd)
+    target_title = win32gui.GetWindowText(hwnd) if hwnd else ""
+    paste_key = "ctrl_shift_v" if _is_terminal(hwnd) else "ctrl_v"
+    log("inject", f"target hwnd={hwnd} class={target_cls!r} exe={target_exe!r} "
+                  f"title={target_title[:60]!r} paste={paste_key} chars={len(text)}")
 
     original = pyperclip.paste()
     try:

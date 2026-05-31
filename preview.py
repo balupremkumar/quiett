@@ -472,7 +472,6 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
     def on_insert() -> None:
         result = entry.get("1.0", "end-1c").rstrip()
-        # Log correction if user edited the transcription
         if not empty:
             original = text.rstrip()
             if original != result:
@@ -480,8 +479,13 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                     profile.log_correction(original, result)
                 except Exception:
                     pass
+        # Prime focus on target BEFORE closing preview — while we still own the foreground,
+        # SetForegroundWindow is guaranteed to succeed. Closing first creates a vacuum where
+        # Windows blocks the call (anti-focus-steal protection).
+        inject.prime_foreground(hwnd)
         _close()
-        inject.inject_text((" " + result) if append_var.get() else result, hwnd)
+        to_paste = (" " + result) if append_var.get() else result
+        threading.Thread(target=inject.inject_text, args=(to_paste, hwnd), daemon=True).start()
 
     def on_cancel() -> None:
         _close()

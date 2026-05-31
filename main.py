@@ -55,6 +55,7 @@ _CONFIG_DEFAULTS = {
     "input_device":                None,
     "history_paused":              False,
     "silence_threshold":           0.01,
+    "per_app_paste":               {},
 }
 
 _VALID_POSITIONS = {"cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"}
@@ -131,7 +132,10 @@ def main() -> None:
             pass
 
     profile.init()
-    inject.configure(restore_delay_ms=_cfg["clipboard_restore_delay_ms"])
+    inject.configure(
+        restore_delay_ms=_cfg["clipboard_restore_delay_ms"],
+        per_app_paste=_cfg.get("per_app_paste", {}),
+    )
     preview.configure_position(_cfg["preview_position"])
     preview.start()
 
@@ -280,7 +284,10 @@ def main() -> None:
                             "auto_paste_threshold", "initial_prompt",
                             "custom_vocabulary", "input_device"):
                     _cfg[key] = validated[key]
-            inject.configure(restore_delay_ms=validated["clipboard_restore_delay_ms"])
+            inject.configure(
+                restore_delay_ms=validated["clipboard_restore_delay_ms"],
+                per_app_paste=validated.get("per_app_paste", {}),
+            )
             preview.configure_position(validated["preview_position"])
             audio.configure(
                 on_stop=_on_audio_stop,
