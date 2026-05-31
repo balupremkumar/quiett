@@ -3,31 +3,35 @@
 Converts raw Whisper speech into structured, concise coding prompts.
 
 Backends (set via config.json "vibe_mode_backend"):
-  "lmstudio"  -- LM Studio local server at localhost:1234 (recommended)
+  "lmstudio"  -- LM Studio local server, auto-launched if not running
   "api"       -- Claude Haiku via Anthropic API (requires ANTHROPIC_API_KEY)
   "rules"     -- Rule-based cleaner, instant, no model needed
 
-LM Studio setup:
-  1. Open LM Studio → Local Server tab
-  2. Load any instruct model (recommended: Qwen2.5-0.5B-Instruct Q4_K_M, ~350MB)
-  3. Click Start Server
-  That's it — no config changes needed here.
+LM Studio auto-launch: the app finds lms.exe, starts the server, and loads
+the model configured in "lmstudio_model" (default: qwen2.5-0.5b-instruct).
+No manual steps required after initial LM Studio install.
 """
 
 import json
 import os
 import re
+import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 
 from logger import log, warn
 
-_client  = None   # Anthropic client, only used for "api" backend
+_client  = None
 _ready   = threading.Event()
 _backend = "rules"
 
-_LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
+_LMSTUDIO_URL  = "http://localhost:1234/v1/chat/completions"
+_LMSTUDIO_MODELS_URL = "http://localhost:1234/v1/models"
+
+# lms.exe location — standard install path on Windows
+_LMS_EXE = os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin\lms.exe")
 
 _SYSTEM_PROMPT = (
     "Convert raw voice dictation into a concise, structured coding prompt.\n"
@@ -86,27 +90,76 @@ def _call_lmstudio(text: str) -> str:
 def _probe_lmstudio() -> bool:
     """Return True if LM Studio server is reachable."""
     try:
-        req = urllib.request.Request(
-            "http://localhost:1234/v1/models",
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=2)
+        urllib.request.urlopen(_LMSTUDIO_MODELS_URL, timeout=2)
         return True
     except Exception:
         return False
 
 
-def load(backend: str = "lmstudio") -> None:
+def _launch_lmstudio_server(model: str) -> bool:
+    """Start LM Studio server via lms CLI and wait for it to come up.
+
+    Returns True if server is ready within 30s, False otherwise.
+    """
+    if not os.path.isfile(_LMS_EXE):
+        warn("reformat", f"lms.exe not found at {_LMS_EXE}")
+        return False
+
+    log("reformat", "starting LM Studio server via lms...")
+    try:
+        # lms server start is non-blocking (it daemonizes the server process)
+        subprocess.Popen(
+            [_LMS_EXE, "server", "start"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception as exc:
+        warn("reformat", f"lms server start failed: {exc}")
+        return False
+
+    # Poll until server is up (up to 30s)
+    for i in range(30):
+        time.sleep(1)
+        if _probe_lmstudio():
+            log("reformat", f"LM Studio server up after {i + 1}s")
+            # Load the configured model
+            _load_lmstudio_model(model)
+            return True
+
+    warn("reformat", "LM Studio server did not come up within 30s")
+    return False
+
+
+def _load_lmstudio_model(model: str) -> None:
+    """Ask lms to load the model if not already loaded."""
+    if not model or not os.path.isfile(_LMS_EXE):
+        return
+    try:
+        subprocess.Popen(
+            [_LMS_EXE, "load", model, "--gpu", "off"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        log("reformat", f"lms load {model!r} dispatched")
+    except Exception as exc:
+        warn("reformat", f"lms load failed: {exc}")
+
+
+def load(backend: str = "lmstudio", model: str = "qwen2.5-0.5b-instruct") -> None:
     """Initialise the reformatter. Call in a background thread at startup."""
     global _client, _backend
     try:
         if backend == "lmstudio":
             if _probe_lmstudio():
                 _backend = "lmstudio"
-                log("reformat", "LM Studio backend ready (localhost:1234)")
+                log("reformat", "LM Studio already running — backend ready")
+            elif _launch_lmstudio_server(model):
+                _backend = "lmstudio"
+                log("reformat", "LM Studio auto-launched — backend ready")
             else:
-                warn("reformat", "LM Studio not reachable — falling back to rules. "
-                     "Open LM Studio, load a model, and start the server.")
+                warn("reformat", "LM Studio unavailable — falling back to rules")
                 _backend = "rules"
 
         elif backend == "api":
@@ -123,6 +176,7 @@ def load(backend: str = "lmstudio") -> None:
         else:
             _backend = "rules"
             log("reformat", "rules backend ready")
+
 
     except Exception as exc:
         warn("reformat", f"load failed, using rules: {exc}")

@@ -58,7 +58,8 @@ _CONFIG_DEFAULTS = {
     "silence_threshold":           0.01,
     "per_app_paste":               {},
     "vibe_mode":                   False,
-    "vibe_mode_backend":           "api",
+    "vibe_mode_backend":           "lmstudio",
+    "lmstudio_model":              "qwen2.5-0.5b-instruct",
 }
 
 _VALID_POSITIONS = {"cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"}
@@ -284,7 +285,10 @@ def main() -> None:
     threading.Thread(target=_load_model, daemon=True).start()
 
     def _load_reformat() -> None:
-        reformat.load(backend=_cfg.get("vibe_mode_backend", "api"))
+        reformat.load(
+            backend=_cfg.get("vibe_mode_backend", "lmstudio"),
+            model=_cfg.get("lmstudio_model", "qwen2.5-0.5b-instruct"),
+        )
 
     threading.Thread(target=_load_reformat, daemon=True).start()
 

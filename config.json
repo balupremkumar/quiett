@@ -3,17 +3,27 @@
   "model": "small",
   "language": "en",
   "min_record_seconds": 0.5,
-  "max_record_seconds": 120,
-  "filler_words": ["um", "uh", "you know", "like"],
+  "max_record_seconds": 120.0,
+  "filler_words": [
+    "um",
+    "uh",
+    "you know",
+    "like"
+  ],
   "clipboard_restore_delay_ms": 150,
   "vad_filter": false,
   "corrections": {},
-  "silence_auto_stop_seconds": 3,
+  "silence_auto_stop_seconds": 3.0,
   "preview_position": "cursor",
   "initial_prompt": "",
   "custom_vocabulary": [],
   "input_device": null,
   "per_app_paste": {},
-  "vibe_mode": false,
-  "vibe_mode_backend": "lmstudio"
+  "vibe_mode": true,
+  "vibe_mode_backend": "lmstudio",
+  "lmstudio_model": "qwen2.5-0.5b-instruct",
+  "silence_threshold": 0.01,
+  "preview_auto_dismiss_seconds": 0.0,
+  "auto_paste_threshold": 0.0,
+  "history_paused": false
 }
