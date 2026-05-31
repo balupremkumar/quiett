@@ -190,6 +190,7 @@ def main() -> None:
         ).start()
 
     def _on_recording_start() -> None:
+        preview.close_current_preview()
         tray.set_state("recording")
         preview.show_badge("recording")
         audio.start()

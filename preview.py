@@ -41,6 +41,7 @@ _profile_open  = False
 _settings_open = False
 
 _current_preview_win: tk.Toplevel | None = None  # live preview window reference
+_close_preview_requested = threading.Event()     # set from any thread to dismiss current preview
 
 # Preview position: "cursor" | "top-right" | "bottom-right" | "top-left" | "bottom-left"
 _preview_position = "cursor"
@@ -93,6 +94,11 @@ def hide_badge() -> None:
     _badge_q.put(None)
 
 
+def close_current_preview() -> None:
+    """Close any open preview window. Safe to call from any thread."""
+    _close_preview_requested.set()
+
+
 def show_settings() -> None:
     _settings_q.put(True)
 
@@ -131,6 +137,17 @@ _badge_state: str | None = None
 def _tick() -> None:
     global _preview_open, _history_open, _profile_open, _settings_open
     global _current_preview_win
+
+    # Close any open preview if a new recording started (signal from any thread)
+    if _close_preview_requested.is_set():
+        _close_preview_requested.clear()
+        if _preview_open and _current_preview_win is not None:
+            try:
+                _current_preview_win.destroy()
+            except Exception:
+                pass
+            _preview_open = False
+            _current_preview_win = None
 
     # Drain the entire preview queue — keep only the latest item.
     # If a new transcription arrives while a preview is open, replace it.
@@ -185,29 +202,40 @@ def _tick() -> None:
         except Exception:
             pass
 
-    if not _history_open:
+    # Always drain these queues so items don't accumulate while a window is open
+    # and immediately reopen it the moment the user closes it.
+    history_requested = False
+    while True:
         try:
             _history_q.get_nowait()
-            _history_open = True
-            _open_history()
+            history_requested = True
         except queue.Empty:
-            pass
+            break
+    if history_requested and not _history_open:
+        _history_open = True
+        _open_history()
 
-    if not _profile_open:
+    profile_requested = False
+    while True:
         try:
             _profile_q.get_nowait()
-            _profile_open = True
-            _open_profile()
+            profile_requested = True
         except queue.Empty:
-            pass
+            break
+    if profile_requested and not _profile_open:
+        _profile_open = True
+        _open_profile()
 
-    if not _settings_open:
+    settings_requested = False
+    while True:
         try:
             _settings_q.get_nowait()
-            _settings_open = True
-            _open_settings()
+            settings_requested = True
         except queue.Empty:
-            pass
+            break
+    if settings_requested and not _settings_open:
+        _settings_open = True
+        _open_settings()
 
     # Drain the entire badge queue each tick so a late "processing" item
     # cannot reappear after a None already cleared the badge.
