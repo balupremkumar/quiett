@@ -51,11 +51,19 @@ def _make_icon(bg: tuple) -> Image.Image:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.ellipse([2, 2, 61, 61], fill=bg)
-    cx, fg = 32, (255, 255, 255)
-    d.rounded_rectangle([cx - 8, 12, cx + 8, 36], radius=7, fill=fg)
-    d.arc([cx - 14, 26, cx + 14, 46], start=0, end=180, fill=fg, width=3)
-    d.line([cx, 46, cx, 54], fill=fg, width=3)
-    d.line([cx - 8, 54, cx + 8, 54], fill=fg, width=3)
+    fg = (255, 255, 255)
+
+    # Microphone — shifted left to make room for waveform bars
+    cx = 22
+    d.rounded_rectangle([cx - 7, 13, cx + 7, 34], radius=6, fill=fg)
+    d.arc([cx - 12, 26, cx + 12, 44], start=0, end=180, fill=fg, width=3)
+    d.line([cx, 44, cx, 52], fill=fg, width=3)
+    d.line([cx - 7, 52, cx + 7, 52], fill=fg, width=3)
+
+    # Audio waveform bars — 3 vertical bars of varying height (voice-AI indicator)
+    for bx, half_h in ((42, 8), (48, 13), (54, 9)):
+        d.line([bx, 32 - half_h, bx, 32 + half_h], fill=fg, width=3)
+
     return img
 
 
@@ -95,15 +103,29 @@ def _stop_pulse() -> None:
 
 
 _on_open_settings = None
+_on_toggle_vibe   = None
+_vibe_mode        = False
 
 
 def configure(on_view_history, on_toggle_pause=None,
-              on_view_profile=None, on_open_settings=None) -> None:
+              on_view_profile=None, on_open_settings=None,
+              on_toggle_vibe=None, vibe_mode: bool = False) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
+    global _on_toggle_vibe, _vibe_mode
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
     _on_open_settings = on_open_settings
+    _on_toggle_vibe   = on_toggle_vibe
+    _vibe_mode        = vibe_mode
+
+
+def set_vibe_mode(enabled: bool) -> None:
+    """Keep tray menu in sync when vibe_mode changes externally (e.g. hot-reload)."""
+    global _vibe_mode
+    _vibe_mode = enabled
+    if _icon is not None:
+        _icon.update_menu()
 
 
 def _label() -> str:
@@ -163,8 +185,17 @@ def run() -> None:
         if _on_open_settings:
             _on_open_settings()
 
+    def _toggle_vibe(icon, item):
+        global _vibe_mode
+        _vibe_mode = not _vibe_mode
+        if _on_toggle_vibe:
+            _on_toggle_vibe(_vibe_mode)
+        icon.update_menu()
+
     menu = pystray.Menu(
         pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
+        pystray.MenuItem("Vibe Mode", _toggle_vibe, checked=lambda item: _vibe_mode),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem("View History",    _view_history),
         pystray.MenuItem("Speech Profile",  _view_profile),
         pystray.MenuItem("Settings",        _open_settings),

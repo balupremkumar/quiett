@@ -28,6 +28,12 @@ stderr.txt
 
 # Claude
 .claude/worktrees/
+.claude/scheduled_tasks.lock
+
+# Large binaries / build outputs (rebuilt locally)
+models/
+third_party/
+startup.log
 
 # OS
 .vscode/

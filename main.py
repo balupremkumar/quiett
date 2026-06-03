@@ -17,6 +17,7 @@ Hot-reloadable config fields (take effect on next recording):
 Not hot-reloadable (require restart): model, hotkey
 """
 
+import atexit
 import json
 import threading
 
@@ -39,7 +40,7 @@ _HOT_RELOAD_INTERVAL = 30  # seconds
 
 _CONFIG_DEFAULTS = {
     "hotkey":                      "ctrl+alt",
-    "model":                       "small",
+    "model":                       "large-v3-turbo",
     "language":                    "en",
     "min_record_seconds":          0.5,
     "max_record_seconds":          120.0,
@@ -59,7 +60,7 @@ _CONFIG_DEFAULTS = {
     "per_app_paste":               {},
     "vibe_mode":                   False,
     "vibe_mode_backend":           "lmstudio",
-    "lmstudio_model":              "qwen2.5-0.5b-instruct",
+    "lmstudio_model":              "qwen/qwen3-8b",
 }
 
 _VALID_POSITIONS = {"cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"}
@@ -283,11 +284,12 @@ def main() -> None:
         tray.notify("VoiceDictate", "Model load failed after 3 attempts. Check app.log.")
 
     threading.Thread(target=_load_model, daemon=True).start()
+    atexit.register(transcribe.shutdown)
 
     def _load_reformat() -> None:
         reformat.load(
             backend=_cfg.get("vibe_mode_backend", "lmstudio"),
-            model=_cfg.get("lmstudio_model", "qwen2.5-0.5b-instruct"),
+            model=_cfg.get("lmstudio_model", "qwen/qwen3-8b"),
         )
 
     threading.Thread(target=_load_reformat, daemon=True).start()
@@ -328,6 +330,12 @@ def main() -> None:
                 hotkey.rebind(new_keys)
                 with _cfg_lock:
                     _cfg["_active_hotkey"] = new_keys
+            # Sync vibe_mode state into tray menu
+            new_vibe = validated.get("vibe_mode", False)
+            if new_vibe != _cfg.get("vibe_mode"):
+                with _cfg_lock:
+                    _cfg["vibe_mode"] = new_vibe
+                tray.set_vibe_mode(new_vibe)
         except Exception:
             pass
         t = threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config)
@@ -342,11 +350,26 @@ def main() -> None:
     # Tray
     # ------------------------------------------------------------------
 
+    def _on_toggle_vibe(enabled: bool) -> None:
+        global _cfg
+        with _cfg_lock:
+            _cfg["vibe_mode"] = enabled
+        try:
+            with open("config.json") as f:
+                raw = json.load(f)
+            raw["vibe_mode"] = enabled
+            with open("config.json", "w") as f:
+                json.dump(raw, f, indent=2)
+        except Exception:
+            pass
+
     tray.configure(
         on_view_history=preview.show_history,
         on_toggle_pause=hotkey.set_paused,
         on_view_profile=preview.show_profile,
         on_open_settings=preview.show_settings,
+        on_toggle_vibe=_on_toggle_vibe,
+        vibe_mode=_cfg.get("vibe_mode", False),
     )
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()

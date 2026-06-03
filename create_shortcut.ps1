@@ -16,11 +16,14 @@ size = 64
 img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
 d = ImageDraw.Draw(img)
 d.ellipse([2, 2, 61, 61], fill=(30, 140, 30))
-cx, fg = 32, (255, 255, 255)
-d.rounded_rectangle([cx - 8, 12, cx + 8, 36], radius=7, fill=fg)
-d.arc([cx - 14, 26, cx + 14, 46], start=0, end=180, fill=fg, width=3)
-d.line([cx, 46, cx, 54], fill=fg, width=3)
-d.line([cx - 8, 54, cx + 8, 54], fill=fg, width=3)
+fg = (255, 255, 255)
+cx = 22
+d.rounded_rectangle([cx - 7, 13, cx + 7, 34], radius=6, fill=fg)
+d.arc([cx - 12, 26, cx + 12, 44], start=0, end=180, fill=fg, width=3)
+d.line([cx, 44, cx, 52], fill=fg, width=3)
+d.line([cx - 7, 52, cx + 7, 52], fill=fg, width=3)
+for bx, half_h in ((42, 8), (48, 13), (54, 9)):
+    d.line([bx, 32 - half_h, bx, 32 + half_h], fill=fg, width=3)
 img.save(r'$icoPath')
 "@ | Out-File -FilePath $tempPy -Encoding utf8
 

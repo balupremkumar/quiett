@@ -34,14 +34,23 @@ _LMSTUDIO_MODELS_URL = "http://localhost:1234/v1/models"
 _LMS_EXE = os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin\lms.exe")
 
 _SYSTEM_PROMPT = (
-    "Convert raw voice dictation into a concise, structured coding prompt.\n"
-    "Rules:\n"
-    "- Imperative mood (Add, Create, Fix — not 'I want to add')\n"
-    "- Strip filler openers: 'I want to', 'can you', 'please', 'basically', 'let's', 'I need to'\n"
-    "- Break multi-step actions into comma-separated steps or short lines\n"
-    "- Preserve every technical term, file name, and proper noun exactly\n"
-    "- Do NOT add any detail the speaker did not say\n"
-    "- Output ONLY the reformatted prompt, nothing else"
+    "You rewrite raw voice dictation as a concise coding instruction.\n"
+    "Start with an imperative verb (Add, Create, Fix, Refactor, Remove).\n"
+    "Keep every file name, function name, technical term, and proper noun exactly as spoken.\n"
+    "Use comma-separated steps for multi-action requests.\n"
+    "Output only the rewritten instruction. No preamble. No explanation.\n"
+    "\n"
+    "Example 1\n"
+    "Raw: so I want to basically add a new button to the settings panel that says reset profile and when clicked it clears the SQLite database\n"
+    "Rewrite: Add a 'Reset Profile' button to the settings panel that clears the SQLite database on click.\n"
+    "\n"
+    "Example 2\n"
+    "Raw: can you please fix the bug in inject.py where the paste fails in VS Code because of focus race\n"
+    "Rewrite: Fix paste focus race in inject.py for VS Code.\n"
+    "\n"
+    "Example 3\n"
+    "Raw: I need to refactor the audio module to support multiple microphones and also add a device dropdown in the settings UI\n"
+    "Rewrite: Refactor audio module to support multiple microphones, add device dropdown to settings UI."
 )
 
 _OPENER_RE = re.compile(
@@ -65,13 +74,14 @@ def _rule_based(text: str) -> str:
 
 
 def _call_lmstudio(text: str) -> str:
+    # /no_think disables Qwen3's reasoning mode so we don't burn tokens on <think> blocks
     payload = json.dumps({
         "model": "local-model",
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user",   "content": f"Raw: {text}"},
+            {"role": "system", "content": _SYSTEM_PROMPT + "\n/no_think"},
+            {"role": "user",   "content": f"Raw: {text}\nRewrite:"},
         ],
-        "max_tokens": 256,
+        "max_tokens": 512,
         "temperature": 0.15,
         "stream": False,
     }).encode()
@@ -82,9 +92,14 @@ def _call_lmstudio(text: str) -> str:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=15) as resp:
         body = json.loads(resp.read())
-    return body["choices"][0]["message"]["content"].strip()
+    content = body["choices"][0]["message"]["content"]
+    # Strip any residual <think>...</think> block if /no_think was ignored
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    # Drop a leading "Rewrite:" if the model echoed the prefix
+    content = re.sub(r"^\s*Rewrite\s*:\s*", "", content, flags=re.IGNORECASE)
+    return content.strip()
 
 
 def _probe_lmstudio() -> bool:
@@ -137,7 +152,7 @@ def _load_lmstudio_model(model: str) -> None:
         return
     try:
         subprocess.Popen(
-            [_LMS_EXE, "load", model, "--gpu", "off"],
+            [_LMS_EXE, "load", model, "--gpu", "max"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW,
@@ -147,7 +162,7 @@ def _load_lmstudio_model(model: str) -> None:
         warn("reformat", f"lms load failed: {exc}")
 
 
-def load(backend: str = "lmstudio", model: str = "qwen2.5-0.5b-instruct") -> None:
+def load(backend: str = "lmstudio", model: str = "qwen/qwen3-8b") -> None:
     """Initialise the reformatter. Call in a background thread at startup."""
     global _client, _backend
     try:

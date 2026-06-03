@@ -1,62 +1,144 @@
+"""Whisper transcription via local whisper.cpp HTTP server (Vulkan GPU).
+
+Runs whisper-server.exe as a subprocess on startup (like LM Studio for the
+reformatter) and POSTs audio to /inference for each recording. The server keeps
+the model resident in VRAM between requests, so per-recording latency is just
+the inference time itself.
+
+Configuration via main.py:
+  - model_name: "small" | "medium" | "large-v3-turbo" — resolves to a ggml file
+    in models/. If the file is missing, raises a clear error at load() time.
+  - The Vulkan-built whisper-server.exe lives at
+    third_party/whisper.cpp/build/bin/Release/whisper-server.exe.
+
+If the binary or model is missing, load() raises — main.py shows a toast and the
+user can fall back manually by editing config.json.
+"""
+
+import io
+import json
+import os
 import re
+import socket
+import subprocess
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+import wave
 
 import numpy as np
-from faster_whisper import WhisperModel
 
 from audio import SAMPLE_RATE
-from logger import log
+from logger import log, warn
 
-_model = None
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_SERVER_EXE = os.path.join(
+    _PROJECT_ROOT, "third_party", "whisper.cpp", "build", "bin", "Release",
+    "whisper-server.exe",
+)
+_MODELS_DIR = os.path.join(_PROJECT_ROOT, "models")
+
+# Map config "model" names to ggml file names in models/
+_MODEL_FILES = {
+    "tiny":             "ggml-tiny.bin",
+    "base":             "ggml-base.bin",
+    "small":            "ggml-small.bin",
+    "medium":           "ggml-medium.bin",
+    "large-v3":         "ggml-large-v3.bin",
+    "large-v3-turbo":   "ggml-large-v3-turbo-q5_0.bin",
+}
+
+_HOST = "127.0.0.1"
+_PORT = 8089
+_BASE_URL = f"http://{_HOST}:{_PORT}"
+_INFERENCE_URL = f"{_BASE_URL}/inference"
+
+_proc: subprocess.Popen | None = None
 _ready = threading.Event()
 _load_error: str | None = None
-_device_used: str = "cpu"
+_device_used: str = "vulkan"
 
 
-def _detect_device() -> tuple[str, str]:
-    """Return (device, compute_type). Prefer CUDA when available; fall back to CPU int8."""
+def _resolve_model_path(model_name: str) -> str:
+    fname = _MODEL_FILES.get(model_name, model_name)
+    if os.path.isabs(fname):
+        return fname
+    return os.path.join(_MODELS_DIR, fname)
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        try:
+            s.connect((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _server_alive() -> bool:
     try:
-        import ctypes
-        ctypes.CDLL("cudart64_12.dll")
-        return "cuda", "float16"
-    except (OSError, ImportError):
-        pass
-    try:
-        import torch  # optional
-        if torch.cuda.is_available():
-            return "cuda", "float16"
+        urllib.request.urlopen(f"{_BASE_URL}/", timeout=1.0)
+        return True
+    except urllib.error.HTTPError:
+        return True  # server responded with non-200, still alive
     except Exception:
-        pass
-    return "cpu", "int8"
+        return False
 
 
 def load(model_name: str) -> None:
-    global _model, _load_error, _device_used
-    device, compute_type = _detect_device()
-    _device_used = device
-    log("transcribe", f"loading model={model_name} device={device} compute={compute_type}")
-    try:
-        _model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    """Start whisper-server.exe with the requested model. Blocks until ready."""
+    global _proc, _load_error, _device_used
+
+    if not os.path.isfile(_SERVER_EXE):
+        _load_error = f"whisper-server.exe not found at {_SERVER_EXE}"
+        log("transcribe", _load_error)
+        raise FileNotFoundError(_load_error)
+
+    model_path = _resolve_model_path(model_name)
+    if not os.path.isfile(model_path):
+        _load_error = f"model file not found: {model_path}"
+        log("transcribe", _load_error)
+        raise FileNotFoundError(_load_error)
+
+    if _port_in_use(_HOST, _PORT) and _server_alive():
+        log("transcribe", f"whisper-server already running on :{_PORT}")
+        _device_used = "vulkan"
         _ready.set()
-        _load_error = None
-        log("transcribe", "model ready")
-    except Exception as exc:
-        _load_error = str(exc)
-        log("transcribe", f"model load failed: {exc}")
-        if device != "cpu":
-            log("transcribe", "retrying on CPU")
-            try:
-                _model = WhisperModel(model_name, device="cpu", compute_type="int8")
-                _device_used = "cpu"
-                _ready.set()
-                _load_error = None
-                log("transcribe", "model ready (cpu fallback)")
-            except Exception as exc2:
-                _load_error = str(exc2)
-                log("transcribe", f"cpu fallback failed: {exc2}")
-                raise
-        else:
-            raise
+        return
+
+    cmd = [
+        _SERVER_EXE,
+        "--model", model_path,
+        "--host", _HOST,
+        "--port", str(_PORT),
+        "--language", "en",
+        "--threads", "4",
+        "--flash-attn",
+    ]
+    log("transcribe", f"starting whisper-server: {' '.join(cmd)}")
+    _proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+    # Wait up to 60s for the server to come up (model load + Vulkan init)
+    for i in range(60):
+        time.sleep(1)
+        if _server_alive():
+            log("transcribe", f"whisper-server ready after {i + 1}s")
+            _device_used = "vulkan"
+            _ready.set()
+            return
+
+    _load_error = "whisper-server did not start within 60s"
+    log("transcribe", _load_error)
+    raise RuntimeError(_load_error)
 
 
 def is_ready() -> bool:
@@ -69,6 +151,74 @@ def load_error() -> str | None:
 
 def device_used() -> str:
     return _device_used
+
+
+def shutdown() -> None:
+    """Stop the subprocess (called on app exit)."""
+    global _proc
+    if _proc and _proc.poll() is None:
+        try:
+            _proc.terminate()
+            _proc.wait(timeout=5)
+        except Exception:
+            try:
+                _proc.kill()
+            except Exception:
+                pass
+    _proc = None
+    _ready.clear()
+
+
+def _chunks_to_wav_bytes(chunks: list) -> bytes:
+    """Concatenate float32 chunks to a 16-bit mono WAV byte string."""
+    audio = np.concatenate(chunks, axis=0).flatten()
+    # Convert float32 [-1, 1] to int16
+    audio_i16 = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(audio_i16.tobytes())
+    return buf.getvalue()
+
+
+def _post_inference(wav_bytes: bytes, language: str, initial_prompt: str | None) -> dict:
+    """POST WAV to /inference, return parsed JSON response."""
+    boundary = f"----vd{uuid.uuid4().hex}"
+
+    def field(name: str, value: str) -> bytes:
+        return (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n"
+        ).encode()
+
+    body = bytearray()
+    body += field("temperature", "0.0")
+    body += field("temperature_inc", "0.2")
+    body += field("response_format", "verbose_json")
+    body += field("language", language or "en")
+    if initial_prompt:
+        body += field("prompt", initial_prompt)
+
+    # File part
+    body += (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+        f"Content-Type: audio/wav\r\n\r\n"
+    ).encode()
+    body += wav_bytes
+    body += f"\r\n--{boundary}--\r\n".encode()
+
+    req = urllib.request.Request(
+        _INFERENCE_URL,
+        data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read())
 
 
 def run(
@@ -92,33 +242,54 @@ def run(
     _ready.wait()
 
     prompt = _build_prompt(initial_prompt, custom_vocabulary)
+    wav_bytes = _chunks_to_wav_bytes(chunks)
 
-    segments, _ = _model.transcribe(
-        audio,
-        language=language,
-        vad_filter=vad_filter,
-        initial_prompt=prompt,
-        word_timestamps=True,
-    )
-    seg_list = list(segments)
-    raw = " ".join(seg.text for seg in seg_list).strip()
+    t0 = time.time()
+    try:
+        result = _post_inference(wav_bytes, language, prompt)
+    except Exception as exc:
+        warn("transcribe", f"inference failed: {exc}")
+        return None, None, None
 
-    words = []
-    for s in seg_list:
-        for w in (s.words or []):
-            words.append({"text": w.word.strip(), "prob": float(w.probability)})
-
-    if seg_list:
-        avg_logprob = sum(s.avg_logprob for s in seg_list) / len(seg_list)
-        confidence = max(0.0, min(1.0, (avg_logprob + 0.8) / 0.6))
-    else:
-        confidence = None
-
-    log("transcribe", f"dur={duration:.1f}s conf={confidence} chars={len(raw)} words={len(words)}")
+    raw, words, confidence = _parse_response(result)
+    log("transcribe", f"dur={duration:.1f}s inf={time.time()-t0:.2f}s "
+                      f"conf={confidence} chars={len(raw)} words={len(words)}")
 
     all_rules = {**(profile_rules or {}), **(corrections or {})}
     text = _postprocess(raw, filler_words, all_rules)
     return (text if text else None), confidence, (words or None)
+
+
+def _parse_response(result: dict) -> tuple[str, list, float | None]:
+    """Extract text, word list, and avg confidence from a whisper-server response."""
+    raw = (result.get("text") or "").strip()
+    words: list = []
+    seg_conf: list = []
+
+    for seg in result.get("segments", []) or []:
+        # Some builds emit "words" with "probability"; older builds emit "tokens"
+        for w in seg.get("words", []) or []:
+            txt = (w.get("word") or w.get("text") or "").strip()
+            prob = float(w.get("probability", w.get("p", 1.0)))
+            if txt:
+                words.append({"text": txt, "prob": prob})
+        if "avg_logprob" in seg:
+            seg_conf.append(float(seg["avg_logprob"]))
+        elif "no_speech_prob" in seg:
+            seg_conf.append(1.0 - float(seg["no_speech_prob"]))
+
+    if seg_conf:
+        avg = sum(seg_conf) / len(seg_conf)
+        if avg < 0:  # avg_logprob → normalised confidence
+            confidence = max(0.0, min(1.0, (avg + 0.8) / 0.6))
+        else:
+            confidence = max(0.0, min(1.0, avg))
+    elif words:
+        confidence = sum(w["prob"] for w in words) / len(words)
+    else:
+        confidence = None
+
+    return raw, words, confidence
 
 
 def _build_prompt(initial_prompt: str | None, vocab: list | None) -> str | None:
@@ -215,7 +386,6 @@ _NUM_SCALES = {"hundred": 100, "thousand": 1000, "million": 1_000_000, "billion"
 
 
 def _words_to_digits(text: str) -> str:
-    """Convert runs of number words into digits. Conservative: only consecutive number words."""
     tokens = re.split(r"(\s+|[^\w\s'-]+)", text)
     out = []
     buf = []
@@ -237,7 +407,6 @@ def _words_to_digits(text: str) -> str:
         elif tok.isspace() and buf:
             buf.append(tok)
         else:
-            # strip trailing whitespace from buf before flush
             while buf and buf[-1].isspace():
                 trailing = buf.pop()
                 flush()
