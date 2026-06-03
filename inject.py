@@ -1,17 +1,26 @@
-"""Text injection via clipboard + paste keystroke.
+"""Text injection — types characters directly via SendInput KEYEVENTF_UNICODE.
 
-Uses SendInput with scan codes (not keybd_event with virtual keys) so paste works
-in RDP sessions, VS Code/Electron, browsers, and other contexts where the legacy
-keybd_event API is intercepted or treated as untrusted input.
+Background: synthetic Ctrl+V is fundamentally unreliable in modern Electron apps
+(VS Code, Cursor) because Chromium treats injected key events with extra scrutiny
+and the official VS Code paste regression (electron #238609) means even working
+Ctrl+V may be dropped. RDP further mangles synthetic clipboard paste.
 
-Strategy per paste:
-  1. Save and replace clipboard
-  2. Force target window to foreground via AttachThreadInput
-  3. Wait for focus to settle (longer for Electron/RDP)
-  4. Flush stuck modifier keys (Ctrl/Alt/Shift/Win — all sides)
-  5. Send Ctrl+V (or Ctrl+Shift+V for terminals) via SendInput + scan codes
-  6. Verify clipboard was consumed; if not, retry with WM_PASTE fallback
-  7. Restore original clipboard after configurable delay
+Strategy: instead of asking the app to paste-from-clipboard, we *type* each
+character via SendInput with KEYEVENTF_UNICODE. The receiving app sees normal
+keyboard input — same path as the user typing manually. This bypasses:
+  - Clipboard ownership / lazy-read races (Chromium polls clipboard via IPC)
+  - Synthetic-Ctrl+V interception in newer Electron
+  - Custom keybinding interpretation of Ctrl+V in specific app contexts
+  - Modifier-state corruption from the recording hotkey
+  - UAC integrity restrictions on clipboard paste
+
+Cost: ~5 ms per character. For typical dictation (<200 chars) this is under 1 s.
+
+Per-target routing in inject_text:
+  - Electron (Chrome_WidgetWin, MozillaWindowClass), RDP, default: Unicode typing
+  - Terminals (Cascadia, mintty): keep Ctrl+Shift+V clipboard paste (works well,
+    faster for long output, terminals don't have the Chromium paste regression)
+  - Per-app overrides via per_app_paste: "type" | "ctrl_v" | "ctrl_shift_v"
 """
 import ctypes
 import os
@@ -36,8 +45,13 @@ _VK_RWIN    = 0x5C
 _VK_V       = 0x56
 
 _KEYEVENTF_KEYUP    = 0x0002
+_KEYEVENTF_UNICODE  = 0x0004
 _KEYEVENTF_SCANCODE = 0x0008
 _KEYEVENTF_EXTENDED = 0x0001
+
+_VK_RETURN = 0x0D
+_VK_TAB    = 0x09
+_VK_BACK   = 0x08
 
 _INPUT_KEYBOARD = 1
 _MAPVK_VK_TO_VSC = 0
@@ -106,6 +120,89 @@ def _send_inputs(inputs: list) -> int:
     n = len(inputs)
     arr = (_INPUT * n)(*inputs)
     return _user32.SendInput(n, ctypes.byref(arr), ctypes.sizeof(_INPUT))
+
+
+def _make_unicode_input(code: int, key_up: bool) -> _INPUT:
+    """Build a KEYEVENTF_UNICODE input event for a single UTF-16 code unit."""
+    flags = _KEYEVENTF_UNICODE
+    if key_up:
+        flags |= _KEYEVENTF_KEYUP
+    inp = _INPUT()
+    inp.type = _INPUT_KEYBOARD
+    inp.ki = _KEYBDINPUT(wVk=0, wScan=code, dwFlags=flags, time=0, dwExtraInfo=0)
+    return inp
+
+
+def _make_vk_input(vk: int, key_up: bool) -> _INPUT:
+    """Build a virtual-key input event (for Enter / Tab / Backspace etc.)."""
+    flags = _KEYEVENTF_KEYUP if key_up else 0
+    inp = _INPUT()
+    inp.type = _INPUT_KEYBOARD
+    inp.ki = _KEYBDINPUT(wVk=vk, wScan=0, dwFlags=flags, time=0, dwExtraInfo=0)
+    return inp
+
+
+def _send_unicode_text(text: str, batch: int = 32, batch_delay_ms: int = 2) -> int:
+    """Type `text` via SendInput KEYEVENTF_UNICODE. Returns chars sent.
+
+    Newlines and tabs are sent as VK_RETURN / VK_TAB virtual keys so the target
+    app handles them naturally (auto-indent, etc.) rather than inserting a raw
+    line-separator codepoint that some apps render incorrectly.
+
+    Batching: large bursts can be dropped by SendInput's internal queue when
+    a foreground app is doing heavy work. We send in small batches with a
+    micro-sleep between them. This is the same pattern AutoHotkey uses for
+    its SendInput command at large input sizes.
+    """
+    if not text:
+        return 0
+    sent = 0
+    buf: list = []
+
+    def _flush():
+        nonlocal sent
+        if not buf:
+            return
+        n = _send_inputs(buf)
+        sent += len(buf) // 2  # 2 inputs per char (down + up)
+        buf.clear()
+        if batch_delay_ms > 0:
+            time.sleep(batch_delay_ms / 1000.0)
+
+    for ch in text:
+        if ch == "\r":
+            continue  # Normalise CRLF -> LF; the LF below handles the line break
+        if ch == "\n":
+            _flush()
+            buf.append(_make_vk_input(_VK_RETURN, key_up=False))
+            buf.append(_make_vk_input(_VK_RETURN, key_up=True))
+            _flush()
+            continue
+        if ch == "\t":
+            _flush()
+            buf.append(_make_vk_input(_VK_TAB, key_up=False))
+            buf.append(_make_vk_input(_VK_TAB, key_up=True))
+            _flush()
+            continue
+
+        code = ord(ch)
+        if code > 0xFFFF:
+            # Supplementary plane → encode as UTF-16 surrogate pair
+            code -= 0x10000
+            hi = 0xD800 | (code >> 10)
+            lo = 0xDC00 | (code & 0x3FF)
+            for c in (hi, lo):
+                buf.append(_make_unicode_input(c, key_up=False))
+                buf.append(_make_unicode_input(c, key_up=True))
+        else:
+            buf.append(_make_unicode_input(code, key_up=False))
+            buf.append(_make_unicode_input(code, key_up=True))
+
+        if len(buf) >= batch * 2:
+            _flush()
+
+    _flush()
+    return sent
 
 
 def _send_keystroke(vks_to_hold: list[int], main_vk: int) -> None:
@@ -492,82 +589,93 @@ def _notify_failure(reason: str) -> None:
             pass
 
 
+def _decide_method(hwnd: int) -> str:
+    """Pick the paste method for this target. Returns 'type' | 'ctrl_v' | 'ctrl_shift_v'."""
+    exe = _get_exe_name(hwnd)
+    override = _per_app_paste.get(exe)
+    if override in ("type", "ctrl_v", "ctrl_shift_v"):
+        return override
+    if _is_terminal(hwnd):
+        # Terminals work well with Ctrl+Shift+V clipboard paste and benefit from
+        # the speed when output is long. Don't slow them down by typing.
+        return "ctrl_shift_v"
+    # Default: Unicode typing. Most reliable in Electron/RDP/browsers/dialogs.
+    return "type"
+
+
 def inject_text(text: str, hwnd: int) -> None:
     if not hwnd or not win32gui.IsWindow(hwnd):
         log("inject", "no target hwnd")
+        return
+    if not text:
         return
 
     target_cls   = _get_class(hwnd)
     target_exe   = _get_exe_name(hwnd)
     target_title = win32gui.GetWindowText(hwnd) if hwnd else ""
-    paste_key    = "ctrl_shift_v" if _is_terminal(hwnd) else "ctrl_v"
+    method = _decide_method(hwnd)
     log("inject", f"target hwnd={hwnd} class={target_cls!r} exe={target_exe!r} "
-                  f"title={target_title[:60]!r} paste={paste_key} chars={len(text)}")
+                  f"title={target_title[:60]!r} method={method} chars={len(text)}")
 
-    # UAC guard: SendInput cannot reach a higher-integrity process. Detect this
-    # before we destroy the clipboard so the user gets a clear error.
+    # UAC guard: SendInput cannot reach a higher-integrity process.
     if _is_higher_integrity_target(hwnd):
         _notify_failure(
-            f"Cannot paste into elevated window ({target_exe or 'unknown'}). "
-            "Run VoiceDictate as administrator to enable paste into UAC-elevated apps."
+            f"Cannot insert into elevated window ({target_exe or 'unknown'}). "
+            "Run VoiceDictate as administrator to enable input into UAC-elevated apps."
         )
         return
 
-    # Capture original clipboard, then set ours via raw Win32 (more reliable
-    # than pyperclip's Tk-backed clipboard with Chromium-based apps).
-    original = _clipboard_get_text()
-    if not _clipboard_set_text(text):
-        _notify_failure("Could not place text on clipboard")
-        return
-
+    # Bring target to foreground (preview already called prime_foreground while
+    # we still owned the foreground, so this should succeed).
     _force_foreground(hwnd)
 
-    # Settle delay: Electron needs extra time for internal focus to restore after
-    # the VS Code window regains OS focus (JavaScript focus events are async).
     settle = 0.15
     if _needs_slow_settle(hwnd):
-        settle = 0.60
+        settle = 0.40   # Electron internal focus is slow but we don't need clipboard polling now
     if _is_rdp(hwnd):
         settle = 0.40
     time.sleep(settle)
 
-    # For Electron apps: enumerate Chrome_RenderWidgetHostHWND child windows
-    # and SetFocus on the active one directly, then poll until focus settles.
+    # For Electron: target the actual focused renderer widget directly.
     is_electron = any(s in target_cls for s in _SLOW_FOCUS_CLASSES_SUBSTR) and not _is_rdp(hwnd)
-    target_for_send = hwnd
     if is_electron:
         child = _get_focused_child(hwnd)
         _set_focus_on_child(child)
-        target_for_send = child
         log("inject", f"electron child: hwnd={child} class={_get_class(child)!r}")
         _wait_focus_settled(child, timeout_ms=250)
 
-    # Block until the user has physically released the recording hotkey. Without
-    # this, Alt/Ctrl from the recording chord can still be down — Windows then
-    # interprets our Ctrl+V as Ctrl+Alt+V (often a no-op or wrong shortcut).
+    # Wait for the user to physically release the recording hotkey before
+    # injecting input. Ctrl/Alt still held will corrupt either typed chars or
+    # the Ctrl+V keystroke.
     if not _wait_modifiers_released(timeout_ms=400):
         log("inject", f"modifiers still held after 400ms: {_modifiers_physically_down()}")
     _flush_all_modifiers()
     time.sleep(0.03)
 
-    if _is_terminal(hwnd):
+    # Verify foreground is still our target before injecting input.
+    fg = win32gui.GetForegroundWindow()
+    if fg != hwnd and not _is_descendant(fg, hwnd):
+        warn("inject", f"foreground drifted (got {fg}, want {hwnd}), re-priming")
+        _force_foreground(hwnd)
+        time.sleep(0.15)
+
+    if method == "type":
+        # Primary path — type characters via SendInput KEYEVENTF_UNICODE.
+        # No clipboard involvement; works in VS Code, Cursor, RDP, browsers.
+        sent = _send_unicode_text(text)
+        log("inject", f"typed {sent} chars via KEYEVENTF_UNICODE")
+        return
+
+    # Clipboard paste path — used for terminals where Ctrl+Shift+V is reliable.
+    original = _clipboard_get_text()
+    if not _clipboard_set_text(text):
+        _notify_failure("Could not place text on clipboard")
+        return
+
+    if method == "ctrl_shift_v":
         _send_keystroke([_VK_CONTROL, _VK_SHIFT], _VK_V)
     else:
         _send_keystroke([_VK_CONTROL], _VK_V)
-
-    # Verify focus didn't get stolen mid-send; retry once if so.
-    time.sleep(0.05)
-    if win32gui.GetForegroundWindow() != hwnd:
-        warn("inject", "focus lost mid-paste, retrying")
-        _force_foreground(hwnd)
-        time.sleep(0.20)
-        if not _try_wm_paste(hwnd):
-            _flush_all_modifiers()
-            time.sleep(0.05)
-            if _is_terminal(hwnd):
-                _send_keystroke([_VK_CONTROL, _VK_SHIFT], _VK_V)
-            else:
-                _send_keystroke([_VK_CONTROL], _VK_V)
 
     def _restore():
         time.sleep(_restore_delay_ms / 1000)
@@ -581,3 +689,25 @@ def inject_text(text: str, hwnd: int) -> None:
             warn("inject", f"clipboard restore failed: {exc}")
 
     threading.Thread(target=_restore, daemon=True).start()
+
+
+def _is_descendant(child_hwnd: int, ancestor_hwnd: int) -> bool:
+    """Return True if child_hwnd is ancestor_hwnd or one of its descendants.
+
+    Used to accept the case where Electron's focused renderer child window
+    becomes the foreground rather than the top-level VS Code window.
+    """
+    if child_hwnd == ancestor_hwnd:
+        return True
+    cur = child_hwnd
+    for _ in range(20):  # safety bound against pathological loops
+        try:
+            parent = win32gui.GetParent(cur)
+        except Exception:
+            return False
+        if not parent:
+            return False
+        if parent == ancestor_hwnd:
+            return True
+        cur = parent
+    return False
