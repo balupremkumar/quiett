@@ -19,7 +19,6 @@ import threading
 import time
 from ctypes import wintypes
 
-import pyperclip
 import win32api
 import win32con
 import win32gui
@@ -130,6 +129,133 @@ def _flush_modifier(vk: int) -> None:
 def _flush_all_modifiers() -> None:
     for vk in (_VK_CONTROL, _VK_MENU, _VK_SHIFT, _VK_LWIN, _VK_RWIN):
         _flush_modifier(vk)
+
+
+def _modifiers_physically_down() -> list[int]:
+    """Return list of VKs that are currently physically pressed (per GetAsyncKeyState).
+
+    Synthetic key-ups from _flush_all_modifiers don't override hardware state — if
+    the user is still physically holding the recording hotkey, Windows queues new
+    keydowns immediately. We have to wait for the physical release.
+    """
+    down = []
+    for vk in (_VK_CONTROL, _VK_MENU, _VK_SHIFT, _VK_LWIN, _VK_RWIN):
+        # high bit set = currently pressed
+        if _user32.GetAsyncKeyState(vk) & 0x8000:
+            down.append(vk)
+    return down
+
+
+def _wait_modifiers_released(timeout_ms: int = 400) -> bool:
+    """Block until Ctrl/Alt/Shift/Win are all physically released, or timeout.
+
+    Returns True if released within timeout, False otherwise.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        if not _modifiers_physically_down():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Raw Win32 clipboard — replaces pyperclip which uses a hidden Tk window that
+# Chromium-based apps (VS Code, Cursor, Chrome) sometimes time out reading from.
+# ---------------------------------------------------------------------------
+
+_CF_UNICODETEXT = 13
+_GMEM_MOVEABLE  = 0x0002
+
+
+def _clipboard_open(timeout_ms: int = 500) -> bool:
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        if _user32.OpenClipboard(0):
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _clipboard_get_text() -> str:
+    if not _clipboard_open():
+        return ""
+    try:
+        h = _user32.GetClipboardData(_CF_UNICODETEXT)
+        if not h:
+            return ""
+        ptr = _kernel32.GlobalLock(h)
+        if not ptr:
+            return ""
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            _kernel32.GlobalUnlock(h)
+    finally:
+        _user32.CloseClipboard()
+
+
+def _clipboard_set_text(text: str) -> bool:
+    if not _clipboard_open():
+        warn("inject", "clipboard open failed")
+        return False
+    try:
+        _user32.EmptyClipboard()
+        data = text.encode("utf-16le") + b"\x00\x00"
+        h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
+        if not h:
+            return False
+        ptr = _kernel32.GlobalLock(h)
+        if not ptr:
+            return False
+        ctypes.memmove(ptr, data, len(data))
+        _kernel32.GlobalUnlock(h)
+        if not _user32.SetClipboardData(_CF_UNICODETEXT, h):
+            _kernel32.GlobalFree(h)
+            return False
+        return True
+    finally:
+        _user32.CloseClipboard()
+
+
+# ---------------------------------------------------------------------------
+# UAC integrity check — SendInput silently fails when sending to a higher-
+# integrity-level process (e.g. an elevated Notepad / Regedit / Task Manager).
+# Detect this so we can surface a clear error instead of a silent paste failure.
+# ---------------------------------------------------------------------------
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_TOKEN_QUERY = 0x0008
+
+
+def _is_higher_integrity_target(hwnd: int) -> bool:
+    """Heuristic: target runs at higher integrity than us (e.g. elevated UAC).
+
+    If OpenProcessToken on the target's PID fails with ACCESS_DENIED while
+    OpenProcessToken on our own PID succeeds, the target is at higher integrity
+    and SendInput will silently fail. We can't fix this from a non-elevated
+    process — best we can do is detect it and surface a clear error.
+    """
+    try:
+        advapi32 = ctypes.windll.advapi32
+        target_pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(target_pid))
+        h_proc = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, target_pid.value)
+        if not h_proc:
+            return False  # can't open — assume same integrity rather than scare the user
+        try:
+            h_token = wintypes.HANDLE()
+            ok = bool(advapi32.OpenProcessToken(h_proc, _TOKEN_QUERY, ctypes.byref(h_token)))
+            if ok:
+                _kernel32.CloseHandle(h_token)
+                return False
+            err = ctypes.get_last_error()
+            # ERROR_ACCESS_DENIED = 5 strongly suggests higher integrity
+            return err == 5
+        finally:
+            _kernel32.CloseHandle(h_proc)
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +390,23 @@ def _get_focused_child(hwnd: int) -> int:
     return candidates[0]
 
 
+def _wait_focus_settled(target_hwnd: int, timeout_ms: int = 250) -> bool:
+    """Poll until GetGUIThreadInfo reports target_hwnd as focused, or timeout."""
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        try:
+            tid = _user32.GetWindowThreadProcessId(target_hwnd, None)
+            info = _GUITHREADINFO()
+            info.cbSize = ctypes.sizeof(_GUITHREADINFO)
+            if _user32.GetGUIThreadInfo(tid, ctypes.byref(info)):
+                if info.hwndFocus == target_hwnd or info.hwndActive == target_hwnd:
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.01)
+    return False
+
+
 def _set_focus_on_child(child_hwnd: int) -> None:
     """Attach to the child widget's own thread and call SetFocus + SetActiveWindow."""
     cur = _kernel32.GetCurrentThreadId()
@@ -330,23 +473,51 @@ def _try_wm_paste(hwnd: int) -> bool:
         return False
 
 
+_paste_failure_callback = None
+
+
+def set_paste_failure_callback(fn) -> None:
+    """Register a callback invoked with a human-readable reason when paste fails."""
+    global _paste_failure_callback
+    _paste_failure_callback = fn
+
+
+def _notify_failure(reason: str) -> None:
+    warn("inject", f"paste failed: {reason}")
+    cb = _paste_failure_callback
+    if cb:
+        try:
+            cb(reason)
+        except Exception:
+            pass
+
+
 def inject_text(text: str, hwnd: int) -> None:
     if not hwnd or not win32gui.IsWindow(hwnd):
         log("inject", "no target hwnd")
         return
 
-    target_cls  = _get_class(hwnd)
-    target_exe  = _get_exe_name(hwnd)
+    target_cls   = _get_class(hwnd)
+    target_exe   = _get_exe_name(hwnd)
     target_title = win32gui.GetWindowText(hwnd) if hwnd else ""
-    paste_key = "ctrl_shift_v" if _is_terminal(hwnd) else "ctrl_v"
+    paste_key    = "ctrl_shift_v" if _is_terminal(hwnd) else "ctrl_v"
     log("inject", f"target hwnd={hwnd} class={target_cls!r} exe={target_exe!r} "
                   f"title={target_title[:60]!r} paste={paste_key} chars={len(text)}")
 
-    original = pyperclip.paste()
-    try:
-        pyperclip.copy(text)
-    except Exception as exc:
-        warn("inject", f"clipboard copy failed: {exc}")
+    # UAC guard: SendInput cannot reach a higher-integrity process. Detect this
+    # before we destroy the clipboard so the user gets a clear error.
+    if _is_higher_integrity_target(hwnd):
+        _notify_failure(
+            f"Cannot paste into elevated window ({target_exe or 'unknown'}). "
+            "Run VoiceDictate as administrator to enable paste into UAC-elevated apps."
+        )
+        return
+
+    # Capture original clipboard, then set ours via raw Win32 (more reliable
+    # than pyperclip's Tk-backed clipboard with Chromium-based apps).
+    original = _clipboard_get_text()
+    if not _clipboard_set_text(text):
+        _notify_failure("Could not place text on clipboard")
         return
 
     _force_foreground(hwnd)
@@ -355,35 +526,39 @@ def inject_text(text: str, hwnd: int) -> None:
     # the VS Code window regains OS focus (JavaScript focus events are async).
     settle = 0.15
     if _needs_slow_settle(hwnd):
-        settle = 0.60   # Electron: was 0.30, increased — JS focus restoration is slow
+        settle = 0.60
     if _is_rdp(hwnd):
         settle = 0.40
     time.sleep(settle)
 
     # For Electron apps: enumerate Chrome_RenderWidgetHostHWND child windows
-    # (each lives in its own renderer process/thread) and SetFocus on the active
-    # one directly, then let SendInput deliver Ctrl+V to that exact widget.
-    is_electron = any(s in target_cls for s in _SLOW_FOCUS_CLASSES_SUBSTR)
-    if is_electron and not _is_rdp(hwnd):
+    # and SetFocus on the active one directly, then poll until focus settles.
+    is_electron = any(s in target_cls for s in _SLOW_FOCUS_CLASSES_SUBSTR) and not _is_rdp(hwnd)
+    target_for_send = hwnd
+    if is_electron:
         child = _get_focused_child(hwnd)
         _set_focus_on_child(child)
+        target_for_send = child
         log("inject", f"electron child: hwnd={child} class={_get_class(child)!r}")
-        time.sleep(0.05)
+        _wait_focus_settled(child, timeout_ms=250)
 
-    # Drain any stuck modifier from the Ctrl+Alt hotkey. Without this, Alt is still
-    # logically held when we send Ctrl+V, producing Ctrl+Alt+V (often a no-op).
+    # Block until the user has physically released the recording hotkey. Without
+    # this, Alt/Ctrl from the recording chord can still be down — Windows then
+    # interprets our Ctrl+V as Ctrl+Alt+V (often a no-op or wrong shortcut).
+    if not _wait_modifiers_released(timeout_ms=400):
+        log("inject", f"modifiers still held after 400ms: {_modifiers_physically_down()}")
     _flush_all_modifiers()
-    time.sleep(0.05)
+    time.sleep(0.03)
 
     if _is_terminal(hwnd):
         _send_keystroke([_VK_CONTROL, _VK_SHIFT], _VK_V)
     else:
         _send_keystroke([_VK_CONTROL], _VK_V)
 
-    # If focus was stolen during settle, retry once.
+    # Verify focus didn't get stolen mid-send; retry once if so.
     time.sleep(0.05)
     if win32gui.GetForegroundWindow() != hwnd:
-        warn("inject", "focus lost mid-paste, retrying with WM_PASTE fallback")
+        warn("inject", "focus lost mid-paste, retrying")
         _force_foreground(hwnd)
         time.sleep(0.20)
         if not _try_wm_paste(hwnd):
@@ -397,10 +572,9 @@ def inject_text(text: str, hwnd: int) -> None:
     def _restore():
         time.sleep(_restore_delay_ms / 1000)
         try:
-            # Don't clobber if user/app already changed the clipboard
-            current = pyperclip.paste()
+            current = _clipboard_get_text()
             if current == text:
-                pyperclip.copy(original)
+                _clipboard_set_text(original)
             else:
                 log("inject", "clipboard changed during paste, skipping restore")
         except Exception as exc:

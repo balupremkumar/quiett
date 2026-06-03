@@ -46,28 +46,72 @@ _BG = {
 }
 
 
-def _make_icon(bg: tuple) -> Image.Image:
-    size = 64
+def _make_icon(bg: tuple, target_size: int = 64) -> Image.Image:
+    """Render the tray icon. Drawn at 4x then downsampled with LANCZOS for clean edges."""
+    scale = 4
+    size  = target_size * scale
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.ellipse([2, 2, 61, 61], fill=bg)
+
+    # Background circle with subtle inner shadow for depth
+    pad = 2 * scale
+    d.ellipse([pad, pad, size - pad, size - pad], fill=bg)
+
     fg = (255, 255, 255)
+    stroke = max(2, int(2.5 * scale))
 
-    # Microphone — shifted left to make room for waveform bars
-    cx = 22
-    d.rounded_rectangle([cx - 7, 13, cx + 7, 34], radius=6, fill=fg)
-    d.arc([cx - 12, 26, cx + 12, 44], start=0, end=180, fill=fg, width=3)
-    d.line([cx, 44, cx, 52], fill=fg, width=3)
-    d.line([cx - 7, 52, cx + 7, 52], fill=fg, width=3)
+    # ── Microphone (shifted left, centred vertically) ─────────────────────
+    cx_mic = int(size * 0.34)
+    body_top    = int(size * 0.20)
+    body_bottom = int(size * 0.55)
+    body_half_w = int(size * 0.11)
+    body_radius = body_half_w
+    d.rounded_rectangle(
+        [cx_mic - body_half_w, body_top, cx_mic + body_half_w, body_bottom],
+        radius=body_radius, fill=fg,
+    )
+    # Mic stand arc (U-shape under the body)
+    arc_half_w = int(size * 0.16)
+    arc_top    = int(size * 0.45)
+    arc_bottom = int(size * 0.70)
+    d.arc(
+        [cx_mic - arc_half_w, arc_top, cx_mic + arc_half_w, arc_bottom],
+        start=0, end=180, fill=fg, width=stroke,
+    )
+    # Vertical stem from arc to foot
+    stem_top    = int(size * 0.70)
+    stem_bottom = int(size * 0.82)
+    d.line([cx_mic, stem_top, cx_mic, stem_bottom], fill=fg, width=stroke)
+    # Foot
+    foot_half_w = int(size * 0.11)
+    d.line(
+        [cx_mic - foot_half_w, stem_bottom, cx_mic + foot_half_w, stem_bottom],
+        fill=fg, width=stroke,
+    )
 
-    # Audio waveform bars — 3 vertical bars of varying height (voice-AI indicator)
-    for bx, half_h in ((42, 8), (48, 13), (54, 9)):
-        d.line([bx, 32 - half_h, bx, 32 + half_h], fill=fg, width=3)
+    # ── Waveform — 3 rounded vertical bars (short-tall-short) ─────────────
+    bar_width = max(2, int(2 * scale))
+    bar_centre_y = int(size * 0.50)
+    bar_xs = [int(size * 0.66), int(size * 0.76), int(size * 0.86)]
+    bar_half_hs = [int(size * 0.11), int(size * 0.20), int(size * 0.14)]
+    for bx, bh in zip(bar_xs, bar_half_hs):
+        d.rounded_rectangle(
+            [bx - bar_width, bar_centre_y - bh, bx + bar_width, bar_centre_y + bh],
+            radius=bar_width, fill=fg,
+        )
 
-    return img
+    # Downsample with LANCZOS for crisp anti-aliasing at 16/24/32 px tray sizes
+    return img.resize((target_size, target_size), Image.LANCZOS)
 
 
 _ICONS = {state: _make_icon(bg) for state, bg in _BG.items()}
+
+
+def export_ico(path: str) -> None:
+    """Write a multi-resolution .ico file for use as a desktop shortcut icon."""
+    icon = _make_icon(_BG["idle"], target_size=256)
+    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+    icon.save(path, format="ICO", sizes=sizes)
 
 # Pulse state
 _pulse_timer: threading.Timer | None = None

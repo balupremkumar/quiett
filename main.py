@@ -141,6 +141,9 @@ def main() -> None:
         restore_delay_ms=_cfg["clipboard_restore_delay_ms"],
         per_app_paste=_cfg.get("per_app_paste", {}),
     )
+    inject.set_paste_failure_callback(
+        lambda msg: tray.notify("VoiceDictate", msg)
+    )
     preview.configure_position(_cfg["preview_position"])
     preview.start()
 

@@ -375,6 +375,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     win.overrideredirect(True)
     win.configure(bg=_BG)
     win.attributes("-topmost", True)
+    win.attributes("-alpha", 0.0)   # start fully transparent; fade in below
 
     frame = tk.Frame(win, bg=_BG, padx=16, pady=14)
     frame.pack(fill=tk.BOTH, expand=True)
@@ -602,6 +603,17 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
     x, y = _calc_position(cx, cy, w, h, sw, sh, _preview_position)
     win.geometry(f"{w}x{h}+{x}+{y}")
+
+    # ── Fade-in animation ──────────────────────────────────────────────────
+    def _fade_in(step: int = 0) -> None:
+        try:
+            alpha = min(1.0, step * 0.12)
+            win.attributes("-alpha", alpha)
+            if alpha < 1.0:
+                win.after(16, _fade_in, step + 1)
+        except Exception:
+            pass
+    _fade_in()
 
     # ── Auto-dismiss ───────────────────────────────────────────────────────
     if auto_dismiss > 0:
@@ -877,8 +889,8 @@ def _open_settings() -> None:
     _section("Transcription")
     lang_var = tk.StringVar(value=cfg.get("language", "en"))
     _field("Language (e.g. en, fr, es)", lang_var)
-    model_var = tk.StringVar(value=cfg.get("model", "small"))
-    _field("Model (tiny / base / small / medium / large)  — restart required", model_var)
+    model_var = tk.StringVar(value=cfg.get("model", "large-v3-turbo"))
+    _field("Model (tiny / base / small / medium / large-v3 / large-v3-turbo) — restart required", model_var)
 
     _section("Whisper biasing")
     _note("initial_prompt seeds Whisper with context — improves accuracy for domain terms.")
@@ -965,17 +977,17 @@ def _open_settings() -> None:
     fillers_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
 
     _section("Vibe Coding")
-    _note("Restructures dictation into a coding prompt via LM Studio (local) or Claude API.")
+    _note("Restructures dictation into a clean coding prompt via Qwen3-8B (local, GPU).")
     vibe_var = tk.BooleanVar(value=bool(cfg.get("vibe_mode", False)))
-    tk.Checkbutton(content, text="Enable vibe mode (adds ~300-500ms via API)",
+    tk.Checkbutton(content, text="Enable vibe mode (adds ~2-3 seconds)",
                    variable=vibe_var, bg=_BG, fg=_FG2,
                    activebackground=_BG, activeforeground=_FG,
                    selectcolor=_BG2, font=("Segoe UI", 9)
                    ).pack(anchor="w", padx=16, pady=(6, 0))
-    backend_var = tk.StringVar(value=cfg.get("vibe_mode_backend", "api"))
+    backend_var = tk.StringVar(value=cfg.get("vibe_mode_backend", "lmstudio"))
     tk.Label(content, text="Backend", bg=_BG, fg=_FG2,
              font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 0))
-    be_menu = tk.OptionMenu(content, backend_var, "lmstudio", "api", "rules")
+    be_menu = tk.OptionMenu(content, backend_var, "lmstudio", "rules")
     be_menu.config(bg=_BG2, fg=_FG, activebackground=_BORDER,
                    relief="flat", highlightthickness=0, font=("Segoe UI", 10))
     be_menu.pack(anchor="w", padx=16, pady=(2, 0))

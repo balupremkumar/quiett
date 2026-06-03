@@ -39,11 +39,18 @@ class TestInjectText:
         inject.inject_text("hello", 9999)
         _pyperclip.copy.assert_not_called()
 
-    def test_copies_text_to_clipboard_before_paste(self):
+    def test_places_text_on_clipboard(self, monkeypatch):
+        """inject_text must put the text on the clipboard before sending paste."""
         _win32gui.IsWindow.return_value = True
-        _pyperclip.paste.return_value = "old"
+        calls = []
+        monkeypatch.setattr(inject, "_clipboard_get_text", lambda: "old")
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: calls.append(t) or True)
+        monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: False)
+        monkeypatch.setattr(inject, "_force_foreground", lambda h: None)
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_send_keystroke", lambda mods, key: None)
         inject.inject_text("new text", 1234)
-        _pyperclip.copy.assert_any_call("new text")
+        assert "new text" in calls
 
     def test_configure_sets_restore_delay(self):
         inject.configure(restore_delay_ms=300)

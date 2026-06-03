@@ -34,6 +34,7 @@ stderr.txt
 models/
 third_party/
 startup.log
+icon_preview_*.png
 
 # OS
 .vscode/
