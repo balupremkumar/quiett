@@ -33,7 +33,7 @@ _LMSTUDIO_MODELS_URL = "http://localhost:1234/v1/models"
 # lms.exe location — standard install path on Windows
 _LMS_EXE = os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin\lms.exe")
 
-_SYSTEM_PROMPT = (
+_CODING_PROMPT = (
     "You rewrite raw voice dictation as a concise coding instruction.\n"
     "Start with an imperative verb (Add, Create, Fix, Refactor, Remove).\n"
     "Keep every file name, function name, technical term, and proper noun exactly as spoken.\n"
@@ -52,6 +52,61 @@ _SYSTEM_PROMPT = (
     "Raw: I need to refactor the audio module to support multiple microphones and also add a device dropdown in the settings UI\n"
     "Rewrite: Refactor audio module to support multiple microphones, add device dropdown to settings UI."
 )
+
+_CHAT_PROMPT = (
+    "You rewrite raw voice dictation as a clear chat message.\n"
+    "Keep the user's intent and tone, but fix grammar, remove filler, and tighten phrasing.\n"
+    "Use natural sentence punctuation.\n"
+    "Output only the rewritten message. No preamble.\n"
+    "\n"
+    "Example 1\n"
+    "Raw: hey just wanted to like check in on that PR you were going to look at yesterday\n"
+    "Rewrite: Hey — just checking in on that PR you were going to look at yesterday.\n"
+    "\n"
+    "Example 2\n"
+    "Raw: yeah um sounds good let's do tuesday like 2 pm works for me\n"
+    "Rewrite: Sounds good, let's do Tuesday — 2pm works for me."
+)
+
+_LONGFORM_PROMPT = (
+    "You rewrite raw voice dictation as a polished paragraph.\n"
+    "Preserve the speaker's voice. Fix grammar, remove filler, and join fragments into flowing prose.\n"
+    "Output only the rewritten paragraph. No preamble.\n"
+    "\n"
+    "Example\n"
+    "Raw: so basically the thing about local first apps is that you don't have to worry about server costs and also they work offline which is huge for power users\n"
+    "Rewrite: Local-first apps remove server costs and work offline — both of which matter enormously to power users."
+)
+
+PROFILES: dict[str, str] = {
+    "coding":   _CODING_PROMPT,
+    "chat":     _CHAT_PROMPT,
+    "longform": _LONGFORM_PROMPT,
+}
+
+_active_profile = "coding"
+
+
+def set_profile(name: str) -> None:
+    """Switch the active reformat profile. Falls back to 'coding' if name unknown."""
+    global _active_profile
+    if name in PROFILES:
+        _active_profile = name
+        log("reformat", f"active profile -> {name}")
+    else:
+        warn("reformat", f"unknown profile {name!r}, keeping {_active_profile!r}")
+
+
+def get_profile() -> str:
+    return _active_profile
+
+
+def _system_prompt() -> str:
+    return PROFILES.get(_active_profile, _CODING_PROMPT)
+
+
+# Back-compat alias for code that still imports _SYSTEM_PROMPT
+_SYSTEM_PROMPT = _CODING_PROMPT
 
 _OPENER_RE = re.compile(
     r'^(?:i\s+want\s+to|i\s+need\s+to|i\'?d\s+like\s+to|can\s+you(?:\s+please)?\s+|'
@@ -78,7 +133,7 @@ def _call_lmstudio(text: str) -> str:
     payload = json.dumps({
         "model": "local-model",
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT + "\n/no_think"},
+            {"role": "system", "content": _system_prompt() + "\n/no_think"},
             {"role": "user",   "content": f"Raw: {text}\nRewrite:"},
         ],
         "max_tokens": 512,
@@ -227,7 +282,7 @@ def run(text: str) -> str:
                 max_tokens=256,
                 system=[{
                     "type": "text",
-                    "text": _SYSTEM_PROMPT,
+                    "text": _system_prompt(),
                     "cache_control": {"type": "ephemeral"},
                 }],
                 messages=[{"role": "user", "content": f"Raw: {text}"}],

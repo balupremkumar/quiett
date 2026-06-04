@@ -79,6 +79,10 @@ def _port_in_use(host: str, port: int) -> bool:
             return False
 
 
+def server_alive() -> bool:
+    return _server_alive()
+
+
 def _server_alive() -> bool:
     try:
         urllib.request.urlopen(f"{_BASE_URL}/", timeout=1.0)

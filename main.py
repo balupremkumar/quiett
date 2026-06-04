@@ -142,7 +142,7 @@ def main() -> None:
         per_app_paste=_cfg.get("per_app_paste", {}),
     )
     inject.set_paste_failure_callback(
-        lambda msg: tray.notify("VoiceDictate", msg)
+        lambda msg: preview.show_toast(msg, kind="warn")
     )
     preview.configure_position(_cfg["preview_position"])
     preview.start()
@@ -170,7 +170,7 @@ def main() -> None:
             msg = f"Transcription error: {exc}"
             log_error("main", msg)
             print(msg)
-            tray.notify("VoiceDictate", msg)
+            preview.show_toast(msg, kind="error")
         finally:
             tray.set_state("idle")
             preview.hide_badge()
@@ -217,6 +217,7 @@ def main() -> None:
 
     def _on_recording_start() -> None:
         preview.close_current_preview()
+        preview.flash_screen_edge("#3b82f6")
         tray.set_state("recording")
         preview.show_badge("recording")
         audio.start()
@@ -231,6 +232,8 @@ def main() -> None:
         silence_timeout_seconds=_cfg.get("silence_auto_stop_seconds", 3.0),
         silence_threshold=_cfg.get("silence_threshold", 0.01),
         input_device=_cfg.get("input_device"),
+        vad_silence_mode=_cfg.get("vad_silence_mode", False),
+        vad_aggressiveness=_cfg.get("vad_aggressiveness", 2),
     )
 
     def _on_too_short() -> None:
@@ -284,7 +287,8 @@ def main() -> None:
                     _t.sleep(backoff)
                     backoff *= 2
         tray.set_state("idle")
-        tray.notify("VoiceDictate", "Model load failed after 3 attempts. Check app.log.")
+        preview.show_toast("Model load failed after 3 attempts. Check app.log.",
+                           kind="error")
 
     threading.Thread(target=_load_model, daemon=True).start()
     atexit.register(transcribe.shutdown)
@@ -296,6 +300,32 @@ def main() -> None:
         )
 
     threading.Thread(target=_load_reformat, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Health monitor — toasts a restart action when a backend goes down
+    # ------------------------------------------------------------------
+
+    import health
+
+    def _restart_whisper():
+        log("main", "user requested whisper restart")
+        try:
+            transcribe.shutdown()
+        except Exception:
+            pass
+        threading.Thread(target=_load_model, daemon=True).start()
+
+    def _restart_lmstudio():
+        log("main", "user requested lmstudio restart")
+        threading.Thread(target=_load_reformat, daemon=True).start()
+
+    health.configure(
+        toast_fn=preview.show_toast,
+        restart_whisper_fn=_restart_whisper,
+        restart_lmstudio_fn=_restart_lmstudio,
+        vibe_enabled_fn=lambda: _get_cfg().get("vibe_mode", False),
+    )
+    health.start()
 
     # ------------------------------------------------------------------
     # Config hot-reload
@@ -366,6 +396,23 @@ def main() -> None:
         except Exception:
             pass
 
+    def _on_set_vibe_profile(name: str) -> None:
+        global _cfg
+        reformat.set_profile(name)
+        with _cfg_lock:
+            _cfg["vibe_profile"] = name
+        try:
+            with open("config.json") as f:
+                raw = json.load(f)
+            raw["vibe_profile"] = name
+            with open("config.json", "w") as f:
+                json.dump(raw, f, indent=2)
+        except Exception:
+            pass
+
+    # Apply persisted profile on startup
+    reformat.set_profile(_cfg.get("vibe_profile", "coding"))
+
     tray.configure(
         on_view_history=preview.show_history,
         on_toggle_pause=hotkey.set_paused,
@@ -373,6 +420,8 @@ def main() -> None:
         on_open_settings=preview.show_settings,
         on_toggle_vibe=_on_toggle_vibe,
         vibe_mode=_cfg.get("vibe_mode", False),
+        on_set_vibe_profile=_on_set_vibe_profile,
+        vibe_profile=_cfg.get("vibe_profile", "coding"),
     )
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()

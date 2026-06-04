@@ -1,0 +1,151 @@
+"""
+Windows-only window-effects helpers for borderless Tk Toplevels.
+
+Provides rounded corners (via SetWindowRgn) and smooth fade in/out
+(via wm_attributes alpha + tk.after).
+"""
+from __future__ import annotations
+
+import math
+
+import win32api
+import win32con
+import win32gui
+
+
+def apply_rounded_region(win, radius: int = 12) -> None:
+    """Clip the window to a rounded rectangle. Safe to call once after geometry is set."""
+    try:
+        win.update_idletasks()
+        hwnd = int(win.winfo_id())
+        # winfo_id on Tk returns the inner widget HWND; walk up to the actual top-level
+        parent = win32gui.GetParent(hwnd)
+        while parent:
+            hwnd = parent
+            parent = win32gui.GetParent(hwnd)
+
+        w = win.winfo_width()
+        h = win.winfo_height()
+        if w <= 0 or h <= 0:
+            return
+        rgn = win32gui.CreateRoundRectRgn(0, 0, w + 1, h + 1, radius * 2, radius * 2)
+        win32gui.SetWindowRgn(hwnd, rgn, True)
+    except Exception:
+        pass
+
+
+def fade_to(win, target: float, duration_ms: int = 180, steps: int = 9,
+            on_done=None) -> None:
+    """
+    Smoothly ramp the window's -alpha attribute to `target` over `duration_ms`.
+    Cubic ease-in-out. Safely no-ops if the window is destroyed mid-fade.
+    """
+    try:
+        start = float(win.attributes("-alpha"))
+    except Exception:
+        start = 1.0
+
+    delta = target - start
+    if abs(delta) < 0.01:
+        if on_done:
+            on_done()
+        return
+
+    step_ms = max(1, duration_ms // steps)
+
+    def ease(t: float) -> float:
+        # cubic in-out
+        return 4 * t * t * t if t < 0.5 else 1 - pow(-2 * t + 2, 3) / 2
+
+    def tick(i: int) -> None:
+        try:
+            if not win.winfo_exists():
+                return
+        except Exception:
+            return
+        t = i / steps
+        a = start + delta * ease(t)
+        try:
+            win.attributes("-alpha", max(0.0, min(1.0, a)))
+        except Exception:
+            return
+        if i >= steps:
+            if on_done:
+                try:
+                    on_done()
+                except Exception:
+                    pass
+            return
+        win.after(step_ms, lambda: tick(i + 1))
+
+    tick(1)
+
+
+def fade_in(win, target: float = 0.94, duration_ms: int = 180) -> None:
+    try:
+        win.attributes("-alpha", 0.0)
+    except Exception:
+        return
+    fade_to(win, target, duration_ms)
+
+
+def fade_out_then_destroy(win, duration_ms: int = 160) -> None:
+    fade_to(win, 0.0, duration_ms, on_done=lambda: _safe_destroy(win))
+
+
+def _safe_destroy(win) -> None:
+    try:
+        win.destroy()
+    except Exception:
+        pass
+
+
+def slide_in(win, dx: int = 0, dy: int = 10, duration_ms: int = 200,
+             alpha_target: float = 1.0) -> None:
+    """Move window from (x+dx, y+dy) to (x, y) while fading alpha in. Eased."""
+    try:
+        win.update_idletasks()
+        geo = win.geometry()  # "WxH+X+Y"
+    except Exception:
+        return
+
+    try:
+        size_part, x_part, y_part = geo.split("+", 2)
+        x_end = int(x_part)
+        y_end = int(y_part)
+        w, h = size_part.split("x")
+    except Exception:
+        return
+
+    x_start = x_end + dx
+    y_start = y_end + dy
+    steps = 10
+    step_ms = max(1, duration_ms // steps)
+
+    try:
+        win.attributes("-alpha", 0.0)
+    except Exception:
+        pass
+
+    def ease(t: float) -> float:
+        return 1 - pow(1 - t, 3)
+
+    def tick(i: int) -> None:
+        try:
+            if not win.winfo_exists():
+                return
+        except Exception:
+            return
+        t = i / steps
+        e = ease(t)
+        x = int(x_start + (x_end - x_start) * e)
+        y = int(y_start + (y_end - y_start) * e)
+        try:
+            win.geometry(f"{w}x{h}+{x}+{y}")
+            win.attributes("-alpha", alpha_target * e)
+        except Exception:
+            return
+        if i < steps:
+            win.after(step_ms, lambda: tick(i + 1))
+
+    tick(1)

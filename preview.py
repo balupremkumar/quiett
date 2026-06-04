@@ -13,13 +13,19 @@ import time
 import tkinter as tk
 from datetime import date, datetime
 
+import math
+
 import pyperclip
 import win32api
+from PIL import ImageEnhance, ImageTk
 
 import audio
 import history as hist
 import inject
 import profile
+import tray
+import widgets
+import winfx
 
 _CONFIG_FILE = "config.json"
 
@@ -32,6 +38,8 @@ _history_q:   queue.Queue = queue.Queue()
 _profile_q:   queue.Queue = queue.Queue()
 _settings_q:  queue.Queue = queue.Queue()
 _badge_q:     queue.Queue = queue.Queue()
+_toast_q:     queue.Queue = queue.Queue()
+_flash_q:     queue.Queue = queue.Queue()
 _root:        tk.Tk | None = None
 _ready = threading.Event()
 
@@ -49,14 +57,55 @@ _preview_position = "cursor"
 # Re-record callback — set by main.py
 _on_rerecord = None
 
-# Dark-theme palette
-_BG      = "#1e1e1e"
-_BG2     = "#2d2d2d"
-_FG      = "#ffffff"
-_FG2     = "#aaaaaa"
-_BLUE    = "#0078d4"
-_BLUE_HV = "#1a8ae0"
-_BORDER  = "#444444"
+# Themes — dark / light. Selected at module load from config.json `theme` field.
+# Theme change requires restart (palette is captured into module constants below).
+_THEMES = {
+    "dark": {
+        "BG": "#1a1a1d", "BG2": "#26262a", "BG3": "#2f2f34",
+        "FG": "#f3f4f6", "FG2": "#a1a1aa", "FG3": "#71717a",
+        "BLUE": "#3b82f6", "BLUE_HV": "#60a5fa",
+        "BORDER": "#3a3a40", "BORDER2": "#4a4a52",
+    },
+    "light": {
+        "BG": "#fafafa", "BG2": "#f1f1f4", "BG3": "#e4e4e9",
+        "FG": "#18181b", "FG2": "#52525b", "FG3": "#a1a1aa",
+        "BLUE": "#2563eb", "BLUE_HV": "#3b82f6",
+        "BORDER": "#d4d4d8", "BORDER2": "#c4c4ca",
+    },
+}
+
+
+def _resolve_theme() -> str:
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f).get("theme", "dark")
+    except Exception:
+        return "dark"
+
+
+_THEME_NAME = _resolve_theme()
+_T = _THEMES.get(_THEME_NAME, _THEMES["dark"])
+
+_BG      = _T["BG"]
+_BG2     = _T["BG2"]
+_BG3     = _T["BG3"]
+_FG      = _T["FG"]
+_FG2     = _T["FG2"]
+_FG3     = _T["FG3"]
+_BLUE    = _T["BLUE"]
+_BLUE_HV = _T["BLUE_HV"]
+_BORDER  = _T["BORDER"]
+_BORDER2 = _T["BORDER2"]
+
+# Typography ladder — Segoe UI Variable with weight cascade
+# (falls back automatically to Segoe UI if Variable isn't installed)
+_FONT_FAM_TEXT    = "Segoe UI Variable Text"
+_FONT_FAM_DISPLAY = "Segoe UI Variable Display"
+_FONT_BODY  = (_FONT_FAM_TEXT,    11, "normal")
+_FONT_HINT  = (_FONT_FAM_TEXT,     9, "normal")
+_FONT_META  = (_FONT_FAM_TEXT,     9, "normal")
+_FONT_BTN   = (_FONT_FAM_DISPLAY, 10, "normal")
+_FONT_CHIP  = (_FONT_FAM_TEXT,     8, "normal")
 
 
 def start() -> None:
@@ -95,6 +144,18 @@ def hide_badge() -> None:
     _badge_q.put(None)
 
 
+def show_toast(message: str, kind: str = "info", action_label: str = "",
+               action_cb=None) -> None:
+    """Show a custom in-app toast. kind: info|warn|error. Optional action button."""
+    _toast_q.put({"message": message, "kind": kind,
+                  "action_label": action_label, "action_cb": action_cb})
+
+
+def flash_screen_edge(colour: str = "#3b82f6") -> None:
+    """Quick screen-edge flash to confirm a hotkey press registered."""
+    _flash_q.put(colour)
+
+
 def close_current_preview() -> None:
     """Close any open preview window. Safe to call from any thread."""
     _close_preview_requested.set()
@@ -129,10 +190,17 @@ def _tk_main() -> None:
     _root.mainloop()
 
 
-_badge_win:   tk.Toplevel | None = None
-_badge_label: tk.Label | None = None
-_badge_dot:   tk.Label | None = None
-_badge_state: str | None = None
+_badge_win:    tk.Toplevel | None = None
+_badge_label:  tk.Label | None = None     # used for non-recording transient states (too_short / not_ready)
+_badge_dot:    tk.Label | None = None
+_badge_canvas: tk.Canvas | None = None    # waveform + logo canvas for recording/processing
+_badge_time:   tk.Label | None = None
+_badge_logo_lbl: tk.Label | None = None
+_badge_logo_variants: list = []           # PhotoImage list indexed by brightness level
+_badge_logo_idx: int = 0
+_badge_state:  str | None = None
+_badge_anim_phase: float = 0.0            # drives the processing sweep
+_badge_smoothed: list[float] = []         # interpolated bar heights for ease-out decay
 
 
 def _tick() -> None:
@@ -184,25 +252,9 @@ def _tick() -> None:
                 print(f"preview window error: {e}")
                 _preview_open = False
 
-    # Live-update badge text when recording
-    if _badge_state == "recording" and _badge_alive():
-        try:
-            elapsed  = int(audio.get_elapsed())
-            silence  = audio.get_silence_elapsed()
-            timeout  = audio.get_silence_timeout()
-            if timeout > 0 and silence > 1.5:
-                remaining = max(0.0, timeout - silence)
-                new_text = f"Silence... {remaining:.0f}s"
-                new_dot  = "#c8a000"
-            else:
-                new_text = f"Recording... {elapsed}s"
-                new_dot  = "#e03030"
-            if _badge_label and _badge_label.cget("text") != new_text:
-                _badge_label.config(text=new_text)
-            if _badge_dot and _badge_dot.cget("fg") != new_dot:
-                _badge_dot.config(fg=new_dot)
-        except Exception:
-            pass
+    # Live-update waveform badge
+    if _badge_state in ("recording", "processing") and _badge_alive():
+        _draw_badge_frame()
 
     # Always drain these queues so items don't accumulate while a window is open
     # and immediately reopen it the moment the user closes it.
@@ -248,7 +300,115 @@ def _tick() -> None:
         except queue.Empty:
             break
 
+    # Drain toast queue
+    while True:
+        try:
+            t = _toast_q.get_nowait()
+            _show_anchored_toast(t)
+        except queue.Empty:
+            break
+
+    # Drain flash queue
+    while True:
+        try:
+            colour = _flash_q.get_nowait()
+            _show_edge_flash(colour)
+        except queue.Empty:
+            break
+
     _root.after(50, _tick)
+
+
+# ---------------------------------------------------------------------------
+# Anchored toast (bottom-right of screen) + action button
+# ---------------------------------------------------------------------------
+
+_toast_offset: int = 0  # stack toasts vertically when several arrive together
+
+
+def _show_anchored_toast(t: dict) -> None:
+    global _toast_offset
+    msg = t.get("message", "")
+    kind = t.get("kind", "info")
+    action_label = t.get("action_label", "")
+    action_cb = t.get("action_cb")
+
+    accent = {"info": _BLUE, "warn": "#f59e0b", "error": "#ef4444"}.get(kind, _BLUE)
+
+    win = tk.Toplevel(_root)
+    win.overrideredirect(True)
+    win.attributes("-topmost", True)
+    win.attributes("-alpha", 0.0)
+    win.configure(bg=_BORDER2)
+
+    inner = tk.Frame(win, bg=_BG, padx=14, pady=10)
+    inner.pack(padx=1, pady=1)
+
+    tk.Label(inner, text="●", bg=_BG, fg=accent,
+             font=(_FONT_FAM_TEXT, 10)).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Label(inner, text=msg, bg=_BG, fg=_FG,
+             font=(_FONT_FAM_TEXT, 10), wraplength=320,
+             justify="left").pack(side=tk.LEFT)
+
+    if action_label and action_cb:
+        def _do_action():
+            try:
+                action_cb()
+            except Exception:
+                pass
+            winfx.fade_out_then_destroy(win, duration_ms=140)
+
+        btn = tk.Button(inner, text=action_label, command=_do_action,
+                        bg=accent, fg="#ffffff",
+                        activebackground=accent, activeforeground="#ffffff",
+                        relief="flat", bd=0,
+                        font=(_FONT_FAM_DISPLAY, 9, "bold"),
+                        padx=10, pady=4, cursor="hand2")
+        btn.pack(side=tk.LEFT, padx=(12, 0))
+
+    win.update_idletasks()
+    w = win.winfo_reqwidth()
+    h = win.winfo_reqheight()
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    # Stack above the badge area
+    y = sh - h - 130 - _toast_offset
+    win.geometry(f"{w}x{h}+{sw - w - 20}+{y}")
+    _toast_offset += h + 10
+
+    winfx.apply_rounded_region(win, radius=10)
+    winfx.fade_in(win, target=0.96, duration_ms=160)
+
+    # Auto-dismiss after 4.5s (or stay if action button present)
+    dismiss_ms = 7000 if action_label else 4500
+
+    def _dismiss():
+        global _toast_offset
+        _toast_offset = max(0, _toast_offset - h - 10)
+        winfx.fade_out_then_destroy(win, duration_ms=180)
+
+    win.after(dismiss_ms, _dismiss)
+
+
+# ---------------------------------------------------------------------------
+# Screen-edge flash (item 21)
+# ---------------------------------------------------------------------------
+
+def _show_edge_flash(colour: str) -> None:
+    """Thin horizontal bar at the top of the screen, fades in then out fast."""
+    win = tk.Toplevel(_root)
+    win.overrideredirect(True)
+    win.attributes("-topmost", True)
+    win.attributes("-alpha", 0.0)
+    win.configure(bg=colour)
+
+    sw = win.winfo_screenwidth()
+    win.geometry(f"{sw}x3+0+0")
+
+    # Fade in fast, hold briefly, fade out
+    winfx.fade_to(win, 0.65, duration_ms=80,
+                  on_done=lambda: win.after(
+                      120, lambda: winfx.fade_out_then_destroy(win, duration_ms=180)))
 
 
 # ---------------------------------------------------------------------------
@@ -256,76 +416,322 @@ def _tick() -> None:
 # ---------------------------------------------------------------------------
 
 _BADGE_CFG = {
-    "recording":    {"dot": "#e03030", "text": "Recording..."},
-    "processing":   {"dot": "#c8a000", "text": "Transcribing..."},
-    "reformatting": {"dot": "#7b5ea7", "text": "Structuring prompt..."},
-    "too_short":    {"dot": "#888888", "text": "Hold longer to record"},
-    "not_ready":    {"dot": "#888888", "text": "Model loading — please wait"},
+    "recording":    {"accent": "#e03030", "logo_bg": (210,  30,  30)},
+    "processing":   {"accent": "#c8a000", "logo_bg": (200, 160,   0)},
+    "reformatting": {"accent": "#7b5ea7", "logo_bg": (123,  94, 167)},
+    "too_short":    {"accent": "#888888", "text": "Hold longer to record"},
+    "not_ready":    {"accent": "#888888", "text": "Model loading — please wait"},
 }
+
+# Visual layout for the recording badge
+_BADGE_W       = 320
+_BADGE_H       = 64
+_LOGO_SIZE     = 44
+_WAVE_BAR_N    = 28
+_WAVE_BAR_W    = 4
+_WAVE_BAR_GAP  = 2
 
 
 def _badge_alive() -> bool:
     """Return True only if _badge_win is a live Tkinter window."""
-    global _badge_win, _badge_label, _badge_dot
+    global _badge_win, _badge_label, _badge_dot, _badge_canvas
+    global _badge_time, _badge_logo_lbl, _badge_logo_variants
     if _badge_win is None:
         return False
     try:
-        _badge_win.winfo_exists()  # raises TclError if already destroyed
+        _badge_win.winfo_exists()
         return True
     except Exception:
         _badge_win = None
         _badge_label = None
         _badge_dot = None
+        _badge_canvas = None
+        _badge_time = None
+        _badge_logo_lbl = None
+        _badge_logo_variants = []
         return False
 
 
+_LOGO_PULSE_LEVELS = 6  # number of brightness variants for the logo pulse
+
+
+def _build_logo_variants(bg: tuple) -> list[ImageTk.PhotoImage]:
+    """Pre-render the overlay logo at several brightness levels for the energy pulse."""
+    base = tray.make_logo(target_size=_LOGO_SIZE, bg=bg)
+    variants = []
+    for i in range(_LOGO_PULSE_LEVELS):
+        factor = 1.0 + (i / (_LOGO_PULSE_LEVELS - 1)) * 0.30  # 1.00 → 1.30
+        if i == 0:
+            img = base
+        else:
+            img = ImageEnhance.Brightness(base).enhance(factor)
+        variants.append(ImageTk.PhotoImage(img))
+    return variants
+
+
+def _build_recording_badge(cfg: dict) -> None:
+    """Create the large recording badge with logo + waveform canvas + elapsed timer."""
+    global _badge_win, _badge_canvas, _badge_time
+    global _badge_label, _badge_dot, _badge_logo_lbl
+    global _badge_logo_variants, _badge_logo_idx, _badge_smoothed
+
+    _badge_win = tk.Toplevel(_root)
+    _badge_win.overrideredirect(True)
+    _badge_win.attributes("-topmost", True)
+    _badge_win.configure(bg=_BG)
+    _badge_win.attributes("-alpha", 0.0)  # winfx fades in
+
+    # Outer frame draws a faint 1-px ring on _BG2 against _BG fill — pseudo-depth
+    outer = tk.Frame(_badge_win, bg=_BORDER, bd=0)
+    outer.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+    inner = tk.Frame(outer, bg=_BG, padx=12, pady=10)
+    inner.pack(fill=tk.BOTH, expand=True)
+
+    _badge_logo_variants = _build_logo_variants(cfg["logo_bg"])
+    _badge_logo_idx = 0
+    _badge_logo_lbl = tk.Label(inner, image=_badge_logo_variants[0], bg=_BG, bd=0)
+    _badge_logo_lbl.pack(side=tk.LEFT, padx=(0, 12))
+
+    wave_w = _WAVE_BAR_N * (_WAVE_BAR_W + _WAVE_BAR_GAP)
+    _badge_canvas = tk.Canvas(
+        inner, width=wave_w, height=_LOGO_SIZE,
+        bg=_BG, bd=0, highlightthickness=0,
+    )
+    _badge_canvas.pack(side=tk.LEFT)
+
+    _badge_time = tk.Label(
+        inner, text="0:00", bg=_BG, fg=_FG2,
+        font=("Segoe UI Variable Display", 11, "normal"),
+        width=4, anchor="e",
+    )
+    _badge_time.pack(side=tk.LEFT, padx=(12, 0))
+
+    _badge_label = None
+    _badge_dot = None
+    _badge_smoothed = [0.0] * _WAVE_BAR_N
+
+    _badge_win.update_idletasks()
+    w = _badge_win.winfo_reqwidth()
+    h = _badge_win.winfo_reqheight()
+    sw = _badge_win.winfo_screenwidth()
+    sh = _badge_win.winfo_screenheight()
+    _badge_win.geometry(f"{w}x{h}+{sw - w - 20}+{sh - h - 60}")
+
+    winfx.apply_rounded_region(_badge_win, radius=14)
+    winfx.fade_in(_badge_win, target=0.96, duration_ms=180)
+
+
+def _build_text_badge(cfg: dict) -> None:
+    """Lightweight text badge for too_short / not_ready toasts."""
+    global _badge_win, _badge_label, _badge_dot
+    global _badge_canvas, _badge_time, _badge_logo_lbl, _badge_logo_variants
+
+    _badge_win = tk.Toplevel(_root)
+    _badge_win.overrideredirect(True)
+    _badge_win.attributes("-topmost", True)
+    _badge_win.configure(bg=_BG)
+    _badge_win.attributes("-alpha", 0.0)
+
+    outer = tk.Frame(_badge_win, bg=_BORDER, bd=0)
+    outer.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+    inner = tk.Frame(outer, bg=_BG, padx=12, pady=8)
+    inner.pack(fill=tk.BOTH, expand=True)
+
+    _badge_dot = tk.Label(inner, text="●", bg=_BG,
+                          font=("Segoe UI", 9), fg=cfg["accent"])
+    _badge_dot.pack(side=tk.LEFT, padx=(0, 6))
+
+    _badge_label = tk.Label(inner, text=cfg.get("text", ""), bg=_BG,
+                            fg=_FG, font=("Segoe UI Variable Text", 10))
+    _badge_label.pack(side=tk.LEFT)
+
+    _badge_canvas = None
+    _badge_time = None
+    _badge_logo_lbl = None
+    _badge_logo_variants = []
+
+    _badge_win.update_idletasks()
+    w = _badge_win.winfo_reqwidth()
+    h = _badge_win.winfo_reqheight()
+    sw = _badge_win.winfo_screenwidth()
+    sh = _badge_win.winfo_screenheight()
+    _badge_win.geometry(f"{w}x{h}+{sw - w - 20}+{sh - h - 60}")
+
+    winfx.apply_rounded_region(_badge_win, radius=10)
+    winfx.fade_in(_badge_win, target=0.94, duration_ms=160)
+
+
+def _hex_blend(hex_a: str, hex_b: str, t: float) -> str:
+    """Blend two #rrggbb colours. t=0 → a, t=1 → b."""
+    a = int(hex_a[1:3], 16), int(hex_a[3:5], 16), int(hex_a[5:7], 16)
+    b = int(hex_b[1:3], 16), int(hex_b[3:5], 16), int(hex_b[5:7], 16)
+    r = int(a[0] + (b[0] - a[0]) * t)
+    g = int(a[1] + (b[1] - a[1]) * t)
+    bl = int(a[2] + (b[2] - a[2]) * t)
+    return f"#{r:02x}{g:02x}{bl:02x}"
+
+
+# Cache gradient swatches per accent to avoid re-blending every frame
+_GRADIENT_STOPS = 6
+_gradient_cache: dict[str, list[str]] = {}
+
+
+def _gradient_for(accent: str) -> list[str]:
+    """Return GRADIENT_STOPS colours from `accent` (center, bright) → tip (faded toward _BG)."""
+    cached = _gradient_cache.get(accent)
+    if cached is not None:
+        return cached
+    bright = _hex_blend(accent, "#ffffff", 0.18)
+    stops = [_hex_blend(bright, accent, i / (_GRADIENT_STOPS - 1)) for i in range(_GRADIENT_STOPS)]
+    _gradient_cache[accent] = stops
+    return stops
+
+
+def _draw_badge_frame() -> None:
+    """Render one frame of the mirrored gradient equalizer + update the timer + pulse logo."""
+    global _badge_anim_phase, _badge_logo_idx
+    if _badge_canvas is None:
+        return
+
+    cfg = _BADGE_CFG.get(_badge_state or "recording", _BADGE_CFG["recording"])
+    accent = cfg["accent"]
+
+    try:
+        canvas_h = _LOGO_SIZE
+        mid = canvas_h / 2
+        max_half = canvas_h * 0.44
+
+        if _badge_state == "recording":
+            levels = audio.get_recent_levels(_WAVE_BAR_N)
+            silence = audio.get_silence_elapsed()
+            timeout = audio.get_silence_timeout()
+            is_silent_warn = timeout > 0 and silence > 1.5
+            if is_silent_warn:
+                accent = "#c8a000"
+
+            def norm(v: float) -> float:
+                v = min(1.0, v / 0.20)
+                return v ** 0.6
+
+            targets = [norm(v) for v in levels]
+            _badge_anim_phase += 0.25
+            shimmer = 0.05
+            targets = [
+                max(h, shimmer + 0.04 * math.sin(_badge_anim_phase + i * 0.45))
+                for i, h in enumerate(targets)
+            ]
+        else:
+            _badge_anim_phase += 0.22
+            targets = [
+                0.22 + 0.45 * (0.5 + 0.5 * math.sin(_badge_anim_phase - i * 0.35))
+                for i in range(_WAVE_BAR_N)
+            ]
+
+        # Smooth interpolation: snap up fast, ease down slow (ease-out decay)
+        if len(_badge_smoothed) != _WAVE_BAR_N:
+            _badge_smoothed[:] = list(targets)
+        else:
+            for i, t in enumerate(targets):
+                cur = _badge_smoothed[i]
+                if t > cur:
+                    _badge_smoothed[i] = cur * 0.45 + t * 0.55     # fast attack
+                else:
+                    _badge_smoothed[i] = cur * 0.78 + t * 0.22     # slow release
+
+        # Render mirrored gradient bars
+        _badge_canvas.delete("all")
+        stops = _gradient_for(accent)
+        seg = max_half / _GRADIENT_STOPS
+        for i, h in enumerate(_badge_smoothed):
+            x = i * (_WAVE_BAR_W + _WAVE_BAR_GAP)
+            bar_h = max(2.0, h * max_half)
+            visible_segs = int(math.ceil(bar_h / seg))
+            for s in range(min(visible_segs, _GRADIENT_STOPS)):
+                seg_top    = s * seg
+                seg_bottom = min((s + 1) * seg, bar_h)
+                colour = stops[s]
+                _badge_canvas.create_rectangle(
+                    x, mid - seg_bottom, x + _WAVE_BAR_W, mid - seg_top,
+                    fill=colour, outline="",
+                )
+                _badge_canvas.create_rectangle(
+                    x, mid + seg_top, x + _WAVE_BAR_W, mid + seg_bottom,
+                    fill=colour, outline="",
+                )
+
+        # Logo brightness pulse based on overall energy
+        if _badge_logo_lbl is not None and _badge_logo_variants:
+            energy = sum(_badge_smoothed) / max(1, len(_badge_smoothed))
+            idx = max(0, min(_LOGO_PULSE_LEVELS - 1,
+                             int(energy * (_LOGO_PULSE_LEVELS - 0.5))))
+            if idx != _badge_logo_idx:
+                _badge_logo_idx = idx
+                try:
+                    _badge_logo_lbl.config(image=_badge_logo_variants[idx])
+                except Exception:
+                    pass
+
+        if _badge_time is not None and _badge_state == "recording":
+            elapsed = int(audio.get_elapsed())
+            new_t = f"{elapsed // 60}:{elapsed % 60:02d}"
+            if _badge_time.cget("text") != new_t:
+                _badge_time.config(text=new_t)
+        elif _badge_time is not None and _badge_state != "recording":
+            if _badge_time.cget("text") != "":
+                _badge_time.config(text="")
+    except Exception:
+        pass
+
+
 def _handle_badge(cmd: str | None) -> None:
-    global _badge_win, _badge_label, _badge_dot, _badge_state
+    global _badge_win, _badge_state, _badge_logo_variants, _badge_logo_idx
+    prev = _badge_state
     _badge_state = cmd
 
     if cmd is None:
         if _badge_alive():
-            try:
-                _badge_win.destroy()
-            except Exception:
-                pass
-            _badge_win = None
-            _badge_label = None
-            _badge_dot = None
+            win = _badge_win
+            _badge_win = None  # null first so reference is released
+            winfx.fade_out_then_destroy(win, duration_ms=160)
         return
 
     cfg = _BADGE_CFG.get(cmd, _BADGE_CFG["processing"])
+    needs_wave = cmd in ("recording", "processing", "reformatting")
+
+    # Rebuild if widget type doesn't match the new state
+    have_wave = _badge_canvas is not None
+    if _badge_alive() and have_wave != needs_wave:
+        try:
+            _badge_win.destroy()
+        except Exception:
+            pass
+        _badge_win = None
 
     if not _badge_alive():
-        _badge_win = tk.Toplevel(_root)
-        _badge_win.overrideredirect(True)
-        _badge_win.attributes("-topmost", True)
-        _badge_win.configure(bg=_BG2)
-        _badge_win.attributes("-alpha", 0.92)
+        if needs_wave:
+            _build_recording_badge(cfg)
+            _draw_badge_frame()
+        else:
+            _build_text_badge(cfg)
+        return
 
-        inner = tk.Frame(_badge_win, bg=_BG2, padx=10, pady=6)
-        inner.pack()
-
-        _badge_dot = tk.Label(inner, text="●", bg=_BG2,
-                              font=("Segoe UI", 9), fg=cfg["dot"])
-        _badge_dot.pack(side=tk.LEFT, padx=(0, 5))
-
-        _badge_label = tk.Label(inner, text=cfg["text"], bg=_BG2,
-                                fg=_FG, font=("Segoe UI", 9))
-        _badge_label.pack(side=tk.LEFT)
-
-        _badge_win.update_idletasks()
-        w = _badge_win.winfo_reqwidth()
-        h = _badge_win.winfo_reqheight()
-        sw = _badge_win.winfo_screenwidth()
-        sh = _badge_win.winfo_screenheight()
-        _badge_win.geometry(f"{w}x{h}+{sw - w - 16}+{sh - h - 56}")
+    # Live update existing badge
+    if needs_wave:
+        if prev != cmd:
+            _badge_logo_variants = _build_logo_variants(cfg["logo_bg"])
+            _badge_logo_idx = 0
+            if _badge_logo_lbl is not None:
+                try:
+                    _badge_logo_lbl.config(image=_badge_logo_variants[0])
+                except Exception:
+                    pass
+        _draw_badge_frame()
     else:
         try:
             if _badge_dot:
-                _badge_dot.config(fg=cfg["dot"])
+                _badge_dot.config(fg=cfg["accent"])
             if _badge_label:
-                _badge_label.config(text=cfg["text"])
+                _badge_label.config(text=cfg.get("text", ""))
         except Exception:
             pass
 
@@ -375,34 +781,37 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     win.overrideredirect(True)
     win.configure(bg=_BG)
     win.attributes("-topmost", True)
-    win.attributes("-alpha", 0.0)   # start fully transparent; fade in below
+    win.attributes("-alpha", 0.0)   # winfx fades in at end
 
-    frame = tk.Frame(win, bg=_BG, padx=16, pady=14)
+    # 1-pixel outer ring for depth
+    ring = tk.Frame(win, bg=_BORDER2, bd=0)
+    ring.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+    frame = tk.Frame(ring, bg=_BG, padx=18, pady=16)
     frame.pack(fill=tk.BOTH, expand=True)
 
     # ── Text entry ─────────────────────────────────────────────────────────
     display = "Nothing detected — try again" if empty else text
     entry = tk.Text(
-        frame, font=("Segoe UI", 11), wrap=tk.WORD,
+        frame, font=_FONT_BODY, wrap=tk.WORD,
         bg=_BG2, fg=_FG, insertbackground=_FG,
         relief="flat", bd=0,
         highlightthickness=1,
         highlightbackground=_border_colour(confidence),
         highlightcolor=_BLUE,
-        height=4,
+        height=4, padx=10, pady=8,
         undo=True,
     )
     entry.insert("1.0", display)
-    entry.pack(fill=tk.X, pady=(0, 3))
+    entry.pack(fill=tk.X, pady=(0, 4))
     if not empty:
         entry.tag_add("sel", "1.0", "end-1c")
         entry.mark_set(tk.INSERT, tk.END)
     entry.focus_set()
 
-    # Word-level confidence highlighting (low-prob words tinted red/amber)
+    # Word-level confidence as underline (not foreground colour) — subtler, more pro
     if words and not empty:
-        entry.tag_configure("conf_low",    foreground="#ff6b6b")
-        entry.tag_configure("conf_medium", foreground="#e8c547")
+        entry.tag_configure("conf_low",    underline=True, underlinefg="#ef4444")
+        entry.tag_configure("conf_medium", underline=True, underlinefg="#f59e0b")
         search_start = "1.0"
         for w in words:
             wtext = (w.get("text") or "").strip()
@@ -432,14 +841,14 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         if hint_text:
             tk.Label(
                 frame, text=hint_text, bg=_BG, fg=hint_fg,
-                font=("Segoe UI", 8), anchor="w",
+                font=_FONT_HINT, anchor="w",
             ).pack(fill=tk.X, pady=(0, 2))
 
     # ── Word + char count ──────────────────────────────────────────────────
     count_var = tk.StringVar()
     tk.Label(
         frame, textvariable=count_var,
-        bg=_BG, fg="#666666", font=("Segoe UI", 8), anchor="w",
+        bg=_BG, fg=_FG3, font=_FONT_META, anchor="w",
     ).pack(fill=tk.X, pady=(0, 5))
 
     def _update_count(*_):
@@ -459,8 +868,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         bg=_BG, fg=_FG2,
         activebackground=_BG, activeforeground=_FG,
         selectcolor=_BG2,
-        font=("Segoe UI", 9),
-    ).pack(anchor=tk.W, pady=(0, 10))
+        font=_FONT_HINT,
+    ).pack(anchor=tk.W, pady=(0, 12))
 
     # ── Buttons ────────────────────────────────────────────────────────────
     btns = tk.Frame(frame, bg=_BG)
@@ -497,10 +906,10 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
     insert_btn = tk.Button(
         btns, text="Insert", command=on_insert, width=10,
-        bg=_BLUE, fg=_FG,
-        activebackground=_BLUE_HV, activeforeground=_FG,
+        bg=_BLUE, fg="#ffffff",
+        activebackground=_BLUE_HV, activeforeground="#ffffff",
         relief="flat", bd=0,
-        font=("Segoe UI", 10), padx=6, pady=4, cursor="hand2",
+        font=_FONT_BTN, padx=8, pady=6, cursor="hand2",
     )
     if empty:
         insert_btn.config(state="disabled", bg="#404040", fg="#666666", cursor="")
@@ -516,7 +925,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
             bg=_BG2, fg=_FG,
             activebackground=_BORDER, activeforeground=_FG,
             relief="flat", bd=1,
-            font=("Segoe UI", 10), padx=6, pady=4, cursor="hand2",
+            font=_FONT_BTN, padx=8, pady=6, cursor="hand2",
         )
         try_btn.pack(side=tk.LEFT, padx=(8, 0))
     else:
@@ -526,7 +935,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
             bg=_BG, fg=_FG2,
             activebackground=_BG2, activeforeground=_FG,
             relief="flat", bd=0,
-            font=("Segoe UI", 10), padx=6, pady=4, cursor="hand2",
+            font=_FONT_BTN, padx=8, pady=6, cursor="hand2",
         ).pack()
         cancel_wrap.pack(side=tk.LEFT, padx=(8, 0))
 
@@ -548,16 +957,29 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
             bg=_BG2, fg=_FG2,
             activebackground=_BORDER, activeforeground=_FG,
             relief="flat", bd=1,
-            font=("Segoe UI", 8), padx=6, pady=2, cursor="hand2",
+            font=_FONT_CHIP, padx=8, pady=3, cursor="hand2",
         )
         toggle_btn.pack(anchor=tk.E, pady=(4, 0))
 
-    # ── Keyboard hint strip ────────────────────────────────────────────────
-    hint = "↵ / Ins Insert  ·  Esc Cancel  ·  Ctrl+R Re-record  ·  Ctrl+Z Undo  ·  Shift+↵ Newline"
-    tk.Label(
-        frame, text=hint,
-        bg=_BG, fg="#555555", font=("Segoe UI", 8), anchor="w",
-    ).pack(fill=tk.X, pady=(8, 0))
+    # ── Keyboard hint chips ────────────────────────────────────────────────
+    chip_row = tk.Frame(frame, bg=_BG)
+    chip_row.pack(fill=tk.X, pady=(10, 0))
+
+    def _chip(parent, key: str, label: str, accent: bool = False) -> None:
+        outer = tk.Frame(parent, bg=_BORDER, bd=0)
+        inner = tk.Frame(outer, bg=_BG3 if accent else _BG2, padx=8, pady=3)
+        inner.pack(padx=1, pady=1)
+        tk.Label(inner, text=key, bg=inner["bg"],
+                 fg=_BLUE if accent else _FG,
+                 font=(_FONT_FAM_TEXT, 8, "bold")).pack(side=tk.LEFT)
+        tk.Label(inner, text=f" {label}", bg=inner["bg"],
+                 fg=_FG2, font=_FONT_CHIP).pack(side=tk.LEFT)
+        outer.pack(side=tk.LEFT, padx=(0, 6))
+
+    _chip(chip_row, "↵",       "Insert", accent=True)
+    _chip(chip_row, "Esc",     "Cancel")
+    _chip(chip_row, "Ctrl+R",  "Re-record")
+    _chip(chip_row, "Shift+↵", "Newline")
 
     # ── Keybindings ────────────────────────────────────────────────────────
     if not empty:
@@ -604,16 +1026,9 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     x, y = _calc_position(cx, cy, w, h, sw, sh, _preview_position)
     win.geometry(f"{w}x{h}+{x}+{y}")
 
-    # ── Fade-in animation ──────────────────────────────────────────────────
-    def _fade_in(step: int = 0) -> None:
-        try:
-            alpha = min(1.0, step * 0.12)
-            win.attributes("-alpha", alpha)
-            if alpha < 1.0:
-                win.after(16, _fade_in, step + 1)
-        except Exception:
-            pass
-    _fade_in()
+    # ── Rounded corners + slide-up entrance ────────────────────────────────
+    winfx.apply_rounded_region(win, radius=12)
+    winfx.slide_in(win, dx=0, dy=8, duration_ms=200, alpha_target=1.0)
 
     # ── Auto-dismiss ───────────────────────────────────────────────────────
     if auto_dismiss > 0:
@@ -643,62 +1058,152 @@ def _open_history() -> None:
     win = tk.Toplevel(_root)
     win.title("VoiceDictate — History")
     win.configure(bg=_BG)
-    win.geometry("540x420")
-    win.minsize(400, 200)
+    win.geometry("620x500")
+    win.minsize(440, 260)
+
+    # ── Header: title + search ─────────────────────────────────────────────
+    header = tk.Frame(win, bg=_BG)
+    header.pack(fill=tk.X, padx=18, pady=(16, 10))
 
     tk.Label(
-        win, text="Dictation History",
-        bg=_BG, fg=_FG, font=("Segoe UI", 13, "bold"),
-    ).pack(anchor="w", padx=16, pady=(14, 8))
+        header, text="Dictation History",
+        bg=_BG, fg=_FG, font=(_FONT_FAM_DISPLAY, 14, "bold"),
+    ).pack(side=tk.LEFT)
 
+    count_var = tk.StringVar(value=f"{len(entries)} entries")
+    tk.Label(header, textvariable=count_var, bg=_BG, fg=_FG3,
+             font=(_FONT_FAM_TEXT, 9)).pack(side=tk.RIGHT)
+
+    search_row = tk.Frame(win, bg=_BG)
+    search_row.pack(fill=tk.X, padx=18, pady=(0, 8))
+    search_var = tk.StringVar()
+    search_entry = tk.Entry(
+        search_row, textvariable=search_var, bg=_BG2, fg=_FG,
+        insertbackground=_FG, relief="flat", bd=0,
+        highlightthickness=1, highlightbackground=_BORDER,
+        highlightcolor=_BLUE, font=_FONT_BODY,
+    )
+    search_entry.pack(fill=tk.X, ipady=4)
+    # Placeholder behaviour
+    PLACEHOLDER = "Search…"
+    search_entry.insert(0, PLACEHOLDER)
+    search_entry.config(fg=_FG3)
+
+    def _on_search_focus(_=None):
+        if search_var.get() == PLACEHOLDER:
+            search_entry.delete(0, tk.END)
+            search_entry.config(fg=_FG)
+
+    def _on_search_blur(_=None):
+        if not search_var.get():
+            search_entry.insert(0, PLACEHOLDER)
+            search_entry.config(fg=_FG3)
+
+    search_entry.bind("<FocusIn>",  _on_search_focus)
+    search_entry.bind("<FocusOut>", _on_search_blur)
+
+    # ── Entries list (text widget with tags) ───────────────────────────────
     list_frame = tk.Frame(win, bg=_BG)
-    list_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 8))
+    list_frame.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 10))
 
     sb = tk.Scrollbar(list_frame)
     sb.pack(side=tk.RIGHT, fill=tk.Y)
 
     txt = tk.Text(
         list_frame, bg=_BG2, fg=_FG,
-        font=("Segoe UI", 10), wrap=tk.WORD,
-        relief="flat", bd=0, padx=10, pady=8,
-        yscrollcommand=sb.set, cursor="ibeam",
+        font=_FONT_BODY, wrap=tk.WORD,
+        relief="flat", bd=0, padx=12, pady=10,
+        yscrollcommand=sb.set, cursor="arrow",
     )
     txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     sb.config(command=txt.yview)
 
-    txt.tag_configure("ts",   foreground="#888888", font=("Segoe UI", 9))
-    txt.tag_configure("body", foreground=_FG,       font=("Segoe UI", 10))
-    txt.tag_configure("sep",  foreground="#383838")
-    txt.tag_configure("copy", foreground=_FG2,      font=("Segoe UI", 8), underline=True)
+    txt.tag_configure("ts",     foreground=_FG3, font=(_FONT_FAM_TEXT, 9), spacing1=4)
+    txt.tag_configure("body",   foreground=_FG,  font=_FONT_BODY, spacing3=6)
+    txt.tag_configure("sep",    foreground=_BORDER)
+    txt.tag_configure("hover",  background=_BG3)
+    txt.tag_configure("match",  background="#3b5274", foreground="#f3f4f6")
 
-    def _populate(data: list) -> None:
+    def _populate(data: list, query: str = "") -> None:
         txt.config(state="normal")
         txt.delete("1.0", tk.END)
-        if data:
-            for i, entry in enumerate(data):
+
+        q = query.strip().lower()
+        if q == PLACEHOLDER.lower():
+            q = ""
+
+        filtered = [e for e in data
+                    if not q or q in e.get("text", "").lower()]
+        count_var.set(f"{len(filtered)} of {len(data)} entries" if q else f"{len(data)} entries")
+
+        if filtered:
+            for i, entry in enumerate(filtered):
                 body_text = entry.get("text", "").strip()
-                txt.insert(tk.END, _fmt_ts(entry.get("timestamp", "")) + "\n", "ts")
+                ts = _fmt_ts(entry.get("timestamp", ""))
+                start_idx = txt.index(tk.END)
+                txt.insert(tk.END, ts + "\n", "ts")
+                body_start = txt.index(tk.END)
                 txt.insert(tk.END, body_text + "\n", "body")
-                tag = f"copy_{i}"
-                txt.insert(tk.END, "· copy\n", ("copy", tag))
-                txt.tag_bind(tag, "<Button-1>",
-                             lambda e, t=body_text: pyperclip.copy(t))
-                txt.tag_bind(tag, "<Enter>", lambda e: txt.config(cursor="hand2"))
-                txt.tag_bind(tag, "<Leave>", lambda e: txt.config(cursor="ibeam"))
-                if i < len(data) - 1:
-                    txt.insert(tk.END, "─" * 55 + "\n", "sep")
+                body_end = txt.index(f"{tk.END}-1c")
+                end_idx = txt.index(tk.END)
+
+                # Per-entry click-to-copy tag spans entire entry
+                row_tag = f"row_{i}"
+                txt.tag_add(row_tag, start_idx, end_idx)
+                txt.tag_bind(row_tag, "<Button-1>",
+                             lambda e, t=body_text: _copy_with_toast(t))
+                txt.tag_bind(row_tag, "<Enter>",
+                             lambda e, s=start_idx, en=end_idx: (
+                                 txt.tag_add("hover", s, en),
+                                 txt.config(cursor="hand2"),
+                             ))
+                txt.tag_bind(row_tag, "<Leave>",
+                             lambda e, s=start_idx, en=end_idx: (
+                                 txt.tag_remove("hover", s, en),
+                                 txt.config(cursor="arrow"),
+                             ))
+
+                # Highlight matches
+                if q:
+                    pos = body_start
+                    while True:
+                        idx = txt.search(q, pos, stopindex=body_end, nocase=True)
+                        if not idx:
+                            break
+                        end = f"{idx}+{len(q)}c"
+                        txt.tag_add("match", idx, end)
+                        pos = end
+
+                if i < len(filtered) - 1:
+                    txt.insert(tk.END, "─" * 64 + "\n", "sep")
         else:
-            txt.insert(tk.END, "No dictation history yet.", "ts")
+            msg = "No matching entries." if q else "No dictation history yet."
+            txt.insert(tk.END, msg, "ts")
         txt.config(state="disabled")
+
+    def _copy_with_toast(text: str) -> None:
+        try:
+            pyperclip.copy(text)
+        except Exception:
+            return
+        widgets.Toast(win, "Copied to clipboard",
+                      bg=_BG2, fg=_FG, duration_ms=1200)
 
     _populate(entries)
 
+    def _on_search_change(*_):
+        _populate(entries, search_var.get())
+    search_var.trace_add("write", _on_search_change)
+
+    # ── Footer: clear + close ──────────────────────────────────────────────
     bar = tk.Frame(win, bg=_BG)
-    bar.pack(fill=tk.X, padx=16, pady=(0, 12))
+    bar.pack(fill=tk.X, padx=18, pady=(0, 14))
 
     def on_clear() -> None:
         hist.clear()
-        _populate([])
+        nonlocal entries
+        entries = []
+        _populate(entries, search_var.get())
 
     def on_close() -> None:
         global _history_open
@@ -711,9 +1216,12 @@ def _open_history() -> None:
         bg=_BG, fg=_FG2,
         activebackground=_BG2, activeforeground=_FG,
         relief="flat", bd=0,
-        font=("Segoe UI", 10), padx=10, pady=4, cursor="hand2",
+        font=_FONT_BTN, padx=10, pady=6, cursor="hand2",
     ).pack()
     clear_wrap.pack(side=tk.LEFT)
+
+    tk.Label(bar, text="Click any entry to copy",
+             bg=_BG, fg=_FG3, font=(_FONT_FAM_TEXT, 8)).pack(side=tk.RIGHT)
 
     win.protocol("WM_DELETE_WINDOW", on_close)
     win.bind("<Escape>", lambda _: on_close())
@@ -841,203 +1349,374 @@ def _open_settings() -> None:
     win = tk.Toplevel(_root)
     win.title("VoiceDictate — Settings")
     win.configure(bg=_BG)
-    win.geometry("520x780")
-    win.minsize(440, 520)
+    win.geometry("760x600")
+    win.minsize(680, 480)
     win.resizable(True, True)
 
-    canvas = tk.Canvas(win, bg=_BG, highlightthickness=0)
-    sb = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+    # ── Layout: sidebar + content panel ────────────────────────────────────
+    root_frame = tk.Frame(win, bg=_BG)
+    root_frame.pack(fill=tk.BOTH, expand=True)
+
+    sidebar = tk.Frame(root_frame, bg=_BG2, width=180)
+    sidebar.pack(side=tk.LEFT, fill=tk.Y)
+    sidebar.pack_propagate(False)
+
+    tk.Label(sidebar, text="Settings", bg=_BG2, fg=_FG,
+             font=(_FONT_FAM_DISPLAY, 14, "bold"),
+             anchor="w").pack(fill=tk.X, padx=18, pady=(18, 12))
+
+    panel_holder = tk.Frame(root_frame, bg=_BG)
+    panel_holder.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    # Vertically scrollable content area inside panel
+    canvas = tk.Canvas(panel_holder, bg=_BG, highlightthickness=0)
+    sb = tk.Scrollbar(panel_holder, orient="vertical", command=canvas.yview)
     canvas.configure(yscrollcommand=sb.set)
     sb.pack(side=tk.RIGHT, fill=tk.Y)
     canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    content = tk.Frame(canvas, bg=_BG)
-    content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+    pages_holder = tk.Frame(canvas, bg=_BG)
+    pages_window = canvas.create_window((0, 0), window=pages_holder, anchor="nw")
 
-    def _on_configure(e):
+    def _on_configure(_e=None):
         canvas.configure(scrollregion=canvas.bbox("all"))
-        canvas.itemconfig(content_window, width=canvas.winfo_width())
+        canvas.itemconfig(pages_window, width=canvas.winfo_width())
 
-    content.bind("<Configure>", _on_configure)
+    pages_holder.bind("<Configure>", _on_configure)
     canvas.bind("<Configure>", _on_configure)
 
-    def _section(label: str) -> None:
-        tk.Label(content, text=label, bg=_BG, fg=_FG,
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16, pady=(12, 0))
+    # Bind mousewheel scrolling on the canvas only while pointer is over it
+    def _mw(e):
+        canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+    canvas.bind("<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _mw))
+    canvas.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
 
-    def _note(text: str) -> None:
-        tk.Label(content, text=text, bg=_BG, fg="#888888",
-                 font=("Segoe UI", 8)).pack(anchor="w", padx=16, pady=(0, 4))
+    # State containers — populated by build_*() then used by on_save
+    state: dict = {}
+    pages: dict[str, tk.Frame] = {}
 
-    def _field(label: str, var) -> None:
-        tk.Label(content, text=label, bg=_BG, fg=_FG2,
-                 font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 0))
-        tk.Entry(content, textvariable=var, bg=_BG2, fg=_FG,
-                 insertbackground=_FG, relief="flat", bd=0,
-                 highlightthickness=1, highlightbackground="#3d3d3d",
-                 font=("Segoe UI", 10)).pack(fill=tk.X, padx=16, pady=(2, 0))
+    def _label(parent, text: str) -> tk.Label:
+        return tk.Label(parent, text=text, bg=_BG, fg=_FG2, font=_FONT_HINT, anchor="w")
 
-    tk.Label(content, text="Settings", bg=_BG, fg=_FG,
-             font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=16, pady=(14, 0))
-    _note("Model and Hotkey changes require a restart.")
+    def _h2(parent, text: str) -> tk.Label:
+        return tk.Label(parent, text=text, bg=_BG, fg=_FG,
+                        font=(_FONT_FAM_DISPLAY, 12, "bold"), anchor="w")
 
-    _section("Hotkey")
-    hotkey_var = tk.StringVar(value=cfg.get("hotkey", "ctrl+alt"))
-    _field("Hotkey combo (e.g. ctrl+alt, ctrl+shift, alt+space)", hotkey_var)
-    _note("Hot-reloads on save. Use lowercase modifier names joined with '+'.")
+    def _note(parent, text: str) -> tk.Label:
+        return tk.Label(parent, text=text, bg=_BG, fg=_FG3,
+                        font=(_FONT_FAM_TEXT, 8), anchor="w", justify="left",
+                        wraplength=480)
 
-    _section("Transcription")
-    lang_var = tk.StringVar(value=cfg.get("language", "en"))
-    _field("Language (e.g. en, fr, es)", lang_var)
-    model_var = tk.StringVar(value=cfg.get("model", "large-v3-turbo"))
-    _field("Model (tiny / base / small / medium / large-v3 / large-v3-turbo) — restart required", model_var)
+    def _entry(parent, var) -> tk.Entry:
+        return tk.Entry(parent, textvariable=var, bg=_BG2, fg=_FG,
+                        insertbackground=_FG, relief="flat", bd=0,
+                        highlightthickness=1, highlightbackground=_BORDER,
+                        highlightcolor=_BLUE, font=_FONT_BODY)
 
-    _section("Whisper biasing")
-    _note("initial_prompt seeds Whisper with context — improves accuracy for domain terms.")
-    prompt_txt = tk.Text(content, bg=_BG2, fg=_FG, insertbackground=_FG,
-                         relief="flat", bd=0, highlightthickness=1,
-                         highlightbackground="#3d3d3d",
-                         font=("Segoe UI", 10), height=3, undo=True)
-    prompt_txt.insert("1.0", cfg.get("initial_prompt", "") or "")
-    prompt_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
+    def _text_area(parent, height: int) -> tk.Text:
+        return tk.Text(parent, bg=_BG2, fg=_FG, insertbackground=_FG,
+                       relief="flat", bd=0, highlightthickness=1,
+                       highlightbackground=_BORDER, highlightcolor=_BLUE,
+                       font=_FONT_BODY, height=height, undo=True, padx=8, pady=6)
 
-    _note("Custom vocabulary — one term per line. Fed into initial_prompt as a hint.")
-    vocab_txt = tk.Text(content, bg=_BG2, fg=_FG, insertbackground=_FG,
-                        relief="flat", bd=0, highlightthickness=1,
-                        highlightbackground="#3d3d3d",
-                        font=("Segoe UI", 10), height=4, undo=True)
-    vocab_txt.insert("1.0", "\n".join(cfg.get("custom_vocabulary", []) or []))
-    vocab_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
+    def _toggle_row(parent, label: str, var: tk.BooleanVar, sub: str = "") -> None:
+        row = tk.Frame(parent, bg=_BG)
+        row.pack(fill=tk.X, pady=(8, 0), padx=22)
+        left = tk.Frame(row, bg=_BG)
+        left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(left, text=label, bg=_BG, fg=_FG, font=_FONT_BODY,
+                 anchor="w").pack(fill=tk.X)
+        if sub:
+            tk.Label(left, text=sub, bg=_BG, fg=_FG3, font=(_FONT_FAM_TEXT, 8),
+                     anchor="w", justify="left", wraplength=420).pack(fill=tk.X)
+        widgets.Toggle(row, variable=var, bg=_BG,
+                       off_bg=_BORDER, on_bg=_BLUE,
+                       knob_fg=_FG).pack(side=tk.RIGHT, padx=(12, 0))
 
-    _section("Recording")
-    max_var = tk.StringVar(value=str(cfg.get("max_record_seconds", 120)))
-    _field("Max recording time (seconds)", max_var)
-    silence_var = tk.StringVar(value=str(cfg.get("silence_auto_stop_seconds", 3)))
-    _field("Silence auto-stop (seconds, 0 = disabled)", silence_var)
-    sthresh_var = tk.StringVar(value=str(cfg.get("silence_threshold", 0.01)))
-    _field("Silence threshold (RMS, 0.001-0.5, lower = more sensitive)", sthresh_var)
-    vad_var = tk.BooleanVar(value=bool(cfg.get("vad_filter", False)))
-    tk.Checkbutton(content, text="VAD filter (suppress background noise)",
-                   variable=vad_var, bg=_BG, fg=_FG2,
-                   activebackground=_BG, activeforeground=_FG,
-                   selectcolor=_BG2, font=("Segoe UI", 9)
-                   ).pack(anchor="w", padx=16, pady=(10, 0))
+    # ── Page builders ──────────────────────────────────────────────────────
 
-    # ── Microphone dropdown ────────────────────────────────────────────────
-    _section("Microphone")
-    try:
-        devices = audio.list_input_devices()
-    except Exception:
-        devices = []
-    dev_labels = ["System default"] + [f"[{d['index']}] {d['name']}" for d in devices]
-    current_dev = cfg.get("input_device")
-    if current_dev is None:
-        current_label = "System default"
-    else:
-        match = next((f"[{d['index']}] {d['name']}" for d in devices
-                      if d["index"] == current_dev), "System default")
-        current_label = match
-    mic_var = tk.StringVar(value=current_label)
-    mic_om = tk.OptionMenu(content, mic_var, *dev_labels)
-    mic_om.config(bg=_BG2, fg=_FG, activebackground=_BORDER,
-                  relief="flat", highlightthickness=0, font=("Segoe UI", 10))
-    mic_om.pack(anchor="w", padx=16, pady=(2, 0), fill=tk.X)
+    def build_audio() -> tk.Frame:
+        p = tk.Frame(pages_holder, bg=_BG)
+        _h2(p, "Audio").pack(fill=tk.X, padx=22, pady=(18, 6))
+        _note(p, "Microphone selection and recording behaviour.").pack(
+            fill=tk.X, padx=22, pady=(0, 12))
 
-    # ── Privacy ────────────────────────────────────────────────────────────
-    _section("Privacy")
-    history_paused_var = tk.BooleanVar(value=bool(cfg.get("history_paused", False)))
-    tk.Checkbutton(content, text="Pause history — don't save transcriptions",
-                   variable=history_paused_var, bg=_BG, fg=_FG2,
-                   activebackground=_BG, activeforeground=_FG,
-                   selectcolor=_BG2, font=("Segoe UI", 9)
-                   ).pack(anchor="w", padx=16, pady=(10, 0))
+        # Mic device
+        try:
+            devices = audio.list_input_devices()
+        except Exception:
+            devices = []
+        dev_labels = ["System default"] + [f"[{d['index']}] {d['name']}" for d in devices]
+        current_dev = cfg.get("input_device")
+        if current_dev is None:
+            current_label = "System default"
+        else:
+            current_label = next(
+                (f"[{d['index']}] {d['name']}" for d in devices if d["index"] == current_dev),
+                "System default",
+            )
+        mic_var = tk.StringVar(value=current_label)
+        state["mic_var"] = mic_var
+        state["devices"] = devices
 
-    _section("Preview window")
-    pos_var = tk.StringVar(value=cfg.get("preview_position", "cursor"))
-    tk.Label(content, text="Position", bg=_BG, fg=_FG2,
-             font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 0))
-    om = tk.OptionMenu(content, pos_var, *_POSITIONS)
-    om.config(bg=_BG2, fg=_FG, activebackground=_BORDER,
-              relief="flat", highlightthickness=0, font=("Segoe UI", 10))
-    om.pack(anchor="w", padx=16, pady=(2, 0))
+        _label(p, "Microphone").pack(fill=tk.X, padx=22, pady=(0, 2))
+        om = tk.OptionMenu(p, mic_var, *dev_labels)
+        om.config(bg=_BG2, fg=_FG, activebackground=_BORDER, activeforeground=_FG,
+                  relief="flat", highlightthickness=0, font=_FONT_BODY)
+        om.pack(fill=tk.X, padx=22)
 
-    auto_dismiss_var = tk.StringVar(value=str(cfg.get("preview_auto_dismiss_seconds", 0)))
-    _field("Auto-dismiss after (seconds, 0 = never)", auto_dismiss_var)
+        # Live meter (item 22)
+        _label(p, "Live level").pack(fill=tk.X, padx=22, pady=(12, 2))
+        meter = widgets.MicMeter(p, bg=_BG, idle=_BORDER,
+                                 active_lo="#22c55e", active_hi="#ef4444")
+        meter.pack(anchor="w", padx=22)
 
-    auto_paste_var = tk.StringVar(value=str(cfg.get("auto_paste_threshold", 0.0)))
-    _field("Auto-paste threshold 0–1 (skip preview when confidence ≥ this, 0 = always show)", auto_paste_var)
+        def _on_mic_change(*_):
+            sel = mic_var.get()
+            if sel == "System default":
+                meter.set_device(None)
+            else:
+                try:
+                    meter.set_device(int(sel.split("]")[0].lstrip("[")))
+                except Exception:
+                    meter.set_device(None)
+        mic_var.trace_add("write", _on_mic_change)
+        _on_mic_change()
+        # Tear down meter stream when window closes
+        win.bind("<Destroy>", lambda e: meter.stop(), add="+")
 
-    _section("Filler words")
-    _note("One per line — removed from every transcription.")
-    fillers_txt = tk.Text(content, bg=_BG2, fg=_FG, insertbackground=_FG,
-                          relief="flat", bd=0, highlightthickness=1,
-                          highlightbackground="#3d3d3d",
-                          font=("Segoe UI", 10), height=4, undo=True)
-    fillers_txt.insert("1.0", "\n".join(cfg.get("filler_words", [])))
-    fillers_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
+        # Numeric recording fields
+        max_var     = tk.StringVar(value=str(cfg.get("max_record_seconds", 120)))
+        silence_var = tk.StringVar(value=str(cfg.get("silence_auto_stop_seconds", 3)))
+        sthresh_var = tk.StringVar(value=str(cfg.get("silence_threshold", 0.01)))
+        state.update(max_var=max_var, silence_var=silence_var, sthresh_var=sthresh_var)
 
-    _section("Vibe Coding")
-    _note("Restructures dictation into a clean coding prompt via Qwen3-8B (local, GPU).")
-    vibe_var = tk.BooleanVar(value=bool(cfg.get("vibe_mode", False)))
-    tk.Checkbutton(content, text="Enable vibe mode (adds ~2-3 seconds)",
-                   variable=vibe_var, bg=_BG, fg=_FG2,
-                   activebackground=_BG, activeforeground=_FG,
-                   selectcolor=_BG2, font=("Segoe UI", 9)
-                   ).pack(anchor="w", padx=16, pady=(6, 0))
-    backend_var = tk.StringVar(value=cfg.get("vibe_mode_backend", "lmstudio"))
-    tk.Label(content, text="Backend", bg=_BG, fg=_FG2,
-             font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 0))
-    be_menu = tk.OptionMenu(content, backend_var, "lmstudio", "rules")
-    be_menu.config(bg=_BG2, fg=_FG, activebackground=_BORDER,
-                   relief="flat", highlightthickness=0, font=("Segoe UI", 10))
-    be_menu.pack(anchor="w", padx=16, pady=(2, 0))
+        for lbl, var in [("Max recording time (seconds)", max_var),
+                         ("Silence auto-stop (seconds, 0 = disabled)", silence_var),
+                         ("Silence threshold (RMS 0.001–0.5, lower = more sensitive)", sthresh_var)]:
+            _label(p, lbl).pack(fill=tk.X, padx=22, pady=(12, 2))
+            _entry(p, var).pack(fill=tk.X, padx=22)
 
-    _section("Custom corrections")
-    _note('One per line: "wrong → correct"  (applied immediately, no training needed)')
-    corrections_txt = tk.Text(content, bg=_BG2, fg=_FG, insertbackground=_FG,
-                               relief="flat", bd=0, highlightthickness=1,
-                               highlightbackground="#3d3d3d",
-                               font=("Segoe UI", 10), height=5, undo=True)
-    corr_dict = cfg.get("corrections", {})
-    corr_lines = "\n".join(f"{k} → {v}" for k, v in corr_dict.items())
-    corrections_txt.insert("1.0", corr_lines)
-    corrections_txt.pack(fill=tk.X, padx=16, pady=(2, 0))
+        vad_var = tk.BooleanVar(value=bool(cfg.get("vad_filter", False)))
+        state["vad_var"] = vad_var
+        _toggle_row(p, "VAD filter", vad_var,
+                    sub="Suppress background noise during transcription.")
 
-    # ── Buttons ─────────────────────────────────────────────────────────────
-    btns = tk.Frame(content, bg=_BG)
-    btns.pack(anchor="w", padx=16, pady=(16, 4))
+        vad_sil_var = tk.BooleanVar(value=bool(cfg.get("vad_silence_mode", False)))
+        state["vad_sil_var"] = vad_sil_var
+        _toggle_row(p, "VAD silence detection", vad_sil_var,
+                    sub="Use voice-activity detection (webrtcvad) instead of RMS threshold "
+                        "for silence auto-stop. Works better in noisy rooms. Restart required.")
+        return p
+
+    def build_hotkey() -> tk.Frame:
+        p = tk.Frame(pages_holder, bg=_BG)
+        _h2(p, "Hotkey").pack(fill=tk.X, padx=22, pady=(18, 6))
+        _note(p, "Push-to-talk binding. Hot-reloads on save.").pack(
+            fill=tk.X, padx=22, pady=(0, 12))
+
+        hotkey_var = tk.StringVar(value=cfg.get("hotkey", "ctrl+alt"))
+        state["hotkey_var"] = hotkey_var
+        _label(p, "Hotkey combo (e.g. ctrl+alt, ctrl+shift, alt+space)").pack(
+            fill=tk.X, padx=22, pady=(0, 2))
+        _entry(p, hotkey_var).pack(fill=tk.X, padx=22)
+        return p
+
+    def build_transcription() -> tk.Frame:
+        p = tk.Frame(pages_holder, bg=_BG)
+        _h2(p, "Transcription").pack(fill=tk.X, padx=22, pady=(18, 6))
+        _note(p, "Language, model, and Whisper biasing. Model changes require a restart.").pack(
+            fill=tk.X, padx=22, pady=(0, 12))
+
+        lang_var  = tk.StringVar(value=cfg.get("language", "en"))
+        model_var = tk.StringVar(value=cfg.get("model", "large-v3-turbo"))
+        state.update(lang_var=lang_var, model_var=model_var)
+
+        _label(p, "Language (e.g. en, fr, es)").pack(fill=tk.X, padx=22, pady=(0, 2))
+        _entry(p, lang_var).pack(fill=tk.X, padx=22)
+
+        _label(p, "Model").pack(fill=tk.X, padx=22, pady=(12, 2))
+        _entry(p, model_var).pack(fill=tk.X, padx=22)
+        _note(p, "tiny / base / small / medium / large-v3 / large-v3-turbo").pack(
+            fill=tk.X, padx=22, pady=(2, 0))
+
+        _label(p, "Initial prompt (seeds Whisper with context)").pack(
+            fill=tk.X, padx=22, pady=(14, 2))
+        prompt_txt = _text_area(p, 3)
+        prompt_txt.insert("1.0", cfg.get("initial_prompt", "") or "")
+        prompt_txt.pack(fill=tk.X, padx=22)
+        state["prompt_txt"] = prompt_txt
+
+        _label(p, "Custom vocabulary — one term per line").pack(
+            fill=tk.X, padx=22, pady=(14, 2))
+        vocab_txt = _text_area(p, 5)
+        vocab_txt.insert("1.0", "\n".join(cfg.get("custom_vocabulary", []) or []))
+        vocab_txt.pack(fill=tk.X, padx=22)
+        state["vocab_txt"] = vocab_txt
+        return p
+
+    def build_behaviour() -> tk.Frame:
+        p = tk.Frame(pages_holder, bg=_BG)
+        _h2(p, "Behaviour").pack(fill=tk.X, padx=22, pady=(18, 6))
+        _note(p, "Preview window, auto-paste, filler removal, and corrections.").pack(
+            fill=tk.X, padx=22, pady=(0, 12))
+
+        pos_var = tk.StringVar(value=cfg.get("preview_position", "cursor"))
+        state["pos_var"] = pos_var
+        _label(p, "Preview position").pack(fill=tk.X, padx=22, pady=(0, 2))
+        om = tk.OptionMenu(p, pos_var, *_POSITIONS)
+        om.config(bg=_BG2, fg=_FG, activebackground=_BORDER, activeforeground=_FG,
+                  relief="flat", highlightthickness=0, font=_FONT_BODY)
+        om.pack(anchor="w", padx=22)
+
+        auto_dismiss_var = tk.StringVar(value=str(cfg.get("preview_auto_dismiss_seconds", 0)))
+        auto_paste_var   = tk.StringVar(value=str(cfg.get("auto_paste_threshold", 0.0)))
+        state.update(auto_dismiss_var=auto_dismiss_var, auto_paste_var=auto_paste_var)
+
+        for lbl, var in [("Auto-dismiss preview after (seconds, 0 = never)", auto_dismiss_var),
+                         ("Auto-paste threshold 0–1 (skip preview when ≥ this)", auto_paste_var)]:
+            _label(p, lbl).pack(fill=tk.X, padx=22, pady=(12, 2))
+            _entry(p, var).pack(fill=tk.X, padx=22)
+
+        history_paused_var = tk.BooleanVar(value=bool(cfg.get("history_paused", False)))
+        state["history_paused_var"] = history_paused_var
+        _toggle_row(p, "Pause history", history_paused_var,
+                    sub="Don't save transcriptions to history.")
+
+        _label(p, "Filler words (one per line)").pack(fill=tk.X, padx=22, pady=(16, 2))
+        fillers_txt = _text_area(p, 4)
+        fillers_txt.insert("1.0", "\n".join(cfg.get("filler_words", [])))
+        fillers_txt.pack(fill=tk.X, padx=22)
+        state["fillers_txt"] = fillers_txt
+
+        _label(p, 'Custom corrections — one per line, "wrong → correct"').pack(
+            fill=tk.X, padx=22, pady=(14, 2))
+        corrections_txt = _text_area(p, 5)
+        corr_dict = cfg.get("corrections", {})
+        corrections_txt.insert("1.0", "\n".join(f"{k} → {v}" for k, v in corr_dict.items()))
+        corrections_txt.pack(fill=tk.X, padx=22)
+        state["corrections_txt"] = corrections_txt
+        return p
+
+    def build_appearance() -> tk.Frame:
+        p = tk.Frame(pages_holder, bg=_BG)
+        _h2(p, "Appearance").pack(fill=tk.X, padx=22, pady=(18, 6))
+        _note(p, "Theme change takes effect after restart.").pack(
+            fill=tk.X, padx=22, pady=(0, 12))
+
+        theme_var = tk.StringVar(value=cfg.get("theme", "dark"))
+        state["theme_var"] = theme_var
+
+        _label(p, "Theme").pack(fill=tk.X, padx=22, pady=(0, 6))
+        row = tk.Frame(p, bg=_BG)
+        row.pack(fill=tk.X, padx=22)
+        for name in ("dark", "light"):
+            rb = tk.Radiobutton(
+                row, text=name.capitalize(), value=name, variable=theme_var,
+                bg=_BG, fg=_FG, selectcolor=_BG2,
+                activebackground=_BG, activeforeground=_FG,
+                font=_FONT_BODY, padx=4, pady=2,
+            )
+            rb.pack(side=tk.LEFT, padx=(0, 16))
+        return p
+
+    def build_vibe() -> tk.Frame:
+        p = tk.Frame(pages_holder, bg=_BG)
+        _h2(p, "Vibe Coding").pack(fill=tk.X, padx=22, pady=(18, 6))
+        _note(p, "Restructures dictation into a clean prompt via Qwen3-8B (local, GPU).").pack(
+            fill=tk.X, padx=22, pady=(0, 12))
+
+        vibe_var = tk.BooleanVar(value=bool(cfg.get("vibe_mode", False)))
+        state["vibe_var"] = vibe_var
+        _toggle_row(p, "Enable vibe mode", vibe_var,
+                    sub="Adds ~2–3 seconds for the reformat pass.")
+
+        backend_var = tk.StringVar(value=cfg.get("vibe_mode_backend", "lmstudio"))
+        state["backend_var"] = backend_var
+        _label(p, "Backend").pack(fill=tk.X, padx=22, pady=(16, 2))
+        be_menu = tk.OptionMenu(p, backend_var, "lmstudio", "rules")
+        be_menu.config(bg=_BG2, fg=_FG, activebackground=_BORDER, activeforeground=_FG,
+                       relief="flat", highlightthickness=0, font=_FONT_BODY)
+        be_menu.pack(anchor="w", padx=22)
+        return p
+
+    PAGE_DEFS = [
+        ("Audio",         build_audio),
+        ("Hotkey",        build_hotkey),
+        ("Transcription", build_transcription),
+        ("Behaviour",     build_behaviour),
+        ("Appearance",    build_appearance),
+        ("Vibe Coding",   build_vibe),
+    ]
+
+    # ── Build sidebar items ────────────────────────────────────────────────
+    nav_buttons: dict[str, tk.Label] = {}
+    current_page = tk.StringVar(value=PAGE_DEFS[0][0])
+
+    def show_page(name: str) -> None:
+        for n, lbl in nav_buttons.items():
+            if n == name:
+                lbl.config(bg=_BG3, fg=_FG)
+            else:
+                lbl.config(bg=_BG2, fg=_FG2)
+        for n, page in pages.items():
+            page.pack_forget()
+        pages[name].pack(fill=tk.BOTH, expand=True)
+        current_page.set(name)
+        canvas.yview_moveto(0)
+
+    for name, builder in PAGE_DEFS:
+        pages[name] = builder()
+        nav = tk.Label(sidebar, text=name, bg=_BG2, fg=_FG2,
+                       font=_FONT_BODY, anchor="w", padx=18, pady=10,
+                       cursor="hand2")
+        nav.pack(fill=tk.X)
+        nav.bind("<Button-1>", lambda e, n=name: show_page(n))
+        nav.bind("<Enter>", lambda e, n=name:
+                 nav_buttons[n].config(bg=_BG3) if current_page.get() != n else None)
+        nav.bind("<Leave>", lambda e, n=name:
+                 nav_buttons[n].config(bg=_BG2) if current_page.get() != n else None)
+        nav_buttons[name] = nav
+
+    show_page(PAGE_DEFS[0][0])
+
+    # ── Footer buttons (Save / Cancel / status) ────────────────────────────
+    footer = tk.Frame(win, bg=_BG2, height=58)
+    footer.pack(side=tk.BOTTOM, fill=tk.X)
+    footer.pack_propagate(False)
 
     err_var = tk.StringVar()
-    tk.Label(content, textvariable=err_var, bg=_BG, fg="#cc4444",
-             font=("Segoe UI", 8)).pack(anchor="w", padx=16, pady=(0, 12))
+    err_lbl = tk.Label(footer, textvariable=err_var, bg=_BG2, fg=_FG3,
+                       font=(_FONT_FAM_TEXT, 9), anchor="w")
+    err_lbl.pack(side=tk.LEFT, padx=18)
 
     def on_save() -> None:
         try:
-            max_secs      = float(max_var.get())
-            silence_secs  = float(silence_var.get())
-            sthresh       = float(sthresh_var.get())
-            dismiss_secs  = float(auto_dismiss_var.get())
-            paste_thresh  = float(auto_paste_var.get())
+            max_secs     = float(state["max_var"].get())
+            silence_secs = float(state["silence_var"].get())
+            sthresh      = float(state["sthresh_var"].get())
+            dismiss_secs = float(state["auto_dismiss_var"].get())
+            paste_thresh = float(state["auto_paste_var"].get())
         except ValueError:
             err_var.set("Numeric fields must be numbers.")
+            err_lbl.config(fg="#ef4444")
             return
 
-        fillers = [w.strip() for w in fillers_txt.get("1.0", "end-1c").splitlines()
+        fillers = [w.strip() for w in state["fillers_txt"].get("1.0", "end-1c").splitlines()
                    if w.strip()]
 
         corrections: dict = {}
-        for line in corrections_txt.get("1.0", "end-1c").splitlines():
+        for line in state["corrections_txt"].get("1.0", "end-1c").splitlines():
             if "→" in line:
-                parts = line.split("→", 1)
-                k, v = parts[0].strip(), parts[1].strip()
+                k, v = line.split("→", 1)
+                k, v = k.strip(), v.strip()
                 if k:
                     corrections[k] = v
 
-        vocab = [w.strip() for w in vocab_txt.get("1.0", "end-1c").splitlines()
+        vocab = [w.strip() for w in state["vocab_txt"].get("1.0", "end-1c").splitlines()
                  if w.strip()]
 
-        # Parse mic selection back to device index (or None for default)
-        sel = mic_var.get()
+        sel = state["mic_var"].get()
         if sel == "System default":
             mic_idx = None
         else:
@@ -1048,53 +1727,60 @@ def _open_settings() -> None:
 
         new_cfg = dict(cfg)
         new_cfg.update({
-            "hotkey":                      hotkey_var.get().strip() or "ctrl+alt",
-            "language":                    lang_var.get().strip(),
-            "model":                       model_var.get().strip(),
+            "hotkey":                      state["hotkey_var"].get().strip() or "ctrl+alt",
+            "language":                    state["lang_var"].get().strip(),
+            "model":                       state["model_var"].get().strip(),
             "max_record_seconds":          max(5.0, min(300.0, max_secs)),
             "silence_auto_stop_seconds":   max(0.0, silence_secs),
             "silence_threshold":           max(0.001, min(0.5, sthresh)),
-            "vad_filter":                  vad_var.get(),
-            "preview_position":            pos_var.get(),
+            "vad_filter":                  state["vad_var"].get(),
+            "vad_silence_mode":            state["vad_sil_var"].get(),
+            "preview_position":            state["pos_var"].get(),
             "preview_auto_dismiss_seconds": max(0.0, dismiss_secs),
             "auto_paste_threshold":        max(0.0, min(1.0, paste_thresh)),
             "filler_words":                fillers,
             "corrections":                 corrections,
-            "initial_prompt":              prompt_txt.get("1.0", "end-1c").strip(),
+            "initial_prompt":              state["prompt_txt"].get("1.0", "end-1c").strip(),
             "custom_vocabulary":           vocab,
             "input_device":                mic_idx,
-            "history_paused":              history_paused_var.get(),
-            "vibe_mode":                   vibe_var.get(),
-            "vibe_mode_backend":           backend_var.get(),
+            "history_paused":              state["history_paused_var"].get(),
+            "vibe_mode":                   state["vibe_var"].get(),
+            "vibe_mode_backend":           state["backend_var"].get(),
+            "theme":                       state["theme_var"].get(),
         })
 
         try:
             with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(new_cfg, f, indent=2, ensure_ascii=False)
-            configure_position(pos_var.get())
+            configure_position(state["pos_var"].get())
             err_var.set("Saved.")
+            err_lbl.config(fg="#22c55e")
         except Exception as exc:
             err_var.set(f"Save failed: {exc}")
+            err_lbl.config(fg="#ef4444")
 
     def on_close() -> None:
         global _settings_open
         _settings_open = False
         win.destroy()
 
-    save_btn = tk.Button(btns, text="Save", command=on_save, width=10,
-                         bg=_BLUE, fg=_FG, activebackground=_BLUE_HV,
-                         activeforeground=_FG, relief="flat", bd=0,
-                         font=("Segoe UI", 10), padx=6, pady=4, cursor="hand2")
-    save_btn.bind("<Enter>", lambda e: save_btn.config(bg=_BLUE_HV))
-    save_btn.bind("<Leave>", lambda e: save_btn.config(bg=_BLUE))
-    save_btn.pack(side=tk.LEFT)
+    btns = tk.Frame(footer, bg=_BG2)
+    btns.pack(side=tk.RIGHT, padx=14, pady=10)
 
     cancel_wrap = tk.Frame(btns, bg=_BORDER, padx=1, pady=1)
     tk.Button(cancel_wrap, text="Cancel", command=on_close, width=10,
-              bg=_BG, fg=_FG2, activebackground=_BG2, activeforeground=_FG,
+              bg=_BG2, fg=_FG2, activebackground=_BG3, activeforeground=_FG,
               relief="flat", bd=0,
-              font=("Segoe UI", 10), padx=6, pady=4, cursor="hand2").pack()
-    cancel_wrap.pack(side=tk.LEFT, padx=(8, 0))
+              font=_FONT_BTN, padx=8, pady=6, cursor="hand2").pack()
+    cancel_wrap.pack(side=tk.RIGHT, padx=(8, 0))
+
+    save_btn = tk.Button(btns, text="Save", command=on_save, width=10,
+                         bg=_BLUE, fg="#ffffff", activebackground=_BLUE_HV,
+                         activeforeground="#ffffff", relief="flat", bd=0,
+                         font=_FONT_BTN, padx=8, pady=6, cursor="hand2")
+    save_btn.bind("<Enter>", lambda e: save_btn.config(bg=_BLUE_HV))
+    save_btn.bind("<Leave>", lambda e: save_btn.config(bg=_BLUE))
+    save_btn.pack(side=tk.RIGHT)
 
     win.protocol("WM_DELETE_WINDOW", on_close)
     win.bind("<Escape>", lambda _: on_close())
