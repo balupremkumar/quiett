@@ -36,6 +36,8 @@ from logger import log, warn
 
 _restore_delay_ms = 150
 _per_app_paste: dict = {}   # exe_name_lower → "ctrl_v" | "ctrl_shift_v"
+_electron_paste_method = "ctrl_v"  # how to paste into Electron/Chromium (VS Code, Cursor, browsers)
+_paste_mode = "auto"               # "auto" = inject into target; "clipboard_only" = copy + notify
 
 _VK_CONTROL = 0x11
 _VK_MENU    = 0x12  # Alt
@@ -163,8 +165,8 @@ def _send_unicode_text(text: str, batch: int = 32, batch_delay_ms: int = 2) -> i
         nonlocal sent
         if not buf:
             return
-        n = _send_inputs(buf)
-        sent += len(buf) // 2  # 2 inputs per char (down + up)
+        n = _send_inputs(buf)       # events actually inserted into the input stream
+        sent += n // 2              # 2 inputs per char (down + up)
         buf.clear()
         if batch_delay_ms > 0:
             time.sleep(batch_delay_ms / 1000.0)
@@ -205,8 +207,13 @@ def _send_unicode_text(text: str, batch: int = 32, batch_delay_ms: int = 2) -> i
     return sent
 
 
-def _send_keystroke(vks_to_hold: list[int], main_vk: int) -> None:
-    """Press modifiers, tap main key, release modifiers (in reverse)."""
+def _send_keystroke(vks_to_hold: list[int], main_vk: int) -> int:
+    """Press modifiers, tap main key, release modifiers (in reverse).
+
+    Returns the number of input events SendInput actually inserted — 0 means
+    SendInput is fully blocked for this target (e.g. secure desktop), distinct
+    from the keystroke being delivered but ignored by the app.
+    """
     inputs = []
     for vk in vks_to_hold:
         inputs.append(_make_key_input(vk, key_up=False))
@@ -214,7 +221,7 @@ def _send_keystroke(vks_to_hold: list[int], main_vk: int) -> None:
     inputs.append(_make_key_input(main_vk, key_up=True))
     for vk in reversed(vks_to_hold):
         inputs.append(_make_key_input(vk, key_up=True))
-    _send_inputs(inputs)
+    return _send_inputs(inputs)
 
 
 def _flush_modifier(vk: int) -> None:
@@ -359,11 +366,17 @@ def _is_higher_integrity_target(hwnd: int) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
-def configure(restore_delay_ms: int, per_app_paste: dict | None = None) -> None:
-    global _restore_delay_ms, _per_app_paste
+def configure(restore_delay_ms: int, per_app_paste: dict | None = None,
+              electron_paste_method: str | None = None,
+              paste_mode: str | None = None) -> None:
+    global _restore_delay_ms, _per_app_paste, _electron_paste_method, _paste_mode
     _restore_delay_ms = restore_delay_ms
     if per_app_paste is not None:
         _per_app_paste = {k.lower(): v for k, v in per_app_paste.items()}
+    if electron_paste_method in ("type", "ctrl_v", "ctrl_shift_v"):
+        _electron_paste_method = electron_paste_method
+    if paste_mode in ("auto", "clipboard_only"):
+        _paste_mode = paste_mode
 
 
 def capture_foreground() -> int:
@@ -589,6 +602,25 @@ def _notify_failure(reason: str) -> None:
             pass
 
 
+_paste_info_callback = None
+
+
+def set_paste_info_callback(fn) -> None:
+    """Register a callback for non-error notifications (e.g. clipboard-only mode)."""
+    global _paste_info_callback
+    _paste_info_callback = fn
+
+
+def _notify_info(msg: str) -> None:
+    log("inject", msg)
+    cb = _paste_info_callback
+    if cb:
+        try:
+            cb(msg)
+        except Exception:
+            pass
+
+
 def _decide_method(hwnd: int) -> str:
     """Pick the paste method for this target. Returns 'type' | 'ctrl_v' | 'ctrl_shift_v'."""
     exe = _get_exe_name(hwnd)
@@ -599,15 +631,36 @@ def _decide_method(hwnd: int) -> str:
         # Terminals work well with Ctrl+Shift+V clipboard paste and benefit from
         # the speed when output is long. Don't slow them down by typing.
         return "ctrl_shift_v"
-    # Default: Unicode typing. Most reliable in Electron/RDP/browsers/dialogs.
+    if _is_rdp(hwnd):
+        # Synthetic Unicode typing is unreliable over RDP — the KEYEVENTF_UNICODE
+        # events frequently don't propagate into the remote session. Clipboard
+        # Ctrl+V matches what works when pasting into a remote desktop by hand.
+        return "ctrl_v"
+    cls = _get_class(hwnd)
+    if any(s in cls for s in ("Chrome_WidgetWin", "MozillaWindowClass")):
+        # VS Code / Cursor / Electron / browsers: clipboard Ctrl+V is the reliable
+        # default (typing gets swallowed under focus races). Configurable via
+        # electron_paste_method for users who prefer typing.
+        return _electron_paste_method
+    # Default: Unicode typing for plain Win32 controls / dialogs.
     return "type"
 
 
 def inject_text(text: str, hwnd: int) -> None:
+    if not text:
+        return
+
+    # Clipboard-only mode: don't inject anywhere — just copy and tell the user to paste.
+    # A reliable manual fallback for apps that fight synthetic input.
+    if _paste_mode == "clipboard_only":
+        if _clipboard_set_text(text):
+            _notify_info(f"Copied to clipboard ({len(text)} chars) — press Ctrl+V to paste")
+        else:
+            _notify_failure("Could not place text on clipboard")
+        return
+
     if not hwnd or not win32gui.IsWindow(hwnd):
         log("inject", "no target hwnd")
-        return
-    if not text:
         return
 
     target_cls   = _get_class(hwnd)
@@ -660,22 +713,35 @@ def inject_text(text: str, hwnd: int) -> None:
         time.sleep(0.15)
 
     if method == "type":
-        # Primary path — type characters via SendInput KEYEVENTF_UNICODE.
-        # No clipboard involvement; works in VS Code, Cursor, RDP, browsers.
+        # Type characters via SendInput KEYEVENTF_UNICODE (no clipboard involvement).
         sent = _send_unicode_text(text)
         log("inject", f"typed {sent} chars via KEYEVENTF_UNICODE")
-        return
+        if sent > 0:
+            return
+        # SendInput inserted nothing (throttled / blocked / secure desktop). Safe to
+        # fall back to clipboard paste because nothing landed — no duplication risk.
+        warn("inject", "type path inserted 0 chars; falling back to clipboard Ctrl+V")
+        method = "ctrl_v"
 
-    # Clipboard paste path — used for terminals where Ctrl+Shift+V is reliable.
+    # Clipboard paste path — terminals (Ctrl+Shift+V), RDP/Electron (Ctrl+V), and the
+    # type-path fallback above.
     original = _clipboard_get_text()
     if not _clipboard_set_text(text):
         _notify_failure("Could not place text on clipboard")
         return
 
     if method == "ctrl_shift_v":
-        _send_keystroke([_VK_CONTROL, _VK_SHIFT], _VK_V)
+        n = _send_keystroke([_VK_CONTROL, _VK_SHIFT], _VK_V)
     else:
-        _send_keystroke([_VK_CONTROL], _VK_V)
+        n = _send_keystroke([_VK_CONTROL], _VK_V)
+
+    if n == 0:
+        # SendInput inserted nothing at all — it's fully blocked for this target
+        # (not just ignored). Last resort: WM_PASTE goes through SendMessage, not
+        # SendInput, so it can still reach a plain Win32 edit control.
+        warn("inject", "Ctrl+V keystroke blocked by SendInput; trying WM_PASTE fallback")
+        if not _try_wm_paste(hwnd):
+            _notify_failure("Paste blocked for this target — press Ctrl+V manually")
 
     def _restore():
         time.sleep(_restore_delay_ms / 1000)

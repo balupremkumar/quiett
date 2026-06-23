@@ -58,6 +58,8 @@ _CONFIG_DEFAULTS = {
     "history_paused":              False,
     "silence_threshold":           0.01,
     "per_app_paste":               {},
+    "electron_paste_method":       "ctrl_v",
+    "paste_mode":                  "auto",
     "vibe_mode":                   False,
     "vibe_mode_backend":           "lmstudio",
     "lmstudio_model":              "qwen/qwen3-8b",
@@ -140,9 +142,14 @@ def main() -> None:
     inject.configure(
         restore_delay_ms=_cfg["clipboard_restore_delay_ms"],
         per_app_paste=_cfg.get("per_app_paste", {}),
+        electron_paste_method=_cfg.get("electron_paste_method", "ctrl_v"),
+        paste_mode=_cfg.get("paste_mode", "auto"),
     )
     inject.set_paste_failure_callback(
         lambda msg: preview.show_toast(msg, kind="warn")
+    )
+    inject.set_paste_info_callback(
+        lambda msg: preview.show_toast(msg, kind="info")
     )
     preview.configure_position(_cfg["preview_position"])
     preview.start()
@@ -348,6 +355,8 @@ def main() -> None:
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],
                 per_app_paste=validated.get("per_app_paste", {}),
+                electron_paste_method=validated.get("electron_paste_method", "ctrl_v"),
+                paste_mode=validated.get("paste_mode", "auto"),
             )
             preview.configure_position(validated["preview_position"])
             audio.configure(
@@ -369,6 +378,12 @@ def main() -> None:
                 with _cfg_lock:
                     _cfg["vibe_mode"] = new_vibe
                 tray.set_vibe_mode(new_vibe)
+            # Sync paste_mode state into tray menu
+            new_paste_mode = validated.get("paste_mode", "auto")
+            if new_paste_mode != _cfg.get("paste_mode"):
+                with _cfg_lock:
+                    _cfg["paste_mode"] = new_paste_mode
+                tray.set_clipboard_only(new_paste_mode == "clipboard_only")
         except Exception:
             pass
         t = threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config)
@@ -391,6 +406,26 @@ def main() -> None:
             with open("config.json") as f:
                 raw = json.load(f)
             raw["vibe_mode"] = enabled
+            with open("config.json", "w") as f:
+                json.dump(raw, f, indent=2)
+        except Exception:
+            pass
+
+    def _on_toggle_clipboard_only(enabled: bool) -> None:
+        global _cfg
+        new_mode = "clipboard_only" if enabled else "auto"
+        with _cfg_lock:
+            _cfg["paste_mode"] = new_mode
+        inject.configure(
+            restore_delay_ms=_cfg["clipboard_restore_delay_ms"],
+            per_app_paste=_cfg.get("per_app_paste", {}),
+            electron_paste_method=_cfg.get("electron_paste_method", "ctrl_v"),
+            paste_mode=new_mode,
+        )
+        try:
+            with open("config.json") as f:
+                raw = json.load(f)
+            raw["paste_mode"] = new_mode
             with open("config.json", "w") as f:
                 json.dump(raw, f, indent=2)
         except Exception:
@@ -422,6 +457,8 @@ def main() -> None:
         vibe_mode=_cfg.get("vibe_mode", False),
         on_set_vibe_profile=_on_set_vibe_profile,
         vibe_profile=_cfg.get("vibe_profile", "coding"),
+        on_toggle_clipboard_only=_on_toggle_clipboard_only,
+        clipboard_only=_cfg.get("paste_mode", "auto") == "clipboard_only",
     )
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()

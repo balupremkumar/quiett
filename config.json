@@ -40,6 +40,8 @@
   ],
   "input_device": null,
   "per_app_paste": {},
+  "electron_paste_method": "ctrl_v",
+  "paste_mode": "auto",
   "vibe_mode": false,
   "vibe_mode_backend": "lmstudio",
   "lmstudio_model": "qwen/qwen3-8b",

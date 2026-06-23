@@ -242,14 +242,18 @@ _on_set_vibe_profile = None
 _vibe_mode        = False
 _vibe_profile     = "coding"
 _vibe_profiles    = ("coding", "chat", "longform")
+_on_toggle_clipboard_only = None
+_clipboard_only   = False
 
 
 def configure(on_view_history, on_toggle_pause=None,
               on_view_profile=None, on_open_settings=None,
               on_toggle_vibe=None, vibe_mode: bool = False,
-              on_set_vibe_profile=None, vibe_profile: str = "coding") -> None:
+              on_set_vibe_profile=None, vibe_profile: str = "coding",
+              on_toggle_clipboard_only=None, clipboard_only: bool = False) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
     global _on_toggle_vibe, _vibe_mode, _on_set_vibe_profile, _vibe_profile
+    global _on_toggle_clipboard_only, _clipboard_only
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
@@ -258,12 +262,22 @@ def configure(on_view_history, on_toggle_pause=None,
     _on_set_vibe_profile = on_set_vibe_profile
     _vibe_mode        = vibe_mode
     _vibe_profile     = vibe_profile
+    _on_toggle_clipboard_only = on_toggle_clipboard_only
+    _clipboard_only   = clipboard_only
 
 
 def set_vibe_mode(enabled: bool) -> None:
     """Keep tray menu in sync when vibe_mode changes externally (e.g. hot-reload)."""
     global _vibe_mode
     _vibe_mode = enabled
+    if _icon is not None:
+        _icon.update_menu()
+
+
+def set_clipboard_only(enabled: bool) -> None:
+    """Keep tray menu in sync when paste_mode changes externally (e.g. hot-reload)."""
+    global _clipboard_only
+    _clipboard_only = enabled
     if _icon is not None:
         _icon.update_menu()
 
@@ -332,6 +346,13 @@ def run() -> None:
             _on_toggle_vibe(_vibe_mode)
         icon.update_menu()
 
+    def _toggle_clipboard_only(icon, item):
+        global _clipboard_only
+        _clipboard_only = not _clipboard_only
+        if _on_toggle_clipboard_only:
+            _on_toggle_clipboard_only(_clipboard_only)
+        icon.update_menu()
+
     def _make_profile_setter(name: str):
         def _set(icon, item):
             global _vibe_profile
@@ -355,6 +376,7 @@ def run() -> None:
         pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
         pystray.MenuItem("Vibe Mode", _toggle_vibe, checked=lambda item: _vibe_mode),
         pystray.MenuItem("Vibe Profile", profile_menu),
+        pystray.MenuItem("Clipboard Only", _toggle_clipboard_only, checked=lambda item: _clipboard_only),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("View History",    _view_history),
         pystray.MenuItem("Speech Profile",  _view_profile),
