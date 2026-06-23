@@ -100,6 +100,68 @@ def _safe_destroy(win) -> None:
         pass
 
 
+def _blend_hex(a: str, b: str, t: float) -> str:
+    ar, ag, ab = int(a[1:3], 16), int(a[3:5], 16), int(a[5:7], 16)
+    br, bg, bb = int(b[1:3], 16), int(b[3:5], 16), int(b[5:7], 16)
+    return f"#{int(ar + (br - ar) * t):02x}{int(ag + (bg - ag) * t):02x}{int(ab + (bb - ab) * t):02x}"
+
+
+def ease_color(widget, option: str, start_hex: str, end_hex: str,
+                duration_ms: int = 150, steps: int = 8, on_done=None) -> None:
+    """Animate a single colour option (e.g. 'bg', 'highlightbackground', 'fg')
+    on `widget` from `start_hex` to `end_hex`. Safe to call if widget is destroyed mid-animation."""
+    step_ms = max(1, duration_ms // steps)
+
+    def tick(i: int) -> None:
+        try:
+            if not widget.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            widget.configure(**{option: _blend_hex(start_hex, end_hex, i / steps)})
+        except Exception:
+            return
+        if i >= steps:
+            if on_done:
+                try:
+                    on_done()
+                except Exception:
+                    pass
+            return
+        widget.after(step_ms, lambda: tick(i + 1))
+
+    tick(1)
+
+
+def ease_place_y(widget, start_y: int, end_y: int,
+                  duration_ms: int = 150, steps: int = 10) -> None:
+    """Animate a place()-managed widget's y coordinate (e.g. a sliding tab indicator)."""
+    if start_y == end_y:
+        return
+    step_ms = max(1, duration_ms // steps)
+
+    def ease(t: float) -> float:
+        return 1 - pow(1 - t, 3)
+
+    def tick(i: int) -> None:
+        try:
+            if not widget.winfo_exists():
+                return
+        except Exception:
+            return
+        t = ease(i / steps)
+        y = int(start_y + (end_y - start_y) * t)
+        try:
+            widget.place(y=y)
+        except Exception:
+            return
+        if i < steps:
+            widget.after(step_ms, lambda: tick(i + 1))
+
+    tick(1)
+
+
 def slide_in(win, dx: int = 0, dy: int = 10, duration_ms: int = 200,
              alpha_target: float = 1.0) -> None:
     """Move window from (x+dx, y+dy) to (x, y) while fading alpha in. Eased."""

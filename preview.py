@@ -364,8 +364,9 @@ def _show_anchored_toast(t: dict) -> None:
     inner = tk.Frame(win, bg=_BG, padx=14, pady=10)
     inner.pack(padx=1, pady=1)
 
-    tk.Label(inner, text="●", bg=_BG, fg=accent,
-             font=(_FONT_FAM_TEXT, 10)).pack(side=tk.LEFT, padx=(0, 8))
+    dot_lbl = tk.Label(inner, text="●", bg=_BG, fg=accent,
+                       font=(_FONT_FAM_TEXT, 10))
+    dot_lbl.pack(side=tk.LEFT, padx=(0, 8))
     tk.Label(inner, text=msg, bg=_BG, fg=_FG,
              font=(_FONT_FAM_TEXT, 10), wraplength=320,
              justify="left").pack(side=tk.LEFT)
@@ -398,6 +399,19 @@ def _show_anchored_toast(t: dict) -> None:
 
     winfx.apply_rounded_region(win, radius=10)
     winfx.fade_in(win, target=0.96, duration_ms=160)
+
+    if kind in ("warn", "error"):
+        # Brief urgency pulse on the accent dot so warn/error toasts stand out
+        # from routine info ones, not just by colour but by motion.
+        bright = _hex_blend(accent, "#ffffff", 0.6)
+
+        def _pulse(n: int = 0) -> None:
+            if n >= 4:
+                return
+            start, end = (accent, bright) if n % 2 == 0 else (bright, accent)
+            winfx.ease_color(dot_lbl, "fg", start, end, duration_ms=160, steps=6,
+                             on_done=lambda: _pulse(n + 1))
+        _pulse()
 
     # Auto-dismiss after 4.5s (or stay if action button present)
     dismiss_ms = 7000 if action_label else 4500
@@ -817,7 +831,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         bg=_BG2, fg=_FG, insertbackground=_FG,
         relief="flat", bd=0,
         highlightthickness=1,
-        highlightbackground=_border_colour(confidence),
+        highlightbackground=_BORDER,  # eases to the confidence colour once the window is up
         highlightcolor=_BLUE,
         height=4, padx=10, pady=8,
         undo=True,
@@ -1062,6 +1076,9 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     # ── Rounded corners + slide-up entrance ────────────────────────────────
     winfx.apply_rounded_region(win, radius=12)
     winfx.slide_in(win, dx=0, dy=8, duration_ms=200, alpha_target=1.0)
+    if not empty:
+        winfx.ease_color(entry, "highlightbackground", _BORDER, _border_colour(confidence),
+                         duration_ms=260, steps=10)
 
     # ── Auto-dismiss ───────────────────────────────────────────────────────
     if auto_dismiss > 0:
@@ -1156,6 +1173,26 @@ def _open_history() -> None:
     txt.tag_configure("sep",    foreground=_BORDER)
     txt.tag_configure("hover",  background=_BG3)
     txt.tag_configure("match",  background="#3b5274", foreground="#f3f4f6")
+    txt.tag_configure("flash",  background=_BLUE)  # brief click-to-copy confirmation, eased off in _flash_row
+
+    def _flash_row(start: str, end: str) -> None:
+        """Quick background flash on a row, echoing the copy-to-clipboard click."""
+        steps = 6
+        txt.tag_add("flash", start, end)
+
+        def tick(i: int) -> None:
+            try:
+                if not txt.winfo_exists():
+                    return
+            except Exception:
+                return
+            txt.tag_configure("flash", background=_hex_blend(_BLUE, _BG2, i / steps))
+            if i >= steps:
+                txt.tag_remove("flash", start, end)
+                return
+            txt.after(35, lambda: tick(i + 1))
+
+        tick(0)
 
     def _populate(data: list, query: str = "") -> None:
         txt.config(state="normal")
@@ -1184,7 +1221,8 @@ def _open_history() -> None:
                 row_tag = f"row_{i}"
                 txt.tag_add(row_tag, start_idx, end_idx)
                 txt.tag_bind(row_tag, "<Button-1>",
-                             lambda e, t=body_text: _copy_with_toast(t))
+                             lambda e, t=body_text, s=start_idx, en=end_idx: (
+                                 _flash_row(s, en), _copy_with_toast(t)))
                 txt.tag_bind(row_tag, "<Enter>",
                              lambda e, s=start_idx, en=end_idx: (
                                  txt.tag_add("hover", s, en),
@@ -1241,7 +1279,7 @@ def _open_history() -> None:
     def on_close() -> None:
         global _history_open
         _history_open = False
-        win.destroy()
+        winfx.fade_out_then_destroy(win, duration_ms=140)
 
     clear_wrap = tk.Frame(bar, bg=_BORDER, padx=1, pady=1)
     tk.Button(
@@ -1258,6 +1296,8 @@ def _open_history() -> None:
 
     win.protocol("WM_DELETE_WINDOW", on_close)
     win.bind("<Escape>", lambda _: on_close())
+
+    winfx.fade_in(win, target=1.0, duration_ms=160)
 
 
 # ---------------------------------------------------------------------------
@@ -1349,7 +1389,7 @@ def _open_profile() -> None:
     def on_close() -> None:
         global _profile_open
         _profile_open = False
-        win.destroy()
+        winfx.fade_out_then_destroy(win, duration_ms=140)
 
     close_wrap = tk.Frame(bar, bg=_BORDER, padx=1, pady=1)
     tk.Button(
@@ -1363,6 +1403,8 @@ def _open_profile() -> None:
 
     win.protocol("WM_DELETE_WINDOW", on_close)
     win.bind("<Escape>", lambda _: on_close())
+
+    winfx.fade_in(win, target=1.0, duration_ms=160)
 
 
 # ---------------------------------------------------------------------------
@@ -1700,6 +1742,10 @@ def _open_settings() -> None:
         pages[name].pack(fill=tk.BOTH, expand=True)
         current_page.set(name)
         canvas.yview_moveto(0)
+        indicator = state.get("nav_indicator")
+        if indicator is not None:
+            winfx.ease_place_y(indicator, indicator.winfo_y(),
+                               nav_buttons[name].winfo_y(), duration_ms=150)
 
     def _on_nav_click(name: str) -> None:
         show_page(name)
@@ -1718,10 +1764,19 @@ def _open_settings() -> None:
         nav.pack(fill=tk.X)
         nav.bind("<Button-1>", lambda e, n=name: _on_nav_click(n))
         nav.bind("<Enter>", lambda e, n=name:
-                 nav_buttons[n].config(bg=_BG3) if current_page.get() != n else None)
+                 winfx.ease_color(nav_buttons[n], "bg", _BG2, _BG3, duration_ms=100, steps=5)
+                 if current_page.get() != n else None)
         nav.bind("<Leave>", lambda e, n=name:
-                 nav_buttons[n].config(bg=_BG2) if current_page.get() != n else None)
+                 winfx.ease_color(nav_buttons[n], "bg", _BG3, _BG2, duration_ms=100, steps=5)
+                 if current_page.get() != n else None)
         nav_buttons[name] = nav
+
+    # Sliding accent indicator that animates to the active tab.
+    sidebar.update_idletasks()
+    first_nav = nav_buttons[PAGE_DEFS[0][0]]
+    nav_indicator = tk.Frame(sidebar, bg=_BLUE, width=3, height=first_nav.winfo_height())
+    nav_indicator.place(x=0, y=first_nav.winfo_y())
+    state["nav_indicator"] = nav_indicator
 
     show_page(PAGE_DEFS[0][0])
 
@@ -1808,6 +1863,12 @@ def _open_settings() -> None:
             configure_position(state["pos_var"].get())
             err_var.set("Saved.")
             err_lbl.config(fg="#22c55e")
+            # Brief flash on the Save button itself — a tactile confirmation
+            # beyond the footer text, since that's easy to miss.
+            winfx.ease_color(
+                save_btn, "bg", _BLUE, "#22c55e", duration_ms=150, steps=6,
+                on_done=lambda: winfx.ease_color(
+                    save_btn, "bg", "#22c55e", _BLUE, duration_ms=300, steps=8))
         except Exception as exc:
             err_var.set(f"Save failed: {exc}")
             err_lbl.config(fg="#ef4444")
@@ -1815,7 +1876,7 @@ def _open_settings() -> None:
     def on_close() -> None:
         global _settings_open
         _settings_open = False
-        win.destroy()
+        winfx.fade_out_then_destroy(win, duration_ms=140)
 
     btns = tk.Frame(footer, bg=_BG2)
     btns.pack(side=tk.RIGHT, padx=14, pady=10)
@@ -1837,3 +1898,5 @@ def _open_settings() -> None:
 
     win.protocol("WM_DELETE_WINDOW", on_close)
     win.bind("<Escape>", lambda _: on_close())
+
+    winfx.fade_in(win, target=1.0, duration_ms=160)

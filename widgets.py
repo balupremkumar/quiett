@@ -6,6 +6,7 @@ real-time mic-level preview when picking an input device.
 """
 from __future__ import annotations
 
+import math
 import threading
 import tkinter as tk
 
@@ -124,6 +125,8 @@ class MicMeter(tk.Canvas):
         self._stream = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._frame = 0
+        self._idle_bright = _blend_hex(idle, "#ffffff", 0.10)
 
         seg_w = (self.W - self.SEGMENTS) / self.SEGMENTS
         self._segs = []
@@ -174,12 +177,22 @@ class MicMeter(tk.Canvas):
             return
         try:
             n_lit = int(min(1.0, self._level / 0.20) ** 0.6 * self.SEGMENTS)
-            for i, seg in enumerate(self._segs):
-                if i < n_lit:
-                    t = i / max(1, self.SEGMENTS - 1)
-                    self.itemconfig(seg, fill=_blend_hex(self._active_lo, self._active_hi, t))
-                else:
-                    self.itemconfig(seg, fill=self._idle)
+            if n_lit == 0:
+                # Subtle idle "breathing" shimmer — a slow travelling wave at low
+                # amplitude — so the meter reads as live rather than inert before
+                # any sound is detected.
+                self._frame += 1
+                phase = self._frame * 0.06
+                for i, seg in enumerate(self._segs):
+                    t = ((math.sin(phase + i * 0.35) + 1) / 2) * 0.5
+                    self.itemconfig(seg, fill=_blend_hex(self._idle, self._idle_bright, t))
+            else:
+                for i, seg in enumerate(self._segs):
+                    if i < n_lit:
+                        t = i / max(1, self.SEGMENTS - 1)
+                        self.itemconfig(seg, fill=_blend_hex(self._active_lo, self._active_hi, t))
+                    else:
+                        self.itemconfig(seg, fill=self._idle)
         except Exception:
             return
         self.after(33, self._tick)
