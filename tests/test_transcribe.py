@@ -4,8 +4,7 @@ No Whisper model is loaded — only pure-Python functions are tested.
 import sys
 from unittest.mock import MagicMock
 
-# Stub heavy deps before import
-sys.modules["faster_whisper"] = MagicMock()
+# Stub heavy deps before import (transcribe talks to a whisper.cpp HTTP server, not a Python lib)
 _audio_stub = MagicMock()
 _audio_stub.SAMPLE_RATE = 16000
 sys.modules["audio"] = _audio_stub

@@ -314,6 +314,7 @@ def _postprocess(text: str, filler_words: list, profile_rules: dict) -> str:
     text = _apply_profile(text, profile_rules)
     text = _words_to_digits(text)
     text = _cleanup_whitespace_around_punct(text)
+    text = _fix_uptalk_questions(text)
     if not text:
         return text
     return text[0].upper() + text[1:] + " "
@@ -364,18 +365,29 @@ def _apply_spoken_punctuation(text: str) -> str:
 
 def _cleanup_whitespace_around_punct(text: str) -> str:
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    # Join a stray space before a contraction suffix: "that 's" -> "that's", "I 'm" -> "I'm"
+    text = re.sub(r"\s+'(s|t|re|ll|ve|m|d)\b", r"'\1", text, flags=re.IGNORECASE)
+    # Protect decimal points (digit.digit) so the spacing rule below won't split "4.8" into "4. 8"
+    text = re.sub(r"(?<=\d)\.(?=\d)", "\x00", text)
     text = re.sub(r"([,.;:!?])(?=\S)", r"\1 ", text)
+    text = text.replace("\x00", ".")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     return text.strip()
 
 
 def _collapse_acronyms(text: str) -> str:
-    """Collapse runs of 2+ single letters (A W S or A. W. S.) into ALLCAPS acronym."""
+    """Collapse runs of 2+ single UPPERCASE letters (A W S / A.W.S / I.B.M.) into an acronym.
+
+    Only *uppercase* runs are collapsed. This is deliberate: it stops the old rule from
+    mangling contractions like "it's a" -> "it'SA" and "I'm a" -> "I'MA" (the apostrophe
+    creates a word boundary, so the lowercase "s a" / "m a" used to be eaten as an acronym).
+    Whisper emits genuine spelled-out acronyms in capitals, so requiring uppercase keeps them.
+    """
     def repl(m: re.Match) -> str:
         letters = re.findall(r"[A-Za-z]", m.group(0))
         return "".join(letters).upper()
-    return re.sub(r"\b(?:[A-Za-z]\.? ){1,}[A-Za-z]\.?(?=\b)", repl, text)
+    return re.sub(r"\b[A-Z](?:\.?[ ]?[A-Z]){1,}\.?\b", repl, text)
 
 
 _NUM_WORDS = {
@@ -389,16 +401,38 @@ _NUM_WORDS = {
 _NUM_SCALES = {"hundred": 100, "thousand": 1000, "million": 1_000_000, "billion": 1_000_000_000}
 
 
+# When "one"/"two" stands alone next to one of these, it's a pronoun ("no one", "the one
+# who", "next one", "one of"), not a count — keep it as a word instead of digit-ising it.
+_PRONOUN_STOP_PREV = {
+    "no", "the", "this", "that", "which", "every", "each", "any", "only",
+    "next", "another", "is", "are", "big",
+}
+_PRONOUN_NEXT = {"of", "who", "that"}
+
+
 def _words_to_digits(text: str) -> str:
     tokens = re.split(r"(\s+|[^\w\s'-]+)", text)
     out = []
     buf = []
 
-    def flush():
+    def last_word() -> str | None:
+        for t in reversed(out):
+            if t and not t.isspace():
+                return t.lower().strip("-,.")
+        return None
+
+    def flush(next_tok: str | None = None):
         if not buf:
             return
         val = _parse_number_words(buf)
-        if val is not None:
+        words = [t for t in buf if not t.isspace()]
+        keep_as_word = (
+            len(words) == 1
+            and words[0].lower().strip("-,") in ("one", "two")
+            and (last_word() in _PRONOUN_STOP_PREV
+                 or (next_tok or "").lower().strip("-,.") in _PRONOUN_NEXT)
+        )
+        if val is not None and not keep_as_word:
             out.append(str(val))
         else:
             out.extend(buf)
@@ -406,21 +440,54 @@ def _words_to_digits(text: str) -> str:
 
     for tok in tokens:
         low = tok.lower().strip("-,")
-        if low in _NUM_WORDS or low in _NUM_SCALES or low == "and" and buf:
+        if low in _NUM_WORDS or low in _NUM_SCALES or (low == "and" and buf):
             buf.append(tok)
         elif tok.isspace() and buf:
             buf.append(tok)
         else:
-            while buf and buf[-1].isspace():
+            if buf and buf[-1].isspace():
                 trailing = buf.pop()
-                flush()
+                flush(next_tok=tok)
                 out.append(trailing)
-                break
             else:
-                flush()
+                flush(next_tok=tok)
             out.append(tok)
     flush()
     return "".join(out)
+
+
+_QUESTION_STARTERS = {
+    "who", "what", "where", "when", "why", "how", "which", "whose", "whom",
+    "do", "does", "did", "is", "are", "am", "was", "were", "can", "could",
+    "will", "would", "should", "shall", "may", "might", "have", "has", "had",
+    "isn't", "aren't", "don't", "doesn't", "didn't", "can't", "couldn't",
+    "won't", "wouldn't", "shouldn't", "wasn't", "weren't", "haven't",
+    "hasn't", "hadn't", "shall", "ain't",
+}
+_QUESTION_TAGS = (
+    "right", "yeah", "isn't it", "aren't they", "does it", "doesn't it",
+    "do you", "you think", "won't you", "wouldn't you", "can you", "could you",
+)
+
+
+def _fix_uptalk_questions(text: str) -> str:
+    """NZ 'uptalk' (High Rising Terminal) makes Whisper hear declarative statements as
+    questions and append '?'. Downgrade a trailing '?' to '.' unless the clause is
+    structurally a question (starts with an interrogative word, or has a question tag).
+    Conservative by design — when in doubt, the '?' is kept."""
+    def repl(m: re.Match) -> str:
+        clause = m.group(1)
+        low = clause.lower().strip()
+        words = re.findall(r"[a-z']+", low)
+        if not words:
+            return m.group(0)
+        if words[0] in _QUESTION_STARTERS:
+            return m.group(0)
+        if any(low.endswith(tag) for tag in _QUESTION_TAGS):
+            return m.group(0)
+        return clause + "."
+
+    return re.sub(r"([^.!?]*)\?", repl, text)
 
 
 def _parse_number_words(tokens: list) -> int | None:
