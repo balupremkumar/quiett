@@ -71,10 +71,12 @@ def _loop() -> None:
 
         ok = transcribe.server_alive()
         if _last_whisper_ok and not ok:
-            warn("health", "whisper-server appears down")
+            warn("health", "whisper-server appears down — auto-restarting")
+            if _restart_whisper_fn:
+                _restart_whisper_fn()
             if _toast_fn:
-                _toast_fn("Whisper server stopped responding.",
-                          "error", "Restart", _restart_whisper_fn)
+                _toast_fn("Whisper server stopped responding — restarting automatically.",
+                          "warn", "Restart now", _restart_whisper_fn)
         elif not _last_whisper_ok and ok:
             log("health", "whisper-server recovered")
         _last_whisper_ok = ok
@@ -82,10 +84,12 @@ def _loop() -> None:
         if _vibe_enabled_fn and _vibe_enabled_fn():
             ok = _lmstudio_alive()
             if _last_lmstudio_ok and not ok:
-                warn("health", "LM Studio appears down")
+                warn("health", "LM Studio appears down — auto-restarting")
+                if _restart_lmstudio_fn:
+                    _restart_lmstudio_fn()
                 if _toast_fn:
-                    _toast_fn("LM Studio (vibe mode) stopped responding.",
-                              "warn", "Restart", _restart_lmstudio_fn)
+                    _toast_fn("LM Studio (vibe mode) stopped responding — restarting automatically.",
+                              "warn", "Restart now", _restart_lmstudio_fn)
             elif not _last_lmstudio_ok and ok:
                 log("health", "LM Studio recovered")
             _last_lmstudio_ok = ok

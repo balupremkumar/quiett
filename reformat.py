@@ -26,6 +26,7 @@ from logger import log, warn
 _client  = None
 _ready   = threading.Event()
 _backend = "rules"
+_last_backend_used = "rules"  # which backend actually produced the most recent run() result
 
 _LMSTUDIO_URL  = "http://localhost:1234/v1/chat/completions"
 _LMSTUDIO_MODELS_URL = "http://localhost:1234/v1/models"
@@ -166,6 +167,29 @@ def _probe_lmstudio() -> bool:
         return False
 
 
+def _query_loaded_models() -> list[str]:
+    """Return the model ids LM Studio currently has loaded into memory."""
+    try:
+        with urllib.request.urlopen(_LMSTUDIO_MODELS_URL, timeout=2) as resp:
+            body = json.loads(resp.read())
+        return [m.get("id", "") for m in body.get("data", [])]
+    except Exception:
+        return []
+
+
+def _model_loaded(model: str) -> bool:
+    return model in _query_loaded_models()
+
+
+def _wait_for_model_loaded(model: str, timeout_s: int = 30) -> bool:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _model_loaded(model):
+            return True
+        time.sleep(1)
+    return False
+
+
 def _launch_lmstudio_server(model: str) -> bool:
     """Start LM Studio server via lms CLI and wait for it to come up.
 
@@ -225,6 +249,17 @@ def load(backend: str = "lmstudio", model: str = "qwen/qwen3-8b") -> None:
             if _probe_lmstudio():
                 _backend = "lmstudio"
                 log("reformat", "LM Studio already running — backend ready")
+                # The server being up doesn't mean OUR model is loaded — if the
+                # server was already running before this app started, the
+                # "already running" branch used to skip loading entirely, and
+                # runtime chat calls would silently fall back to rules.
+                if model and not _model_loaded(model):
+                    warn("reformat", f"LM Studio running but {model!r} not loaded — loading now")
+                    _load_lmstudio_model(model)
+                    if _wait_for_model_loaded(model, timeout_s=30):
+                        log("reformat", f"{model!r} loaded")
+                    else:
+                        warn("reformat", f"{model!r} did not load within 30s — chat calls will fall back to rules")
             elif _launch_lmstudio_server(model):
                 _backend = "lmstudio"
                 log("reformat", "LM Studio auto-launched — backend ready")
@@ -259,14 +294,21 @@ def is_ready() -> bool:
     return _ready.is_set()
 
 
+def last_backend_used() -> str:
+    """Which backend actually produced the most recent run() result: 'lmstudio' | 'api' | 'rules'."""
+    return _last_backend_used
+
+
 def run(text: str) -> str:
     """Reformat raw dictation. Falls back gracefully on any error."""
+    global _last_backend_used
     if not text.strip():
         return text
 
     if _backend == "lmstudio":
         try:
             result = _call_lmstudio(text)
+            _last_backend_used = "lmstudio"
             log("reformat", f"lmstudio: {len(text)}→{len(result)} chars")
             return result if result else text
         except urllib.error.URLError:
@@ -288,11 +330,13 @@ def run(text: str) -> str:
                 messages=[{"role": "user", "content": f"Raw: {text}"}],
             )
             result = resp.content[0].text.strip()
+            _last_backend_used = "api"
             log("reformat", f"api: {len(text)}→{len(result)} chars")
             return result if result else text
         except Exception as exc:
             warn("reformat", f"API error: {exc}, using rules")
 
     result = _rule_based(text)
+    _last_backend_used = "rules"
     log("reformat", f"rules: {len(text)}→{len(result)} chars")
     return result

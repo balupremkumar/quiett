@@ -93,6 +93,17 @@ def _server_alive() -> bool:
         return False
 
 
+def check_prerequisites(model_name: str) -> list[str]:
+    """Return human-readable problems with the local setup, or [] if everything's in place."""
+    problems = []
+    if not os.path.isfile(_SERVER_EXE):
+        problems.append(f"whisper-server.exe not found at {_SERVER_EXE}")
+    model_path = _resolve_model_path(model_name)
+    if not os.path.isfile(model_path):
+        problems.append(f"model file not found: {model_path}")
+    return problems
+
+
 def load(model_name: str) -> None:
     """Start whisper-server.exe with the requested model. Blocks until ready."""
     global _proc, _load_error, _device_used
@@ -243,7 +254,9 @@ def run(
     duration = len(audio) / SAMPLE_RATE
     if duration < min_seconds:
         return None, None, None
-    _ready.wait()
+    if not _ready.wait(timeout=30):
+        warn("transcribe", "model not ready after 30s, aborting transcription")
+        return None, None, None
 
     prompt = _build_prompt(initial_prompt, custom_vocabulary)
     wav_bytes = _chunks_to_wav_bytes(chunks)

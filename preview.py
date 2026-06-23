@@ -119,11 +119,18 @@ def show(text: str, hwnd: int, empty: bool = False,
          confidence: float | None = None,
          words: list | None = None,
          auto_dismiss: float = 0.0,
-         raw: str | None = None) -> None:
-    """Queue a dictation preview window. raw= is the pre-vibe-mode Whisper text."""
+         raw: str | None = None,
+         reformat_backend: str | None = None) -> None:
+    """Queue a dictation preview window. raw= is the pre-vibe-mode Whisper text.
+
+    reformat_backend: 'lmstudio' | 'api' | 'rules' | None — which backend
+    actually produced `text` when vibe mode ran, so the preview can show
+    whether it was LLM-cleaned or the regex fallback kicked in.
+    """
     _preview_q.put({"text": text, "hwnd": hwnd, "empty": empty,
                     "confidence": confidence, "words": words,
-                    "auto_dismiss": auto_dismiss, "raw": raw})
+                    "auto_dismiss": auto_dismiss, "raw": raw,
+                    "reformat_backend": reformat_backend})
 
 
 def show_history() -> None:
@@ -247,6 +254,7 @@ def _tick() -> None:
                     latest_preview.get("auto_dismiss", 0.0),
                     latest_preview.get("words"),
                     latest_preview.get("raw"),
+                    latest_preview.get("reformat_backend"),
                 )
             except Exception as e:
                 print(f"preview window error: {e}")
@@ -267,7 +275,11 @@ def _tick() -> None:
             break
     if history_requested and not _history_open:
         _history_open = True
-        _open_history()
+        try:
+            _open_history()
+        except Exception as e:
+            print(f"history window error: {e}")
+            _history_open = False
 
     profile_requested = False
     while True:
@@ -278,7 +290,11 @@ def _tick() -> None:
             break
     if profile_requested and not _profile_open:
         _profile_open = True
-        _open_profile()
+        try:
+            _open_profile()
+        except Exception as e:
+            print(f"profile window error: {e}")
+            _profile_open = False
 
     settings_requested = False
     while True:
@@ -289,7 +305,11 @@ def _tick() -> None:
             break
     if settings_requested and not _settings_open:
         _settings_open = True
-        _open_settings()
+        try:
+            _open_settings()
+        except Exception as e:
+            print(f"settings window error: {e}")
+            _settings_open = False
 
     # Drain the entire badge queue each tick so a late "processing" item
     # cannot reappear after a None already cleared the badge.
@@ -768,7 +788,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                  confidence: float | None = None,
                  auto_dismiss: float = 0.0,
                  words: list | None = None,
-                 raw: str | None = None) -> None:
+                 raw: str | None = None,
+                 reformat_backend: str | None = None) -> None:
     global _current_preview_win
 
     try:
@@ -952,14 +973,26 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
             entry.insert("1.0", new_content)
             toggle_btn.config(text=new_label)
 
+        toggle_row = tk.Frame(frame, bg=_BG)
+        toggle_row.pack(fill=tk.X, pady=(4, 0))
+
+        # Indicator: did the LLM actually clean this up, or did it silently
+        # fall back to the regex "rules" cleaner (e.g. LM Studio model unloaded)?
+        if reformat_backend == "rules":
+            tk.Label(toggle_row, text="rules fallback", bg=_BG, fg=_FG3,
+                     font=_FONT_CHIP).pack(side=tk.LEFT)
+        elif reformat_backend in ("lmstudio", "api"):
+            tk.Label(toggle_row, text="LLM", bg=_BG, fg="#22c55e",
+                     font=(_FONT_FAM_TEXT, 8, "bold")).pack(side=tk.LEFT)
+
         toggle_btn = tk.Button(
-            frame, text="Raw", command=_toggle_raw,
+            toggle_row, text="Raw", command=_toggle_raw,
             bg=_BG2, fg=_FG2,
             activebackground=_BORDER, activeforeground=_FG,
             relief="flat", bd=1,
             font=_FONT_CHIP, padx=8, pady=3, cursor="hand2",
         )
-        toggle_btn.pack(anchor=tk.E, pady=(4, 0))
+        toggle_btn.pack(side=tk.RIGHT)
 
     # ── Keyboard hint chips ────────────────────────────────────────────────
     chip_row = tk.Frame(frame, bg=_BG)
@@ -1481,7 +1514,10 @@ def _open_settings() -> None:
                 except Exception:
                     meter.set_device(None)
         mic_var.trace_add("write", _on_mic_change)
-        _on_mic_change()
+        # Don't open the mic stream the instant Settings opens — only once the
+        # user actually looks at the Audio page (show_page below) or changes
+        # the mic dropdown (trace above).
+        state["_start_mic_meter"] = _on_mic_change
         # Tear down meter stream when window closes
         win.bind("<Destroy>", lambda e: meter.stop(), add="+")
 
@@ -1665,13 +1701,22 @@ def _open_settings() -> None:
         current_page.set(name)
         canvas.yview_moveto(0)
 
+    def _on_nav_click(name: str) -> None:
+        show_page(name)
+        # Lazily open the mic meter only on an actual user click into the Audio
+        # tab — not as a side effect of Settings opening (Audio happens to be
+        # the default first page).
+        if name == "Audio" and "_start_mic_meter" in state and not state.get("_mic_meter_started"):
+            state["_mic_meter_started"] = True
+            state["_start_mic_meter"]()
+
     for name, builder in PAGE_DEFS:
         pages[name] = builder()
         nav = tk.Label(sidebar, text=name, bg=_BG2, fg=_FG2,
                        font=_FONT_BODY, anchor="w", padx=18, pady=10,
                        cursor="hand2")
         nav.pack(fill=tk.X)
-        nav.bind("<Button-1>", lambda e, n=name: show_page(n))
+        nav.bind("<Button-1>", lambda e, n=name: _on_nav_click(n))
         nav.bind("<Enter>", lambda e, n=name:
                  nav_buttons[n].config(bg=_BG3) if current_page.get() != n else None)
         nav.bind("<Leave>", lambda e, n=name:
@@ -1725,7 +1770,15 @@ def _open_settings() -> None:
             except Exception:
                 mic_idx = None
 
-        new_cfg = dict(cfg)
+        # Re-read the on-disk config right before writing and merge into that,
+        # rather than the snapshot taken when this window opened — otherwise we'd
+        # clobber concurrent writes (tray toggles, hot-reload) made while Settings
+        # was open.
+        try:
+            with open(_CONFIG_FILE, encoding="utf-8") as f:
+                new_cfg = json.load(f)
+        except Exception:
+            new_cfg = dict(cfg)
         new_cfg.update({
             "hotkey":                      state["hotkey_var"].get().strip() or "ctrl+alt",
             "language":                    state["lang_var"].get().strip(),

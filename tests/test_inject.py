@@ -65,7 +65,16 @@ class TestInjectText:
         monkeypatch.setattr(inject, "_clipboard_set_text",
                             lambda t: clipboard_calls.append(t) or True)
         monkeypatch.setattr(inject, "_send_keystroke",
-                            lambda mods, key: keystroke_calls.append((mods, key)))
+                            lambda mods, key: keystroke_calls.append((mods, key)) or 4)
+        # inject_text() spawns a real background thread to restore the clipboard
+        # after a delay. If it's left to run for real, it fires after this test
+        # (and its monkeypatches) have already torn down, hitting the *actual*
+        # Windows clipboard via raw ctypes from a stale thread — flaky and has
+        # been observed to crash the test process. Make Thread.start() a no-op
+        # so the restore never actually runs; this test only cares about the
+        # synchronous clipboard-set + keystroke calls above.
+        monkeypatch.setattr(inject.threading, "Thread",
+                            lambda target=None, daemon=None: MagicMock(start=lambda: None))
         inject.inject_text("ls -la", 1234)
         assert clipboard_calls == ["ls -la"]
         assert keystroke_calls and keystroke_calls[0][1] == inject._VK_V

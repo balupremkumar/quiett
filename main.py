@@ -18,8 +18,13 @@ Not hot-reloadable (require restart): model, hotkey
 """
 
 import atexit
+import ctypes
 import json
+import sys
 import threading
+
+import win32event
+import winerror
 
 import audio
 import history
@@ -128,9 +133,19 @@ def main() -> None:
     _cfg = _validate_config(_load_config())
     _cfg["_active_hotkey"] = _cfg.get("hotkey", "ctrl+alt")
 
+    # Single-instance guard: a second launch (e.g. double-clicking the desktop
+    # shortcut again) would race the first for the hotkey hook, port 8089, and
+    # config.json writes. Bail out with a clear message instead.
+    _mutex = win32event.CreateMutex(None, False, "VoiceDictate_SingleInstance_Mutex")
+    if win32event.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+        ctypes.windll.user32.MessageBoxW(
+            None, "VoiceDictate is already running (check the system tray).",
+            "VoiceDictate", 0x40,  # MB_ICONINFORMATION
+        )
+        sys.exit(0)
+
     # DPI awareness: per-monitor V2 for correct sizing on multi-DPI setups
     try:
-        import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         try:
@@ -153,6 +168,18 @@ def main() -> None:
     )
     preview.configure_position(_cfg["preview_position"])
     preview.start()
+
+    # First-run check: surface missing prerequisites clearly instead of letting
+    # them fail silently or only show up as a buried log line.
+    def _check_first_run() -> None:
+        problems = transcribe.check_prerequisites(_cfg["model"])
+        if not audio.list_input_devices():
+            problems.append("no microphone detected")
+        for problem in problems:
+            log_error("main", f"first-run check: {problem}")
+            preview.show_toast(f"Setup issue: {problem}", kind="error")
+
+    _check_first_run()
 
     # ------------------------------------------------------------------
     # Callbacks wired between audio → transcription → preview → inject
@@ -194,10 +221,12 @@ def main() -> None:
         # Vibe mode: reformat raw Whisper text into a structured coding prompt.
         # raw_text preserved so the preview Raw toggle can show the original.
         raw_text = text
+        reformat_backend = None
         if cfg.get("vibe_mode") and text.strip() and reformat.is_ready():
             preview.show_badge("reformatting")
             try:
                 text = reformat.run(text)
+                reformat_backend = reformat.last_backend_used()
             except Exception as exc:
                 log_error("main", f"reformat error: {exc}")
             finally:
@@ -210,6 +239,7 @@ def main() -> None:
             words=words,
             auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
             raw=raw_text if cfg.get("vibe_mode") and raw_text != text else None,
+            reformat_backend=reformat_backend,
         )
 
     def _on_audio_stop(chunks: list) -> None:
@@ -384,8 +414,8 @@ def main() -> None:
                 with _cfg_lock:
                     _cfg["paste_mode"] = new_paste_mode
                 tray.set_clipboard_only(new_paste_mode == "clipboard_only")
-        except Exception:
-            pass
+        except Exception as exc:
+            log_error("main", f"config hot-reload failed: {exc}")
         t = threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config)
         t.daemon = True
         t.start()
