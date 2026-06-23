@@ -2,7 +2,7 @@
 # Right-click this file -> "Run with PowerShell"
 
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$python     = Join-Path $projectDir "venv\Scripts\python.exe"
+$python     = Join-Path $projectDir ".venv\Scripts\python.exe"
 $vbsPath    = Join-Path $projectDir "launch.vbs"
 $icoPath    = Join-Path $projectDir "icon.ico"
 $desktop    = [Environment]::GetFolderPath("Desktop")

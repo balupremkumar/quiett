@@ -5,24 +5,31 @@ Hold **Ctrl+Alt** to record, release to transcribe. A floating preview panel app
 ## Setup
 
 ```
-python -m venv venv
-venv\Scripts\activate
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-On first run the Whisper `small` model (~244 MB) is downloaded automatically to `~/.cache/huggingface`.
+Transcription runs on a local **whisper.cpp** server (`whisper-server.exe`, GPU via Vulkan)
+using a ggml model in `models/` (default `large-v3-turbo`). The server binary lives in
+`third_party/` and the model `.bin` in `models/` — these are not pip-installable and are not
+downloaded automatically; they must be present before first run. Optional "vibe mode" reformats
+transcripts via a local LM Studio model (`qwen/qwen3-8b`).
 
 ## Run (terminal)
 
 ```
-venv\Scripts\python main.py
+.venv\Scripts\python main.py
 ```
 
-## Desktop shortcut (run once)
+## Run with no console window / Desktop shortcut (run once)
 
-Right-click `create_shortcut.ps1` → **Run with PowerShell**. This places a **VoiceDictate** shortcut on your Desktop that launches the app with no console window via `launch.vbs` + `pythonw.exe`.
+Right-click `create_shortcut.ps1` → **Run with PowerShell**. This places a **VoiceDictate** shortcut
+on your Desktop (with the app icon) that launches with **no console window** via `launch.vbs` +
+`pythonw.exe`. `run.bat` also launches without a persistent console.
 
-Double-click the shortcut to start — a mic icon appears in your system tray.
+Double-click the shortcut to start — the app runs in the background and shows a mic icon in your
+system tray.
 
 ## Administrator note
 
