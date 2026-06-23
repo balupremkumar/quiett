@@ -23,6 +23,7 @@ import json
 import sys
 import threading
 
+import win32api
 import win32event
 import winerror
 
@@ -137,7 +138,7 @@ def main() -> None:
     # shortcut again) would race the first for the hotkey hook, port 8089, and
     # config.json writes. Bail out with a clear message instead.
     _mutex = win32event.CreateMutex(None, False, "VoiceDictate_SingleInstance_Mutex")
-    if win32event.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
         ctypes.windll.user32.MessageBoxW(
             None, "VoiceDictate is already running (check the system tray).",
             "VoiceDictate", 0x40,  # MB_ICONINFORMATION
