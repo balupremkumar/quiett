@@ -27,6 +27,7 @@ _client  = None
 _ready   = threading.Event()
 _backend = "rules"
 _last_backend_used = "rules"  # which backend actually produced the most recent run() result
+_model   = ""  # model name last passed to load(), needed by unload()
 
 _LMSTUDIO_URL  = "http://localhost:1234/v1/chat/completions"
 _LMSTUDIO_MODELS_URL = "http://localhost:1234/v1/models"
@@ -243,7 +244,8 @@ def _load_lmstudio_model(model: str) -> None:
 
 def load(backend: str = "lmstudio", model: str = "qwen/qwen3-8b") -> None:
     """Initialise the reformatter. Call in a background thread at startup."""
-    global _client, _backend
+    global _client, _backend, _model
+    _model = model
     try:
         if backend == "lmstudio":
             if _probe_lmstudio():
@@ -292,6 +294,26 @@ def load(backend: str = "lmstudio", model: str = "qwen/qwen3-8b") -> None:
 
 def is_ready() -> bool:
     return _ready.is_set()
+
+
+def unload() -> None:
+    """Unload the LLM model from VRAM. Call when vibe mode is disabled."""
+    global _backend, _client
+    if _backend == "lmstudio" and _model and os.path.isfile(_LMS_EXE):
+        try:
+            subprocess.Popen(
+                [_LMS_EXE, "unload", _model],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            log("reformat", f"lms unload {_model!r} dispatched")
+        except Exception as exc:
+            warn("reformat", f"lms unload failed: {exc}")
+    _backend = "rules"
+    _client = None
+    _ready.clear()
+    log("reformat", "LLM unloaded — backend reset to rules")
 
 
 def last_backend_used() -> str:

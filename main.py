@@ -29,6 +29,7 @@ import winerror
 
 import audio
 import chime
+import dashboard
 import history
 import hotkey
 import inject
@@ -599,6 +600,8 @@ def main() -> None:
                 tray.set_vibe_mode(new_vibe)
                 if new_vibe and not reformat.is_ready():
                     threading.Thread(target=_load_reformat, daemon=True).start()
+                elif not new_vibe and reformat.is_ready():
+                    threading.Thread(target=reformat.unload, daemon=True).start()
             # Sync paste_mode state into tray menu
             new_paste_mode = validated.get("paste_mode", "auto")
             if new_paste_mode != _cfg.get("paste_mode"):
@@ -625,6 +628,8 @@ def main() -> None:
             _cfg["vibe_mode"] = enabled
         if enabled and not reformat.is_ready():
             threading.Thread(target=_load_reformat, daemon=True).start()
+        elif not enabled and reformat.is_ready():
+            threading.Thread(target=reformat.unload, daemon=True).start()
         try:
             with open("config.json") as f:
                 raw = json.load(f)
@@ -672,10 +677,10 @@ def main() -> None:
     reformat.set_profile(_cfg.get("vibe_profile", "coding"))
 
     tray.configure(
-        on_view_history=preview.show_history,
+        on_view_history=lambda: dashboard.open("history"),
         on_toggle_pause=hotkey.set_paused,
-        on_view_profile=preview.show_profile,
-        on_open_settings=preview.show_settings,
+        on_view_profile=lambda: dashboard.open("home"),
+        on_open_settings=lambda: dashboard.open("settings"),
         on_toggle_vibe=_on_toggle_vibe,
         vibe_mode=_cfg.get("vibe_mode", False),
         on_set_vibe_profile=_on_set_vibe_profile,
