@@ -244,16 +244,20 @@ _vibe_profile     = "coding"
 _vibe_profiles    = ("coding", "chat", "longform")
 _on_toggle_clipboard_only = None
 _clipboard_only   = False
+_on_relaunch_taskflow = None
+_taskflow_status  = "unknown"   # "running" | "down" | "unknown"
+_task_count       = 0           # tasks added to TaskFlow this session
 
 
 def configure(on_view_history, on_toggle_pause=None,
               on_view_profile=None, on_open_settings=None,
               on_toggle_vibe=None, vibe_mode: bool = False,
               on_set_vibe_profile=None, vibe_profile: str = "coding",
-              on_toggle_clipboard_only=None, clipboard_only: bool = False) -> None:
+              on_toggle_clipboard_only=None, clipboard_only: bool = False,
+              on_relaunch_taskflow=None) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
     global _on_toggle_vibe, _vibe_mode, _on_set_vibe_profile, _vibe_profile
-    global _on_toggle_clipboard_only, _clipboard_only
+    global _on_toggle_clipboard_only, _clipboard_only, _on_relaunch_taskflow
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
@@ -264,6 +268,26 @@ def configure(on_view_history, on_toggle_pause=None,
     _vibe_profile     = vibe_profile
     _on_toggle_clipboard_only = on_toggle_clipboard_only
     _clipboard_only   = clipboard_only
+    _on_relaunch_taskflow = on_relaunch_taskflow
+
+
+def increment_task_count() -> None:
+    """Call once per task successfully created via voice this session."""
+    global _task_count
+    _task_count += 1
+    if _icon is not None:
+        _icon.update_menu()
+
+
+def set_taskflow_status(running: bool) -> None:
+    """Keep the tray's TaskFlow status line in sync (called from the health
+    checks already made when creating/reading tasks — no extra polling)."""
+    global _taskflow_status
+    new_status = "running" if running else "down"
+    if new_status != _taskflow_status:
+        _taskflow_status = new_status
+        if _icon is not None:
+            _icon.update_menu()
 
 
 def set_vibe_mode(enabled: bool) -> None:
@@ -353,6 +377,18 @@ def run() -> None:
             _on_toggle_clipboard_only(_clipboard_only)
         icon.update_menu()
 
+    def _relaunch_taskflow(icon, item):
+        if _on_relaunch_taskflow:
+            _on_relaunch_taskflow()
+
+    def _taskflow_label(_item) -> str:
+        if _taskflow_status == "unknown":
+            return "TaskFlow: —"
+        return f"TaskFlow: {'Running' if _taskflow_status == 'running' else 'Down — click to relaunch'}"
+
+    def _task_count_label(_item) -> str:
+        return f"Tasks added this session: {_task_count}"
+
     def _make_profile_setter(name: str):
         def _set(icon, item):
             global _vibe_profile
@@ -377,6 +413,9 @@ def run() -> None:
         pystray.MenuItem("Vibe Mode", _toggle_vibe, checked=lambda item: _vibe_mode),
         pystray.MenuItem("Vibe Profile", profile_menu),
         pystray.MenuItem("Clipboard Only", _toggle_clipboard_only, checked=lambda item: _clipboard_only),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem(_taskflow_label, _relaunch_taskflow),
+        pystray.MenuItem(_task_count_label, lambda icon, item: None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("View History",    _view_history),
         pystray.MenuItem("Speech Profile",  _view_profile),

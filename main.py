@@ -28,6 +28,7 @@ import win32event
 import winerror
 
 import audio
+import chime
 import history
 import hotkey
 import inject
@@ -74,6 +75,12 @@ _CONFIG_DEFAULTS = {
     "taskflow_trigger_phrases":    ["add this to my to-do list", "add to my to-do list",
                                      "add to my list", "add a task", "add task",
                                      "add this to TaskFlow"],
+    "taskflow_trailing_trigger_phrases": ["add that to my to-do list", "add that to my list",
+                                           "add that as a task", "add that to TaskFlow"],
+    "taskflow_readback_phrases":   ["what's on my to-do list", "what's on my list",
+                                     "read my tasks", "what are my tasks"],
+    "taskflow_default_project":    "",
+    "taskflow_voice_confirm":      False,
 }
 
 _VALID_POSITIONS = {"cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"}
@@ -127,12 +134,15 @@ def _validate_config(raw: dict) -> dict:
     if cfg["preview_position"] not in _VALID_POSITIONS:
         cfg["preview_position"] = "cursor"
     cfg["taskflow_enabled"] = bool(cfg.get("taskflow_enabled", True))
-    if not isinstance(cfg.get("taskflow_trigger_phrases"), list):
-        cfg["taskflow_trigger_phrases"] = _CONFIG_DEFAULTS["taskflow_trigger_phrases"]
-    else:
-        cfg["taskflow_trigger_phrases"] = [
-            p for p in cfg["taskflow_trigger_phrases"] if isinstance(p, str) and p.strip()
-        ]
+    for key in ("taskflow_trigger_phrases", "taskflow_trailing_trigger_phrases",
+                "taskflow_readback_phrases"):
+        if not isinstance(cfg.get(key), list):
+            cfg[key] = _CONFIG_DEFAULTS[key]
+        else:
+            cfg[key] = [p for p in cfg[key] if isinstance(p, str) and p.strip()]
+    if not isinstance(cfg.get("taskflow_default_project"), str):
+        cfg["taskflow_default_project"] = ""
+    cfg["taskflow_voice_confirm"] = bool(cfg.get("taskflow_voice_confirm", False))
     return cfg
 
 
@@ -195,6 +205,102 @@ def main() -> None:
     _check_first_run()
 
     # ------------------------------------------------------------------
+    # TaskFlow helpers — auto-create (embedded mid-utterance capture),
+    # read-back, and mark-done. All run off the transcription worker thread
+    # already, so they're free to block briefly on TaskFlow's API.
+    # ------------------------------------------------------------------
+
+    def _relaunch_taskflow_with_toast() -> None:
+        threading.Thread(target=taskflow.ensure_running, daemon=True).start()
+
+    def _taskflow_unreachable_toast() -> None:
+        if taskflow.record_health_check(False):
+            preview.show_toast(
+                "TaskFlow seems to be down.", kind="warn",
+                action_label="Relaunch", action_cb=_relaunch_taskflow_with_toast,
+            )
+        tray.set_taskflow_status(False)
+
+    def _auto_create_task(task_content: str, cfg: dict) -> bool:
+        """Create a task with no confirmation step — used for a trigger
+        phrase found embedded mid-utterance, where stopping to click a
+        confirm button would break the user's conversational flow. Returns
+        False if TaskFlow is unreachable, so the caller can fold the raw
+        task content back into the normally-pasted remainder instead of
+        silently losing it.
+        """
+        spec = taskflow.build_task_spec(task_content, cfg.get("taskflow_default_project") or None)
+        title = spec.get("title", "").strip()
+        if not title:
+            return True
+        if taskflow.is_duplicate(title):
+            log("main", f"taskflow: skipped duplicate task {title!r}")
+            preview.show_toast(f"Already added recently: {title}", kind="info")
+            return True
+        if not taskflow.check_health():
+            _taskflow_unreachable_toast()
+            return False
+        taskflow.record_health_check(True)
+        tray.set_taskflow_status(True)
+        created = taskflow.create_task_from_spec(spec)
+        if created is None:
+            preview.show_toast(f"Couldn't reach TaskFlow — couldn't add {title!r}.", kind="warn")
+            return False
+
+        task_id = created.get("id")
+        chime.play_task_added()
+        tray.increment_task_count()
+        if not cfg.get("history_paused", False):
+            history.save(title, source="taskflow")
+        if cfg.get("taskflow_voice_confirm"):
+            chime.speak(f"Added {title} to your to-do list")
+
+        def _undo() -> None:
+            if task_id and taskflow.delete_task(task_id):
+                preview.show_toast(f"Removed: {title}", kind="info")
+
+        preview.show_toast(
+            f"Added to to-do list: {title}", kind="info",
+            action_label="Undo" if task_id else "",
+            action_cb=_undo if task_id else None,
+        )
+        return True
+
+    def _handle_readback(cfg: dict) -> None:
+        if not taskflow.check_health():
+            _taskflow_unreachable_toast()
+            preview.show_toast("TaskFlow isn't running — can't read your list.", kind="warn")
+            return
+        tray.set_taskflow_status(True)
+        taskflow.record_health_check(True)
+        tasks = taskflow.list_tasks(completed=False)
+        summary = taskflow.format_task_list(tasks or [])
+        preview.show_toast(summary, kind="info")
+        if cfg.get("taskflow_voice_confirm"):
+            chime.speak(summary)
+
+    def _handle_complete(spoken_title: str, cfg: dict) -> None:
+        if not taskflow.check_health():
+            _taskflow_unreachable_toast()
+            preview.show_toast("TaskFlow isn't running.", kind="warn")
+            return
+        tray.set_taskflow_status(True)
+        taskflow.record_health_check(True)
+        match = taskflow.find_open_task_by_title(spoken_title)
+        if match is None:
+            preview.show_toast(f"Couldn't find an open task matching “{spoken_title}”.",
+                               kind="warn")
+            return
+        updated = taskflow.update_task(match["id"], completed=True)
+        title = match.get("title", spoken_title)
+        if updated is None:
+            preview.show_toast(f"Couldn't mark {title!r} as done.", kind="warn")
+            return
+        preview.show_toast(f"Marked done: {title}", kind="info")
+        if cfg.get("taskflow_voice_confirm"):
+            chime.speak(f"Marked {title} as done")
+
+    # ------------------------------------------------------------------
     # Callbacks wired between audio → transcription → preview → inject
     # ------------------------------------------------------------------
 
@@ -226,22 +332,54 @@ def main() -> None:
         if text.strip() and not cfg.get("history_paused", False):
             history.save(text.strip())
 
-        # TaskFlow trigger phrase: route to task creation instead of paste.
+        # TaskFlow: read-back, mark-done, and add-task trigger handling.
         # Must run before the auto-paste threshold below, else a confident
-        # "add this to TaskFlow X" would get silently pasted as raw text.
+        # "add this to my to-do list X" would get silently pasted as raw text.
+        task_extracted = False
         if cfg.get("taskflow_enabled", True) and text.strip():
-            match = taskflow.match_trigger(text.strip(), cfg.get("taskflow_trigger_phrases", []))
-            if match:
-                _, remainder = match
-                preview.show(
-                    remainder, hwnd,
-                    empty=not remainder.strip(),
-                    confidence=confidence,
-                    words=None,  # offsets no longer valid after stripping the phrase prefix
-                    auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
-                    task_mode=True,
-                )
+            stripped_text = text.strip()
+
+            if taskflow.match_trigger(stripped_text, cfg.get("taskflow_readback_phrases", [])):
+                threading.Thread(target=_handle_readback, args=(cfg,), daemon=True).start()
                 return
+
+            complete_title = taskflow.match_complete_command(stripped_text)
+            if complete_title:
+                threading.Thread(target=_handle_complete, args=(complete_title, cfg), daemon=True).start()
+                return
+
+            task_texts, remainder = taskflow.extract_tasks(
+                stripped_text,
+                cfg.get("taskflow_trigger_phrases", []),
+                cfg.get("taskflow_trailing_trigger_phrases", []),
+            )
+            if task_texts:
+                whole_utterance = len(task_texts) == 1 and not remainder.strip()
+                if whole_utterance:
+                    # Sole content of the recording — keep the deliberate
+                    # manual confirm step (review before it's created).
+                    preview.show(
+                        task_texts[0], hwnd,
+                        empty=not task_texts[0].strip(),
+                        confidence=confidence,
+                        words=None,
+                        auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
+                        task_mode=True,
+                    )
+                    return
+                # Embedded mid-utterance: auto-create immediately (no
+                # blocking confirm — that would break conversational flow).
+                # Anything TaskFlow couldn't take gets folded back into the
+                # remainder so it's never silently lost.
+                leftover = []
+                for task_text in task_texts:
+                    if not _auto_create_task(task_text, cfg):
+                        leftover.append(task_text)
+                remainder = (remainder + " " + " ".join(leftover)).strip() if leftover else remainder
+                if not remainder.strip():
+                    return
+                text = remainder
+                task_extracted = True
 
         threshold = cfg.get("auto_paste_threshold", 0.0)
         if (threshold > 0.0 and confidence is not None
@@ -267,7 +405,7 @@ def main() -> None:
             text, hwnd,
             empty=not text.strip(),
             confidence=confidence,
-            words=words,
+            words=None if task_extracted else words,
             auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
             raw=raw_text if cfg.get("vibe_mode") and raw_text != text else None,
             reformat_backend=reformat_backend,
@@ -382,6 +520,7 @@ def main() -> None:
         if not _get_cfg().get("taskflow_enabled", True):
             return
         taskflow.ensure_running()
+        tray.set_taskflow_status(taskflow.check_health())
 
     threading.Thread(target=_ensure_taskflow, daemon=True).start()
 
@@ -428,7 +567,9 @@ def main() -> None:
                             "preview_position", "preview_auto_dismiss_seconds",
                             "auto_paste_threshold", "initial_prompt",
                             "custom_vocabulary", "input_device",
-                            "taskflow_enabled", "taskflow_trigger_phrases"):
+                            "taskflow_enabled", "taskflow_trigger_phrases",
+                            "taskflow_trailing_trigger_phrases", "taskflow_readback_phrases",
+                            "taskflow_default_project", "taskflow_voice_confirm"):
                     _cfg[key] = validated[key]
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],
@@ -539,6 +680,7 @@ def main() -> None:
         vibe_mode=_cfg.get("vibe_mode", False),
         on_set_vibe_profile=_on_set_vibe_profile,
         vibe_profile=_cfg.get("vibe_profile", "coding"),
+        on_relaunch_taskflow=lambda: threading.Thread(target=taskflow.ensure_running, daemon=True).start(),
         on_toggle_clipboard_only=_on_toggle_clipboard_only,
         clipboard_only=_cfg.get("paste_mode", "auto") == "clipboard_only",
     )

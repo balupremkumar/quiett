@@ -60,6 +60,20 @@
     "add task",
     "add this to TaskFlow"
   ],
+  "taskflow_trailing_trigger_phrases": [
+    "add that to my to-do list",
+    "add that to my list",
+    "add that as a task",
+    "add that to TaskFlow"
+  ],
+  "taskflow_readback_phrases": [
+    "what's on my to-do list",
+    "what's on my list",
+    "read my tasks",
+    "what are my tasks"
+  ],
+  "taskflow_default_project": "",
+  "taskflow_voice_confirm": false,
   "vad_silence_mode": false,
   "theme": "light"
 }

@@ -20,6 +20,7 @@ import win32api
 from PIL import ImageEnhance, ImageTk
 
 import audio
+import chime
 import history as hist
 import inject
 import profile
@@ -965,17 +966,53 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
             inject.prime_foreground(hwnd)
             _close()
 
+            def _relaunch() -> None:
+                threading.Thread(target=taskflow.ensure_running, daemon=True).start()
+
             def _confirm_task() -> None:
+                if taskflow.is_duplicate(result):
+                    show_toast(f"Already added recently: {result}", kind="info")
+                    return
                 if not taskflow.check_health():
-                    show_toast("TaskFlow isn't running — pasted instead.", kind="warn")
+                    if taskflow.record_health_check(False):
+                        show_toast("TaskFlow seems to be down.", kind="warn",
+                                  action_label="Relaunch", action_cb=_relaunch)
+                    else:
+                        show_toast("TaskFlow isn't running — pasted instead.", kind="warn")
                     inject.inject_text(result, hwnd)
                     return
-                created = taskflow.create_task(result)
+                taskflow.record_health_check(True)
+                try:
+                    with open(_CONFIG_FILE, encoding="utf-8") as f:
+                        default_project = json.load(f).get("taskflow_default_project") or None
+                except Exception:
+                    default_project = None
+                spec = taskflow.build_task_spec(result, default_project)
+                created = taskflow.create_task_from_spec(spec)
                 if created is None:
                     show_toast("Couldn't reach TaskFlow — pasted instead.", kind="warn")
                     inject.inject_text(result, hwnd)
-                else:
-                    show_toast(f"Added to TaskFlow: {result}", kind="info")
+                    return
+                title = spec.get("title", result)
+                task_id = created.get("id")
+                chime.play_task_added()
+                tray.increment_task_count()
+                try:
+                    with open(_CONFIG_FILE, encoding="utf-8") as f:
+                        voice_confirm = json.load(f).get("taskflow_voice_confirm", False)
+                except Exception:
+                    voice_confirm = False
+                if voice_confirm:
+                    chime.speak(f"Added {title} to your to-do list")
+                hist.save(title, source="taskflow")
+
+                def _undo() -> None:
+                    if task_id and taskflow.delete_task(task_id):
+                        show_toast(f"Removed: {title}", kind="info")
+
+                show_toast(f"Added to to-do list: {title}", kind="info",
+                          action_label="Undo" if task_id else "",
+                          action_cb=_undo if task_id else None)
 
             threading.Thread(target=_confirm_task, daemon=True).start()
             return
@@ -1222,6 +1259,7 @@ def _open_history() -> None:
     sb.config(command=txt.yview)
 
     txt.tag_configure("ts",     foreground=_FG3, font=(_FONT_FAM_TEXT, 9), spacing1=4)
+    txt.tag_configure("ts_task", foreground=_TASK, font=(_FONT_FAM_TEXT, 9, "bold"), spacing1=4)
     txt.tag_configure("body",   foreground=_FG,  font=_FONT_BODY, spacing3=6)
     txt.tag_configure("sep",    foreground=_BORDER)
     txt.tag_configure("hover",  background=_BG3)
@@ -1262,9 +1300,12 @@ def _open_history() -> None:
         if filtered:
             for i, entry in enumerate(filtered):
                 body_text = entry.get("text", "").strip()
+                is_task = entry.get("source") == "taskflow"
                 ts = _fmt_ts(entry.get("timestamp", ""))
+                if is_task:
+                    ts = "✓ " + ts + " — added to to-do list"
                 start_idx = txt.index(tk.END)
-                txt.insert(tk.END, ts + "\n", "ts")
+                txt.insert(tk.END, ts + "\n", "ts_task" if is_task else "ts")
                 body_start = txt.index(tk.END)
                 txt.insert(tk.END, body_text + "\n", "body")
                 body_end = txt.index(f"{tk.END}-1c")
@@ -1771,6 +1812,59 @@ def _open_settings() -> None:
         be_menu.pack(anchor="w", padx=22)
         return p
 
+    def build_todo() -> tk.Frame:
+        p = tk.Frame(pages_holder, bg=_BG)
+        _h2(p, "To-Do List").pack(fill=tk.X, padx=22, pady=(18, 6))
+        _note(p, "Voice capture into TaskFlow. Phrases are checked at the start "
+                 "(or end) of each sentence, so they work mid-conversation too.").pack(
+            fill=tk.X, padx=22, pady=(0, 12))
+
+        taskflow_var = tk.BooleanVar(value=bool(cfg.get("taskflow_enabled", True)))
+        state["taskflow_var"] = taskflow_var
+        _toggle_row(p, "Enable TaskFlow capture", taskflow_var,
+                    sub="Also gates the read-back and mark-done voice commands below.")
+
+        voice_confirm_var = tk.BooleanVar(value=bool(cfg.get("taskflow_voice_confirm", False)))
+        state["voice_confirm_var"] = voice_confirm_var
+        _toggle_row(p, "Speak confirmations", voice_confirm_var,
+                    sub="Use Windows text-to-speech to confirm tasks added/completed, "
+                        "for when you're not looking at the screen.")
+
+        default_project_var = tk.StringVar(value=cfg.get("taskflow_default_project", ""))
+        state["default_project_var"] = default_project_var
+        _label(p, "Default project (TaskFlow project name, optional)").pack(
+            fill=tk.X, padx=22, pady=(14, 2))
+        _entry(p, default_project_var).pack(fill=tk.X, padx=22)
+        _note(p, "Used when a task isn't routed to a project by saying "
+                 "'...to my <Project> list'.").pack(fill=tk.X, padx=22, pady=(2, 0))
+
+        _label(p, "Leading trigger phrases — one per line, checked at the start "
+                  "of a sentence").pack(fill=tk.X, padx=22, pady=(14, 2))
+        leading_txt = _text_area(p, 4)
+        leading_txt.insert("1.0", "\n".join(cfg.get("taskflow_trigger_phrases", [])))
+        leading_txt.pack(fill=tk.X, padx=22)
+        state["taskflow_leading_txt"] = leading_txt
+
+        _label(p, "Trailing trigger phrases — one per line, checked at the end "
+                  "of a sentence (e.g. 'buy milk, add that to my list')").pack(
+            fill=tk.X, padx=22, pady=(14, 2))
+        trailing_txt = _text_area(p, 3)
+        trailing_txt.insert("1.0", "\n".join(cfg.get("taskflow_trailing_trigger_phrases", [])))
+        trailing_txt.pack(fill=tk.X, padx=22)
+        state["taskflow_trailing_txt"] = trailing_txt
+
+        _label(p, "Read-back phrases — one per line (e.g. \"what's on my to-do list\")").pack(
+            fill=tk.X, padx=22, pady=(14, 2))
+        readback_txt = _text_area(p, 3)
+        readback_txt.insert("1.0", "\n".join(cfg.get("taskflow_readback_phrases", [])))
+        readback_txt.pack(fill=tk.X, padx=22)
+        state["taskflow_readback_txt"] = readback_txt
+
+        _note(p, "Mark-done ('mark X as done') is always on while TaskFlow capture "
+                 "is enabled — no separate phrase list needed.").pack(
+            fill=tk.X, padx=22, pady=(8, 0))
+        return p
+
     PAGE_DEFS = [
         ("Audio",         build_audio),
         ("Hotkey",        build_hotkey),
@@ -1778,6 +1872,7 @@ def _open_settings() -> None:
         ("Behaviour",     build_behaviour),
         ("Appearance",    build_appearance),
         ("Vibe Coding",   build_vibe),
+        ("To-Do List",    build_todo),
     ]
 
     # ── Build sidebar items ────────────────────────────────────────────────
@@ -1908,6 +2003,18 @@ def _open_settings() -> None:
             "vibe_mode":                   state["vibe_var"].get(),
             "vibe_mode_backend":           state["backend_var"].get(),
             "theme":                       state["theme_var"].get(),
+            "taskflow_enabled":            state["taskflow_var"].get(),
+            "taskflow_voice_confirm":      state["voice_confirm_var"].get(),
+            "taskflow_default_project":    state["default_project_var"].get().strip(),
+            "taskflow_trigger_phrases":    [l.strip() for l in
+                                             state["taskflow_leading_txt"].get("1.0", "end-1c").splitlines()
+                                             if l.strip()],
+            "taskflow_trailing_trigger_phrases": [l.strip() for l in
+                                                   state["taskflow_trailing_txt"].get("1.0", "end-1c").splitlines()
+                                                   if l.strip()],
+            "taskflow_readback_phrases":   [l.strip() for l in
+                                             state["taskflow_readback_txt"].get("1.0", "end-1c").splitlines()
+                                             if l.strip()],
         })
 
         try:

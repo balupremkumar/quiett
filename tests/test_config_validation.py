@@ -86,3 +86,30 @@ class TestTaskflowConfig:
     def test_custom_phrases_preserved(self):
         result = main._validate_config({"taskflow_trigger_phrases": ["log a task"]})
         assert result["taskflow_trigger_phrases"] == ["log a task"]
+
+    def test_trailing_and_readback_phrase_defaults_applied(self):
+        result = main._validate_config({})
+        assert result["taskflow_trailing_trigger_phrases"] == \
+            main._CONFIG_DEFAULTS["taskflow_trailing_trigger_phrases"]
+        assert result["taskflow_readback_phrases"] == \
+            main._CONFIG_DEFAULTS["taskflow_readback_phrases"]
+
+    def test_trailing_and_readback_phrases_filtered(self):
+        result = main._validate_config({
+            "taskflow_trailing_trigger_phrases": ["ok", 5, ""],
+            "taskflow_readback_phrases": "not a list",
+        })
+        assert result["taskflow_trailing_trigger_phrases"] == ["ok"]
+        assert result["taskflow_readback_phrases"] == main._CONFIG_DEFAULTS["taskflow_readback_phrases"]
+
+    def test_default_project_non_string_falls_back_to_empty(self):
+        result = main._validate_config({"taskflow_default_project": 5})
+        assert result["taskflow_default_project"] == ""
+
+    def test_default_project_preserved(self):
+        result = main._validate_config({"taskflow_default_project": "Work"})
+        assert result["taskflow_default_project"] == "Work"
+
+    def test_voice_confirm_coerced_to_bool(self):
+        assert main._validate_config({"taskflow_voice_confirm": 1})["taskflow_voice_confirm"] is True
+        assert main._validate_config({})["taskflow_voice_confirm"] is False

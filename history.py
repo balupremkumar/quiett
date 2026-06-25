@@ -9,10 +9,13 @@ MAX_ENTRIES = 100
 _lock = threading.Lock()
 
 
-def save(text: str) -> None:
+def save(text: str, source: str | None = None) -> None:
     with _lock:
         entries = _load()
-        entries.insert(0, {"timestamp": datetime.now().isoformat(), "text": text})
+        entry = {"timestamp": datetime.now().isoformat(), "text": text}
+        if source:
+            entry["source"] = source
+        entries.insert(0, entry)
         _write(entries[:MAX_ENTRIES])
 
 
