@@ -16,7 +16,8 @@
     "Selvin": "Selwyn",
     "co-part studio": "Copilot Studio",
     "co-part": "Copilot",
-    "DAI'd": "DRY'd"
+    "DAI'd": "DRY'd",
+    "Task Flow": "TaskFlow"
   },
   "silence_auto_stop_seconds": 3.0,
   "preview_position": "cursor",
@@ -36,7 +37,8 @@
     "agentic",
     "ALM",
     "CI/CD",
-    "product owner"
+    "product owner",
+    "TaskFlow"
   ],
   "input_device": null,
   "per_app_paste": {},
@@ -48,5 +50,16 @@
   "silence_threshold": 0.01,
   "preview_auto_dismiss_seconds": 0.0,
   "auto_paste_threshold": 0.0,
-  "history_paused": false
+  "history_paused": false,
+  "taskflow_enabled": true,
+  "taskflow_trigger_phrases": [
+    "add this to my to-do list",
+    "add to my to-do list",
+    "add to my list",
+    "add a task",
+    "add task",
+    "add this to TaskFlow"
+  ],
+  "vad_silence_mode": false,
+  "theme": "light"
 }

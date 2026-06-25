@@ -34,6 +34,7 @@ import inject
 import preview
 import profile
 import reformat
+import taskflow
 import tray
 import transcribe
 from logger import log, error as log_error
@@ -69,6 +70,10 @@ _CONFIG_DEFAULTS = {
     "vibe_mode":                   False,
     "vibe_mode_backend":           "lmstudio",
     "lmstudio_model":              "qwen/qwen3-8b",
+    "taskflow_enabled":            True,
+    "taskflow_trigger_phrases":    ["add this to my to-do list", "add to my to-do list",
+                                     "add to my list", "add a task", "add task",
+                                     "add this to TaskFlow"],
 }
 
 _VALID_POSITIONS = {"cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"}
@@ -121,6 +126,13 @@ def _validate_config(raw: dict) -> dict:
         cfg["silence_threshold"] = 0.01
     if cfg["preview_position"] not in _VALID_POSITIONS:
         cfg["preview_position"] = "cursor"
+    cfg["taskflow_enabled"] = bool(cfg.get("taskflow_enabled", True))
+    if not isinstance(cfg.get("taskflow_trigger_phrases"), list):
+        cfg["taskflow_trigger_phrases"] = _CONFIG_DEFAULTS["taskflow_trigger_phrases"]
+    else:
+        cfg["taskflow_trigger_phrases"] = [
+            p for p in cfg["taskflow_trigger_phrases"] if isinstance(p, str) and p.strip()
+        ]
     return cfg
 
 
@@ -213,6 +225,24 @@ def main() -> None:
             return
         if text.strip() and not cfg.get("history_paused", False):
             history.save(text.strip())
+
+        # TaskFlow trigger phrase: route to task creation instead of paste.
+        # Must run before the auto-paste threshold below, else a confident
+        # "add this to TaskFlow X" would get silently pasted as raw text.
+        if cfg.get("taskflow_enabled", True) and text.strip():
+            match = taskflow.match_trigger(text.strip(), cfg.get("taskflow_trigger_phrases", []))
+            if match:
+                _, remainder = match
+                preview.show(
+                    remainder, hwnd,
+                    empty=not remainder.strip(),
+                    confidence=confidence,
+                    words=None,  # offsets no longer valid after stripping the phrase prefix
+                    auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
+                    task_mode=True,
+                )
+                return
+
         threshold = cfg.get("auto_paste_threshold", 0.0)
         if (threshold > 0.0 and confidence is not None
                 and confidence >= threshold and text.strip()):
@@ -337,7 +367,23 @@ def main() -> None:
             model=_cfg.get("lmstudio_model", "qwen/qwen3-8b"),
         )
 
-    threading.Thread(target=_load_reformat, daemon=True).start()
+    # Only load the LLM backend (launches LM Studio, loads the model onto the
+    # GPU) when vibe mode is actually on — otherwise it sits on standby and
+    # gets loaded lazily the moment vibe mode is enabled (see _on_toggle_vibe
+    # and the vibe_mode hot-reload sync below).
+    if _cfg.get("vibe_mode", False):
+        threading.Thread(target=_load_reformat, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # TaskFlow auto-launch — non-blocking, no-ops if never installed
+    # ------------------------------------------------------------------
+
+    def _ensure_taskflow() -> None:
+        if not _get_cfg().get("taskflow_enabled", True):
+            return
+        taskflow.ensure_running()
+
+    threading.Thread(target=_ensure_taskflow, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Health monitor — toasts a restart action when a backend goes down
@@ -381,7 +427,8 @@ def main() -> None:
                             "vad_filter", "corrections", "silence_auto_stop_seconds",
                             "preview_position", "preview_auto_dismiss_seconds",
                             "auto_paste_threshold", "initial_prompt",
-                            "custom_vocabulary", "input_device"):
+                            "custom_vocabulary", "input_device",
+                            "taskflow_enabled", "taskflow_trigger_phrases"):
                     _cfg[key] = validated[key]
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],
@@ -409,6 +456,8 @@ def main() -> None:
                 with _cfg_lock:
                     _cfg["vibe_mode"] = new_vibe
                 tray.set_vibe_mode(new_vibe)
+                if new_vibe and not reformat.is_ready():
+                    threading.Thread(target=_load_reformat, daemon=True).start()
             # Sync paste_mode state into tray menu
             new_paste_mode = validated.get("paste_mode", "auto")
             if new_paste_mode != _cfg.get("paste_mode"):
@@ -433,6 +482,8 @@ def main() -> None:
         global _cfg
         with _cfg_lock:
             _cfg["vibe_mode"] = enabled
+        if enabled and not reformat.is_ready():
+            threading.Thread(target=_load_reformat, daemon=True).start()
         try:
             with open("config.json") as f:
                 raw = json.load(f)

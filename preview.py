@@ -23,6 +23,7 @@ import audio
 import history as hist
 import inject
 import profile
+import taskflow
 import tray
 import widgets
 import winfx
@@ -65,12 +66,14 @@ _THEMES = {
         "FG": "#f3f4f6", "FG2": "#a1a1aa", "FG3": "#71717a",
         "BLUE": "#3b82f6", "BLUE_HV": "#60a5fa",
         "BORDER": "#3a3a40", "BORDER2": "#4a4a52",
+        "TASK": "#22c55e", "TASK_HV": "#4ade80",
     },
     "light": {
         "BG": "#fafafa", "BG2": "#f1f1f4", "BG3": "#e4e4e9",
         "FG": "#18181b", "FG2": "#52525b", "FG3": "#a1a1aa",
         "BLUE": "#2563eb", "BLUE_HV": "#3b82f6",
         "BORDER": "#d4d4d8", "BORDER2": "#c4c4ca",
+        "TASK": "#16a34a", "TASK_HV": "#22c55e",
     },
 }
 
@@ -96,6 +99,8 @@ _BLUE    = _T["BLUE"]
 _BLUE_HV = _T["BLUE_HV"]
 _BORDER  = _T["BORDER"]
 _BORDER2 = _T["BORDER2"]
+_TASK    = _T["TASK"]
+_TASK_HV = _T["TASK_HV"]
 
 # Typography ladder — Segoe UI Variable with weight cascade
 # (falls back automatically to Segoe UI if Variable isn't installed)
@@ -120,17 +125,23 @@ def show(text: str, hwnd: int, empty: bool = False,
          words: list | None = None,
          auto_dismiss: float = 0.0,
          raw: str | None = None,
-         reformat_backend: str | None = None) -> None:
+         reformat_backend: str | None = None,
+         task_mode: bool = False) -> None:
     """Queue a dictation preview window. raw= is the pre-vibe-mode Whisper text.
 
     reformat_backend: 'lmstudio' | 'api' | 'rules' | None — which backend
     actually produced `text` when vibe mode ran, so the preview can show
     whether it was LLM-cleaned or the regex fallback kicked in.
+
+    task_mode: when True, this is a TaskFlow trigger-phrase capture — the
+    panel relabels to "Add Task" and confirming creates a TaskFlow task
+    instead of pasting.
     """
     _preview_q.put({"text": text, "hwnd": hwnd, "empty": empty,
                     "confidence": confidence, "words": words,
                     "auto_dismiss": auto_dismiss, "raw": raw,
-                    "reformat_backend": reformat_backend})
+                    "reformat_backend": reformat_backend,
+                    "task_mode": task_mode})
 
 
 def show_history() -> None:
@@ -255,6 +266,7 @@ def _tick() -> None:
                     latest_preview.get("words"),
                     latest_preview.get("raw"),
                     latest_preview.get("reformat_backend"),
+                    latest_preview.get("task_mode", False),
                 )
             except Exception as e:
                 print(f"preview window error: {e}")
@@ -803,7 +815,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                  auto_dismiss: float = 0.0,
                  words: list | None = None,
                  raw: str | None = None,
-                 reformat_backend: str | None = None) -> None:
+                 reformat_backend: str | None = None,
+                 task_mode: bool = False) -> None:
     global _current_preview_win
 
     try:
@@ -818,14 +831,30 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     win.attributes("-topmost", True)
     win.attributes("-alpha", 0.0)   # winfx fades in at end
 
-    # 1-pixel outer ring for depth
-    ring = tk.Frame(win, bg=_BORDER2, bd=0)
-    ring.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+    # Task-mode gets its own accent (green) instead of the normal blue, applied
+    # consistently to the outer ring, heading, entry border, button, and chip —
+    # so a task capture is unmistakable from a normal paste preview at a glance.
+    accent    = _TASK if task_mode else _BLUE
+    accent_hv = _TASK_HV if task_mode else _BLUE_HV
+
+    # 1-pixel outer ring for depth (task mode: accent-coloured, thicker)
+    ring = tk.Frame(win, bg=(accent if task_mode else _BORDER2), bd=0)
+    ring.pack(fill=tk.BOTH, expand=True, padx=(2 if task_mode else 1), pady=(2 if task_mode else 1))
     frame = tk.Frame(ring, bg=_BG, padx=18, pady=16)
     frame.pack(fill=tk.BOTH, expand=True)
 
+    # Task-mode heading — window is borderless (overrideredirect), so this
+    # label stands in for a title bar.
+    if task_mode:
+        tk.Label(frame, text="✓ Add to To-Do List", bg=_BG, fg=accent,
+                 font=(_FONT_FAM_DISPLAY, 11, "bold"), anchor="w").pack(fill=tk.X, pady=(0, 6))
+
     # ── Text entry ─────────────────────────────────────────────────────────
-    display = "Nothing detected — try again" if empty else text
+    if empty:
+        display = ("Heard the trigger phrase, but no task text after it — try again"
+                   if task_mode else "Nothing detected — try again")
+    else:
+        display = text
     entry = tk.Text(
         frame, font=_FONT_BODY, wrap=tk.WORD,
         bg=_BG2, fg=_FG, insertbackground=_FG,
@@ -928,6 +957,29 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                     profile.log_correction(original, result)
                 except Exception:
                     pass
+
+        if task_mode:
+            # Prime + close immediately, same as the normal Insert path below —
+            # the health-check/POST round-trip then runs off the Tk thread so
+            # the UI is never blocked waiting on the network.
+            inject.prime_foreground(hwnd)
+            _close()
+
+            def _confirm_task() -> None:
+                if not taskflow.check_health():
+                    show_toast("TaskFlow isn't running — pasted instead.", kind="warn")
+                    inject.inject_text(result, hwnd)
+                    return
+                created = taskflow.create_task(result)
+                if created is None:
+                    show_toast("Couldn't reach TaskFlow — pasted instead.", kind="warn")
+                    inject.inject_text(result, hwnd)
+                else:
+                    show_toast(f"Added to TaskFlow: {result}", kind="info")
+
+            threading.Thread(target=_confirm_task, daemon=True).start()
+            return
+
         # Prime focus on target BEFORE closing preview — while we still own the foreground,
         # SetForegroundWindow is guaranteed to succeed. Closing first creates a vacuum where
         # Windows blocks the call (anti-focus-steal protection).
@@ -940,17 +992,17 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         _close()
 
     insert_btn = tk.Button(
-        btns, text="Insert", command=on_insert, width=10,
-        bg=_BLUE, fg="#ffffff",
-        activebackground=_BLUE_HV, activeforeground="#ffffff",
+        btns, text=("Add to List" if task_mode else "Insert"), command=on_insert, width=10,
+        bg=accent, fg="#ffffff",
+        activebackground=accent_hv, activeforeground="#ffffff",
         relief="flat", bd=0,
         font=_FONT_BTN, padx=8, pady=6, cursor="hand2",
     )
     if empty:
         insert_btn.config(state="disabled", bg="#404040", fg="#666666", cursor="")
     else:
-        insert_btn.bind("<Enter>", lambda e: insert_btn.config(bg=_BLUE_HV))
-        insert_btn.bind("<Leave>", lambda e: insert_btn.config(bg=_BLUE))
+        insert_btn.bind("<Enter>", lambda e: insert_btn.config(bg=accent_hv))
+        insert_btn.bind("<Leave>", lambda e: insert_btn.config(bg=accent))
     insert_btn.pack(side=tk.LEFT)
 
     if empty:
@@ -1012,18 +1064,18 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     chip_row = tk.Frame(frame, bg=_BG)
     chip_row.pack(fill=tk.X, pady=(10, 0))
 
-    def _chip(parent, key: str, label: str, accent: bool = False) -> None:
+    def _chip(parent, key: str, label: str, accent: bool = False, key_color: str | None = None) -> None:
         outer = tk.Frame(parent, bg=_BORDER, bd=0)
         inner = tk.Frame(outer, bg=_BG3 if accent else _BG2, padx=8, pady=3)
         inner.pack(padx=1, pady=1)
         tk.Label(inner, text=key, bg=inner["bg"],
-                 fg=_BLUE if accent else _FG,
+                 fg=(key_color or _BLUE) if accent else _FG,
                  font=(_FONT_FAM_TEXT, 8, "bold")).pack(side=tk.LEFT)
         tk.Label(inner, text=f" {label}", bg=inner["bg"],
                  fg=_FG2, font=_FONT_CHIP).pack(side=tk.LEFT)
         outer.pack(side=tk.LEFT, padx=(0, 6))
 
-    _chip(chip_row, "↵",       "Insert", accent=True)
+    _chip(chip_row, "↵",       "Add to List" if task_mode else "Insert", accent=True, key_color=accent)
     _chip(chip_row, "Esc",     "Cancel")
     _chip(chip_row, "Ctrl+R",  "Re-record")
     _chip(chip_row, "Shift+↵", "Newline")
@@ -1077,7 +1129,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     winfx.apply_rounded_region(win, radius=12)
     winfx.slide_in(win, dx=0, dy=8, duration_ms=200, alpha_target=1.0)
     if not empty:
-        winfx.ease_color(entry, "highlightbackground", _BORDER, _border_colour(confidence),
+        target_border = accent if task_mode else _border_colour(confidence)
+        winfx.ease_color(entry, "highlightbackground", _BORDER, target_border,
                          duration_ms=260, steps=10)
 
     # ── Auto-dismiss ───────────────────────────────────────────────────────

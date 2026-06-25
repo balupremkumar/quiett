@@ -59,3 +59,30 @@ class TestValidateConfig:
         assert result["language"]            == "fr"
         assert result["max_record_seconds"]  == 90.0
         assert result["corrections"]         == {"gonna": "going to"}
+
+
+class TestTaskflowConfig:
+    def test_defaults_applied(self):
+        result = main._validate_config({})
+        assert result["taskflow_enabled"] is True
+        assert result["taskflow_trigger_phrases"] == [
+            "add this to my to-do list", "add to my to-do list",
+            "add to my list", "add a task", "add task",
+            "add this to TaskFlow",
+        ]
+
+    def test_enabled_coerced_to_bool(self):
+        assert main._validate_config({"taskflow_enabled": 0})["taskflow_enabled"] is False
+        assert main._validate_config({"taskflow_enabled": 1})["taskflow_enabled"] is True
+
+    def test_non_list_phrases_falls_back_to_default(self):
+        result = main._validate_config({"taskflow_trigger_phrases": "not a list"})
+        assert result["taskflow_trigger_phrases"] == main._CONFIG_DEFAULTS["taskflow_trigger_phrases"]
+
+    def test_non_string_and_blank_entries_filtered(self):
+        result = main._validate_config({"taskflow_trigger_phrases": ["ok phrase", 5, "", "  "]})
+        assert result["taskflow_trigger_phrases"] == ["ok phrase"]
+
+    def test_custom_phrases_preserved(self):
+        result = main._validate_config({"taskflow_trigger_phrases": ["log a task"]})
+        assert result["taskflow_trigger_phrases"] == ["log a task"]
