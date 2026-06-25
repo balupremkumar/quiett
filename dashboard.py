@@ -9,16 +9,44 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import threading
 from datetime import date, datetime
 
-import webview
-
-import history as hist
+# webview and history are only needed when running as __main__ (subprocess),
+# but importing them at module level is harmless and keeps DashboardAPI clean.
+try:
+    import webview
+    import history as hist
+except ImportError:
+    webview = None  # type: ignore
+    hist = None     # type: ignore
 
 _CONFIG_FILE = "config.json"
-_window: "webview.Window | None" = None
-_window_lock = threading.Lock()
+
+# ── Subprocess launcher ────────────────────────────────────────────────────────
+# pywebview requires the main thread, but pystray already owns it in main.py.
+# Solution: launch the dashboard as a separate pythonw.exe subprocess so
+# webview gets a clean main thread. Config/history are shared via the JSON files.
+
+_proc: "subprocess.Popen | None" = None
+_proc_lock = threading.Lock()
+_THIS_FILE = os.path.abspath(__file__)
+_PROJECT_DIR = os.path.dirname(_THIS_FILE)
+
+
+def open(page: str = "home") -> None:
+    """Launch the dashboard subprocess, or ignore if already running."""
+    global _proc
+    with _proc_lock:
+        if _proc is not None and _proc.poll() is None:
+            return  # window is already open
+        _proc = subprocess.Popen(
+            [sys.executable, _THIS_FILE, page],
+            cwd=_PROJECT_DIR,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
 
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
@@ -171,44 +199,6 @@ class DashboardAPI:
             return []
 
 
-# ── Window lifecycle ───────────────────────────────────────────────────────────
-
-def open(page: str = "home") -> None:
-    """Open the dashboard. If already open, bring to front and navigate."""
-    global _window
-    with _window_lock:
-        if _window is not None:
-            try:
-                _window.show()
-                _window.evaluate_js(f"navigateTo('{page}')")
-                return
-            except Exception:
-                _window = None
-
-    def _run() -> None:
-        global _window
-        w = webview.create_window(
-            title="VoiceDictate",
-            html=_HTML,
-            js_api=DashboardAPI(),
-            width=980, height=660,
-            min_size=(700, 500),
-            background_color="#202020",
-        )
-
-        def _on_closed() -> None:
-            global _window
-            with _window_lock:
-                _window = None
-
-        w.events.closed += _on_closed
-        with _window_lock:
-            _window = w
-        webview.start(debug=False, gui="edgechromium")
-        with _window_lock:
-            _window = None
-
-    threading.Thread(target=_run, daemon=True).start()
 
 
 # ── Embedded HTML template ─────────────────────────────────────────────────────
@@ -1024,3 +1014,22 @@ window.addEventListener('pywebviewready', async function () {
 </script>
 </body>
 </html>"""
+
+
+# ── Subprocess entrypoint ──────────────────────────────────────────────────────
+if __name__ == "__main__":
+    _page = sys.argv[1] if len(sys.argv) > 1 else "home"
+    _w = webview.create_window(
+        title="VoiceDictate",
+        html=_HTML,
+        js_api=DashboardAPI(),
+        width=980, height=660,
+        min_size=(700, 500),
+        background_color="#202020",
+    )
+
+    def _on_shown():
+        _w.evaluate_js(f"navigateTo('{_page}')")
+
+    _w.events.shown += _on_shown
+    webview.start(debug=False, gui="edgechromium")
