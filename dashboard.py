@@ -223,7 +223,7 @@ _HTML = """<!DOCTYPE html>
 }
 [data-theme=light]{
   --bg:#f3f3f3; --bg-sb:#ebebeb; --surf:#fff; --surf2:#f5f5f5;
-  --hov:#0000000d; --act:#00000016; --brd:#0000001a; --brd2:#00000028;
+  --hov:#0000000d; --act:#00000016; --brd:#00000026; --brd2:#00000044;
   --txt:#1c1c1c; --txt2:rgba(0,0,0,.78); --txt3:rgba(0,0,0,.5);
   --acc:#0067c0; --acc-bg:rgba(0,103,192,.08); --acc-hov:rgba(0,103,192,.14);
   --danger:#cf222e; --success:#2da44e;
@@ -374,15 +374,15 @@ body{font-family:var(--font);background:var(--bg);color:var(--txt);-webkit-font-
 .btn-danger:hover{background:rgba(248,81,73,.22)}
 
 /* ── Settings ── */
-.settings-scroll{padding:0 30px 30px;flex:1;overflow-y:auto;
-  display:flex;flex-direction:column;gap:16px}
+.settings-scroll{padding:0 30px 30px;flex:1;overflow-y:auto}
 .s-sec{background:var(--surf);border:1px solid var(--brd);border-radius:var(--r);
-  overflow:hidden;box-shadow:var(--shad)}
+  overflow:hidden;box-shadow:var(--shad);margin-bottom:16px}
+.s-sec:last-child{margin-bottom:0}
 .s-sec-ttl{padding:11px 16px;font-size:11px;font-weight:700;color:var(--txt3);
   text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--brd);
   background:var(--surf2)}
 .s-row{display:flex;align-items:center;padding:11px 16px;gap:14px;
-  border-bottom:1px solid var(--brd)}
+  border-bottom:1px solid var(--brd);min-height:44px}
 .s-row:last-child{border-bottom:none}
 .s-row.col{flex-direction:column;align-items:flex-start;gap:7px}
 .s-lbl{flex:1}
@@ -717,6 +717,7 @@ select option{background:var(--surf2);color:var(--txt)}
 let _histAll = [];
 let _currentPage = 'home';
 let _theme = 'dark';
+let _INIT_PAGE = 'home';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fmt(n) {
@@ -1006,7 +1007,11 @@ window.addEventListener('pywebviewready', async function () {
   try {
     const cfg = await window.pywebview.api.get_config();
     applyTheme(cfg.theme || 'dark');
-    await loadHome();
+    if (_INIT_PAGE === 'home') {
+      await loadHome();
+    } else {
+      navigateTo(_INIT_PAGE);
+    }
   } catch (e) {
     console.error('init error:', e);
   }
@@ -1019,17 +1024,15 @@ window.addEventListener('pywebviewready', async function () {
 # ── Subprocess entrypoint ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     _page = sys.argv[1] if len(sys.argv) > 1 else "home"
+    # Inject the initial page before pywebviewready fires — avoids the race
+    # between window.shown (too early) and the JS api being available.
+    _html = _HTML.replace("let _INIT_PAGE = 'home';", f"let _INIT_PAGE = '{_page}';")
     _w = webview.create_window(
         title="VoiceDictate",
-        html=_HTML,
+        html=_html,
         js_api=DashboardAPI(),
         width=980, height=660,
         min_size=(700, 500),
         background_color="#202020",
     )
-
-    def _on_shown():
-        _w.evaluate_js(f"navigateTo('{_page}')")
-
-    _w.events.shown += _on_shown
     webview.start(debug=False, gui="edgechromium")
