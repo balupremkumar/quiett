@@ -715,6 +715,8 @@ select option{background:var(--surf2);color:var(--txt)}
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
 let _histAll = [];
+let _histTexts = [];  // parallel array — safe index-based access avoids JSON-in-onclick quoting bugs
+let _homeTexts = [];
 let _currentPage = 'home';
 let _theme = 'dark';
 let _INIT_PAGE = 'home';
@@ -795,7 +797,8 @@ async function loadHome() {
 
   const el = document.getElementById('activityList');
   if (!history.length) { el.innerHTML = '<div class="empty">No dictations yet.</div>'; return; }
-  el.innerHTML = history.map(e => `
+  _homeTexts = history.map(e => e.text);
+  el.innerHTML = history.map((e, i) => `
     <div class="list-item">
       <div class="li-text">${esc(e.text)}</div>
       <div class="li-meta">
@@ -804,7 +807,7 @@ async function loadHome() {
         ${e.source ? '<span class="src-badge">'+esc(e.source)+'</span>' : ''}
       </div>
       <div class="li-acts">
-        <button class="ia" title="Copy" onclick="copyText(${JSON.stringify(e.text)})">${copyIcon()}</button>
+        <button class="ia" title="Copy" onclick="copyText(_homeTexts[${i}])">${copyIcon()}</button>
       </div>
     </div>`).join('');
 }
@@ -818,9 +821,10 @@ async function loadHistory() {
 }
 
 function renderHistory(items) {
+  _histTexts = items.map(e => e.text);
   const el = document.getElementById('historyList');
   if (!items.length) { el.innerHTML = '<div class="empty">No dictations found.</div>'; return; }
-  el.innerHTML = items.map(e => `
+  el.innerHTML = items.map((e, i) => `
     <div class="list-item" id="hi-${e.index}">
       <div class="li-text">${esc(e.text)}</div>
       <div class="li-meta">
@@ -829,7 +833,7 @@ function renderHistory(items) {
         ${e.source ? '<span class="src-badge">'+esc(e.source)+'</span>' : ''}
       </div>
       <div class="li-acts">
-        <button class="ia" title="Copy" onclick="copyText(${JSON.stringify(e.text)})">${copyIcon()}</button>
+        <button class="ia" title="Copy" onclick="copyText(_histTexts[${i}])">${copyIcon()}</button>
         <button class="ia del" title="Delete" onclick="deleteHistory(${e.index})">${trashIcon()}</button>
       </div>
     </div>`).join('');
@@ -854,7 +858,13 @@ async function confirmClear() {
 }
 
 function copyText(text) {
-  navigator.clipboard.writeText(text).catch(() => {});
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
 }
 
 // ── Dictionary page ────────────────────────────────────────────────────────

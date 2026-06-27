@@ -53,19 +53,16 @@
   "history_paused": false,
   "taskflow_enabled": true,
   "taskflow_trigger_phrases": [
-    "add this to my to-do list",
-    "add to my to-do list",
-    "add to my list",
-    "add a task",
-    "add task",
-    "add this to TaskFlow"
+    "add this to TaskFlow",
+    "add to my tasks",
+    "add a task"
   ],
   "taskflow_trailing_trigger_phrases": [
-    "add that to my to-do list",
-    "add that to my list",
-    "add that as a task",
-    "add that to TaskFlow"
+    "add that to TaskFlow",
+    "add that to my tasks",
+    "add that as a task"
   ],
+  "taskflow_direct_capture_modifiers": ["ctrl", "shift", "alt"],
   "taskflow_readback_phrases": [
     "what's on my to-do list",
     "what's on my list",

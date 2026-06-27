@@ -274,7 +274,7 @@ def _tick() -> None:
                 _preview_open = False
 
     # Live-update waveform badge
-    if _badge_state in ("recording", "processing") and _badge_alive():
+    if _badge_state in ("recording", "recording_task", "processing") and _badge_alive():
         _draw_badge_frame()
 
     # Always drain these queues so items don't accumulate while a window is open
@@ -463,11 +463,12 @@ def _show_edge_flash(colour: str) -> None:
 # ---------------------------------------------------------------------------
 
 _BADGE_CFG = {
-    "recording":    {"accent": "#e03030", "logo_bg": (210,  30,  30)},
-    "processing":   {"accent": "#c8a000", "logo_bg": (200, 160,   0)},
-    "reformatting": {"accent": "#7b5ea7", "logo_bg": (123,  94, 167)},
-    "too_short":    {"accent": "#888888", "text": "Hold longer to record"},
-    "not_ready":    {"accent": "#888888", "text": "Model loading — please wait"},
+    "recording":      {"accent": "#e03030", "logo_bg": (210,  30,  30)},
+    "recording_task": {"accent": "#22c55e", "logo_bg": ( 34, 197,  94)},  # green — Ctrl+Shift+Alt task capture
+    "processing":     {"accent": "#c8a000", "logo_bg": (200, 160,   0)},
+    "reformatting":   {"accent": "#7b5ea7", "logo_bg": (123,  94, 167)},
+    "too_short":      {"accent": "#888888", "text": "Hold longer to record"},
+    "not_ready":      {"accent": "#888888", "text": "Model loading — please wait"},
 }
 
 # Visual layout for the recording badge
@@ -648,7 +649,7 @@ def _draw_badge_frame() -> None:
         mid = canvas_h / 2
         max_half = canvas_h * 0.44
 
-        if _badge_state == "recording":
+        if _badge_state in ("recording", "recording_task"):
             levels = audio.get_recent_levels(_WAVE_BAR_N)
             silence = audio.get_silence_elapsed()
             timeout = audio.get_silence_timeout()
@@ -718,12 +719,12 @@ def _draw_badge_frame() -> None:
                 except Exception:
                     pass
 
-        if _badge_time is not None and _badge_state == "recording":
+        if _badge_time is not None and _badge_state in ("recording", "recording_task"):
             elapsed = int(audio.get_elapsed())
             new_t = f"{elapsed // 60}:{elapsed % 60:02d}"
             if _badge_time.cget("text") != new_t:
                 _badge_time.config(text=new_t)
-        elif _badge_time is not None and _badge_state != "recording":
+        elif _badge_time is not None and _badge_state not in ("recording", "recording_task"):
             if _badge_time.cget("text") != "":
                 _badge_time.config(text="")
     except Exception:
@@ -743,7 +744,7 @@ def _handle_badge(cmd: str | None) -> None:
         return
 
     cfg = _BADGE_CFG.get(cmd, _BADGE_CFG["processing"])
-    needs_wave = cmd in ("recording", "processing", "reformatting")
+    needs_wave = cmd in ("recording", "recording_task", "processing", "reformatting")
 
     # Rebuild if widget type doesn't match the new state
     have_wave = _badge_canvas is not None

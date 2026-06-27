@@ -43,6 +43,7 @@ from logger import log, error as log_error
 
 _cfg: dict = {}
 _cfg_lock = threading.Lock()
+_task_session: bool = False   # True when Ctrl+Shift+Alt was held at recording start
 
 _HOT_RELOAD_INTERVAL = 30  # seconds
 
@@ -73,11 +74,10 @@ _CONFIG_DEFAULTS = {
     "vibe_mode_backend":           "lmstudio",
     "lmstudio_model":              "qwen/qwen3-8b",
     "taskflow_enabled":            True,
-    "taskflow_trigger_phrases":    ["add this to my to-do list", "add to my to-do list",
-                                     "add to my list", "add a task", "add task",
-                                     "add this to TaskFlow"],
-    "taskflow_trailing_trigger_phrases": ["add that to my to-do list", "add that to my list",
-                                           "add that as a task", "add that to TaskFlow"],
+    "taskflow_trigger_phrases":    ["add this to TaskFlow", "add to my tasks", "add a task"],
+    "taskflow_trailing_trigger_phrases": ["add that to TaskFlow", "add that to my tasks",
+                                           "add that as a task"],
+    "taskflow_direct_capture_modifiers": ["ctrl", "shift", "alt"],
     "taskflow_readback_phrases":   ["what's on my to-do list", "what's on my list",
                                      "read my tasks", "what are my tasks"],
     "taskflow_default_project":    "",
@@ -305,7 +305,7 @@ def main() -> None:
     # Callbacks wired between audio → transcription → preview → inject
     # ------------------------------------------------------------------
 
-    def _run_transcription(chunks: list, hwnd: int) -> None:
+    def _run_transcription(chunks: list, hwnd: int, task_session: bool = False) -> None:
         cfg = _get_cfg()
         text, confidence, words = None, None, None
         try:
@@ -333,9 +333,35 @@ def main() -> None:
         if text.strip() and not cfg.get("history_paused", False):
             history.save(text.strip())
 
+        # Ctrl+Shift+Alt direct-capture mode: skip all phrase matching and route
+        # the full transcript straight to the task confirm panel.
+        if task_session and text.strip():
+            raw_text = text
+            reformat_backend = None
+            if cfg.get("vibe_mode") and reformat.is_ready():
+                preview.show_badge("reformatting")
+                try:
+                    text = reformat.run(text)
+                    reformat_backend = reformat.last_backend_used()
+                except Exception as exc:
+                    log_error("main", f"reformat error (task session): {exc}")
+                finally:
+                    preview.hide_badge()
+            preview.show(
+                text, hwnd,
+                empty=False,
+                confidence=confidence,
+                words=words,
+                auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
+                raw=raw_text if cfg.get("vibe_mode") and raw_text != text else None,
+                reformat_backend=reformat_backend,
+                task_mode=True,
+            )
+            return
+
         # TaskFlow: read-back, mark-done, and add-task trigger handling.
         # Must run before the auto-paste threshold below, else a confident
-        # "add this to my to-do list X" would get silently pasted as raw text.
+        # "add this to TaskFlow X" would get silently pasted as raw text.
         task_extracted = False
         if cfg.get("taskflow_enabled", True) and text.strip():
             stripped_text = text.strip()
@@ -414,19 +440,25 @@ def main() -> None:
 
     def _on_audio_stop(chunks: list) -> None:
         hwnd = inject.capture_foreground()
+        task_mode = _task_session  # snapshot; _task_session resets on next recording start
         tray.set_state("processing")
         preview.show_badge("processing")
         threading.Thread(
             target=_run_transcription,
-            args=(chunks, hwnd),
+            args=(chunks, hwnd, task_mode),
             daemon=True,
         ).start()
 
     def _on_recording_start() -> None:
+        global _task_session
+        _task_session = bool(
+            _get_cfg().get("taskflow_direct_capture_modifiers")
+            and (win32api.GetAsyncKeyState(0x10) & 0x8000)  # VK_SHIFT
+        )
         preview.close_current_preview()
-        preview.flash_screen_edge("#3b82f6")
+        preview.flash_screen_edge("#22c55e" if _task_session else "#3b82f6")
         tray.set_state("recording")
-        preview.show_badge("recording")
+        preview.show_badge("recording_task" if _task_session else "recording")
         audio.start()
 
     # ------------------------------------------------------------------
@@ -570,7 +602,8 @@ def main() -> None:
                             "custom_vocabulary", "input_device",
                             "taskflow_enabled", "taskflow_trigger_phrases",
                             "taskflow_trailing_trigger_phrases", "taskflow_readback_phrases",
-                            "taskflow_default_project", "taskflow_voice_confirm"):
+                            "taskflow_default_project", "taskflow_voice_confirm",
+                            "taskflow_direct_capture_modifiers"):
                     _cfg[key] = validated[key]
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],
