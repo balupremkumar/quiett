@@ -66,6 +66,9 @@ _kernel32 = ctypes.windll.kernel32
 _TERMINAL_CLASSES = {
     "CASCADIA_HOSTING_WINDOW_CLASS",  # Windows Terminal
     "mintty",                          # Git Bash / Cygwin
+    "ConsoleWindowClass",              # legacy conhost (PowerShell, cmd.exe)
+    "VirtualConsoleClass",             # ConEmu, cmder
+    "Alacritty",                       # Alacritty
 }
 
 # Windows that need extra settle time before they accept Ctrl+V
@@ -735,13 +738,19 @@ def inject_text(text: str, hwnd: int) -> None:
     else:
         n = _send_keystroke([_VK_CONTROL], _VK_V)
 
+    paste_blocked = False
     if n == 0:
         # SendInput inserted nothing at all — it's fully blocked for this target
         # (not just ignored). Last resort: WM_PASTE goes through SendMessage, not
         # SendInput, so it can still reach a plain Win32 edit control.
         warn("inject", "Ctrl+V keystroke blocked by SendInput; trying WM_PASTE fallback")
         if not _try_wm_paste(hwnd):
-            _notify_failure("Paste blocked for this target — press Ctrl+V manually")
+            paste_blocked = True
+            _notify_failure("Paste blocked — text is in your clipboard, press Ctrl+V to paste")
+
+    if paste_blocked:
+        # Leave text on clipboard so the manual Ctrl+V in the toast actually works.
+        return
 
     def _restore():
         time.sleep(_restore_delay_ms / 1000)

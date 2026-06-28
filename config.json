@@ -62,7 +62,11 @@
     "add that to my tasks",
     "add that as a task"
   ],
-  "taskflow_direct_capture_modifiers": ["ctrl", "shift", "alt"],
+  "taskflow_direct_capture_modifiers": [
+    "ctrl",
+    "shift",
+    "alt"
+  ],
   "taskflow_readback_phrases": [
     "what's on my to-do list",
     "what's on my list",

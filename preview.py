@@ -28,6 +28,7 @@ import taskflow
 import tray
 import widgets
 import winfx
+from logger import log, warn, error as log_error
 
 _CONFIG_FILE = "config.json"
 
@@ -971,49 +972,56 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                 threading.Thread(target=taskflow.ensure_running, daemon=True).start()
 
             def _confirm_task() -> None:
-                if taskflow.is_duplicate(result):
-                    show_toast(f"Already added recently: {result}", kind="info")
-                    return
-                if not taskflow.check_health():
-                    if taskflow.record_health_check(False):
-                        show_toast("TaskFlow seems to be down.", kind="warn",
-                                  action_label="Relaunch", action_cb=_relaunch)
-                    else:
-                        show_toast("TaskFlow isn't running — pasted instead.", kind="warn")
-                    inject.inject_text(result, hwnd)
-                    return
-                taskflow.record_health_check(True)
                 try:
-                    with open(_CONFIG_FILE, encoding="utf-8") as f:
-                        default_project = json.load(f).get("taskflow_default_project") or None
-                except Exception:
-                    default_project = None
-                spec = taskflow.build_task_spec(result, default_project)
-                created = taskflow.create_task_from_spec(spec)
-                if created is None:
-                    show_toast("Couldn't reach TaskFlow — pasted instead.", kind="warn")
-                    inject.inject_text(result, hwnd)
-                    return
-                title = spec.get("title", result)
-                task_id = created.get("id")
-                chime.play_task_added()
-                tray.increment_task_count()
-                try:
-                    with open(_CONFIG_FILE, encoding="utf-8") as f:
-                        voice_confirm = json.load(f).get("taskflow_voice_confirm", False)
-                except Exception:
-                    voice_confirm = False
-                if voice_confirm:
-                    chime.speak(f"Added {title} to your to-do list")
-                hist.save(title, source="taskflow")
+                    if taskflow.is_duplicate(result):
+                        log("taskflow", f"duplicate skipped (task mode): {result!r}")
+                        show_toast(f"Already added recently: {result}", kind="info")
+                        return
+                    if not taskflow.check_health():
+                        warn("taskflow", "health check failed in task mode — aborting task creation")
+                        if taskflow.record_health_check(False):
+                            show_toast("TaskFlow seems to be down.", kind="warn",
+                                      action_label="Relaunch", action_cb=_relaunch)
+                        else:
+                            show_toast("TaskFlow isn't running — pasted instead.", kind="warn")
+                        inject.inject_text(result, hwnd)
+                        return
+                    taskflow.record_health_check(True)
+                    try:
+                        with open(_CONFIG_FILE, encoding="utf-8") as f:
+                            default_project = json.load(f).get("taskflow_default_project") or None
+                    except Exception:
+                        default_project = None
+                    spec = taskflow.build_task_spec(result, default_project)
+                    created = taskflow.create_task_from_spec(spec)
+                    if created is None:
+                        warn("taskflow", f"create_task_from_spec returned None for {result!r}")
+                        show_toast("Couldn't reach TaskFlow — pasted instead.", kind="warn")
+                        inject.inject_text(result, hwnd)
+                        return
+                    title = spec.get("title", result)
+                    task_id = created.get("id")
+                    chime.play_task_added()
+                    tray.increment_task_count()
+                    try:
+                        with open(_CONFIG_FILE, encoding="utf-8") as f:
+                            voice_confirm = json.load(f).get("taskflow_voice_confirm", False)
+                    except Exception:
+                        voice_confirm = False
+                    if voice_confirm:
+                        chime.speak(f"Added {title} to your to-do list")
+                    hist.save(title, source="taskflow")
 
-                def _undo() -> None:
-                    if task_id and taskflow.delete_task(task_id):
-                        show_toast(f"Removed: {title}", kind="info")
+                    def _undo() -> None:
+                        if task_id and taskflow.delete_task(task_id):
+                            show_toast(f"Removed: {title}", kind="info")
 
-                show_toast(f"Added to to-do list: {title}", kind="info",
-                          action_label="Undo" if task_id else "",
-                          action_cb=_undo if task_id else None)
+                    show_toast(f"Added to to-do list: {title}", kind="info",
+                              action_label="Undo" if task_id else "",
+                              action_cb=_undo if task_id else None)
+                except Exception as exc:
+                    log_error("taskflow", f"_confirm_task unhandled exception: {exc}")
+                    show_toast("Error adding task — check app.log.", kind="warn")
 
             threading.Thread(target=_confirm_task, daemon=True).start()
             return
