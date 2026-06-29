@@ -27,12 +27,15 @@ import win32api
 import win32event
 import winerror
 
+import agent
+import api_server
 import audio
 import chime
 import dashboard
 import history
 import hotkey
 import inject
+import llm_client
 import preview
 import profile
 import reformat
@@ -44,6 +47,8 @@ from logger import log, error as log_error
 _cfg: dict = {}
 _cfg_lock = threading.Lock()
 _task_session: bool = False   # True when Ctrl+Shift+Alt was held at recording start
+_rewrite_session: bool = False  # True when Ctrl+Alt+R triggered this recording
+_agent_session: bool = False    # True when Ctrl+Alt+C triggered this recording
 
 _HOT_RELOAD_INTERVAL = 30  # seconds
 
@@ -68,8 +73,16 @@ _CONFIG_DEFAULTS = {
     "history_paused":              False,
     "silence_threshold":           0.01,
     "per_app_paste":               {},
+    "per_app_context":             {},
     "electron_paste_method":       "ctrl_v",
     "paste_mode":                  "auto",
+    "hotkey_mode":                 "hold",
+    "rewrite_hotkey":              "ctrl+alt+r",
+    "agent_hotkey":                "ctrl+alt+c",
+    "agent_mode_enabled":          False,
+    "agent_trigger_phrases":       ["hey computer", "computer run", "computer open"],
+    "api_server_enabled":          True,
+    "api_server_port":             8090,
     "vibe_mode":                   False,
     "vibe_mode_backend":           "lmstudio",
     "lmstudio_model":              "qwen/qwen3-8b",
@@ -135,6 +148,18 @@ def _validate_config(raw: dict) -> dict:
     if cfg["preview_position"] not in _VALID_POSITIONS:
         cfg["preview_position"] = "cursor"
     cfg["taskflow_enabled"] = bool(cfg.get("taskflow_enabled", True))
+    if not isinstance(cfg.get("per_app_context"), dict):
+        cfg["per_app_context"] = {}
+    if cfg.get("hotkey_mode") not in ("hold", "toggle", "auto"):
+        cfg["hotkey_mode"] = "hold"
+    cfg["agent_mode_enabled"] = bool(cfg.get("agent_mode_enabled", False))
+    if not isinstance(cfg.get("agent_trigger_phrases"), list):
+        cfg["agent_trigger_phrases"] = []
+    cfg["api_server_enabled"] = bool(cfg.get("api_server_enabled", True))
+    try:
+        cfg["api_server_port"] = max(1024, min(65535, int(cfg.get("api_server_port", 8090))))
+    except (TypeError, ValueError):
+        cfg["api_server_port"] = 8090
     for key in ("taskflow_trigger_phrases", "taskflow_trailing_trigger_phrases",
                 "taskflow_readback_phrases"):
         if not isinstance(cfg.get(key), list):
@@ -305,20 +330,29 @@ def main() -> None:
     # Callbacks wired between audio → transcription → preview → inject
     # ------------------------------------------------------------------
 
-    def _run_transcription(chunks: list, hwnd: int, task_session: bool = False) -> None:
+    def _run_transcription(chunks: list, hwnd: int, task_session: bool = False,
+                           rewrite_session: bool = False, agent_session: bool = False) -> None:
         cfg = _get_cfg()
+
+        # QW-5: per-app vocabulary/prompt override based on foreground exe
+        exe_name = inject._get_exe_name(hwnd).lower() if hwnd else ""
+        app_ctx   = cfg.get("per_app_context", {}).get(exe_name, {})
+        effective_vocab   = app_ctx.get("custom_vocabulary") or cfg.get("custom_vocabulary") or None
+        effective_prompt  = app_ctx.get("initial_prompt")    or cfg.get("initial_prompt")    or None
+        effective_fillers = app_ctx.get("filler_words")      or cfg.get("filler_words", [])
+
         text, confidence, words = None, None, None
         try:
             text, confidence, words = transcribe.run(
                 chunks,
                 language=cfg["language"],
                 min_seconds=cfg["min_record_seconds"],
-                filler_words=cfg["filler_words"],
+                filler_words=effective_fillers,
                 vad_filter=cfg.get("vad_filter", False),
                 profile_rules=profile.get_active_rules(),
                 corrections=cfg.get("corrections", {}),
-                initial_prompt=cfg.get("initial_prompt") or None,
-                custom_vocabulary=cfg.get("custom_vocabulary") or None,
+                initial_prompt=effective_prompt,
+                custom_vocabulary=effective_vocab,
             )
         except Exception as exc:
             msg = f"Transcription error: {exc}"
@@ -332,6 +366,68 @@ def main() -> None:
             return
         if text.strip() and not cfg.get("history_paused", False):
             history.save(text.strip())
+
+        # Ctrl+Alt+C agent mode: classify + confirm gate via preview
+        if agent_session and text.strip():
+            tray.set_state("idle")
+            preview.hide_badge()
+            if not llm_client.is_available():
+                preview.show_toast("LM Studio not running — agent mode requires local LLM.", kind="warn")
+            else:
+                preview.show_badge("reformatting")
+                def _run_agent():
+                    try:
+                        action = agent.interpret(text.strip())
+                        desc   = agent.describe(action)
+                        preview.hide_badge()
+                        if action.get("action") == "unknown":
+                            preview.show_toast(f"Didn't understand: {text.strip()}", kind="warn")
+                            return
+
+                        def _do_execute():
+                            ok = agent.execute(
+                                action,
+                                inject_fn=lambda t, h: inject.inject_text(t, h or hwnd),
+                            )
+                            if not ok:
+                                preview.show_toast(f"Action failed: {desc}", kind="warn")
+
+                        preview.show_agent_confirm(desc, _do_execute)
+                    except Exception as exc:
+                        log_error("main", f"agent error: {exc}")
+                        preview.hide_badge()
+                        preview.show_toast("Agent error — check app.log.", kind="error")
+
+                threading.Thread(target=_run_agent, daemon=True).start()
+            return
+
+        # Ctrl+Alt+R rewrite mode: capture selection via clipboard, rewrite with LLM
+        if rewrite_session and text.strip():
+            instruction = text.strip()
+            tray.set_state("idle")
+            preview.hide_badge()
+            if not llm_client.is_available():
+                preview.show_toast("LM Studio not running — rewrite requires local LLM.", kind="warn")
+                return
+            preview.show_badge("reformatting")
+            def _run_rewrite():
+                try:
+                    # Selection was captured via Ctrl+C just before recording started
+                    selection = inject._clipboard_get_text().strip()
+                    if not selection:
+                        preview.hide_badge()
+                        preview.show_toast("No text selected — select text first, then Ctrl+Alt+R.", kind="warn")
+                        return
+                    rewritten = reformat.rewrite(selection, instruction)
+                    preview.hide_badge()
+                    preview.show_rewrite_preview(selection, instruction, rewritten, hwnd)
+                except Exception as exc:
+                    log_error("main", f"rewrite error: {exc}")
+                    preview.hide_badge()
+                    preview.show_toast("Rewrite error — check app.log.", kind="error")
+
+            threading.Thread(target=_run_rewrite, daemon=True).start()
+            return
 
         # Ctrl+Shift+Alt direct-capture mode: skip all phrase matching and route
         # the full transcript straight to the task confirm panel.
@@ -439,26 +535,43 @@ def main() -> None:
         )
 
     def _on_audio_stop(chunks: list) -> None:
+        hotkey.set_external_recording(False)  # release hold-mode suppression
         hwnd = inject.capture_foreground()
-        task_mode = _task_session  # snapshot; _task_session resets on next recording start
+        task_mode    = _task_session
+        rewrite_mode = _rewrite_session
+        agent_mode   = _agent_session
         tray.set_state("processing")
         preview.show_badge("processing")
         threading.Thread(
             target=_run_transcription,
-            args=(chunks, hwnd, task_mode),
+            args=(chunks, hwnd, task_mode, rewrite_mode, agent_mode),
             daemon=True,
         ).start()
 
-    def _on_recording_start() -> None:
-        global _task_session
+    def _on_recording_start(rewrite: bool = False, agent: bool = False) -> None:
+        global _task_session, _rewrite_session, _agent_session
+        _rewrite_session = rewrite
+        _agent_session   = agent
         _task_session = bool(
-            _get_cfg().get("taskflow_direct_capture_modifiers")
+            not rewrite and not agent
+            and _get_cfg().get("taskflow_direct_capture_modifiers")
             and (win32api.GetAsyncKeyState(0x10) & 0x8000)  # VK_SHIFT
         )
+        if rewrite or agent:
+            hotkey.set_external_recording(True)
+        if rewrite:
+            # Capture selection before recording starts
+            threading.Thread(
+                target=lambda: inject._send_keystroke([inject._VK_CONTROL], ord('C')),
+                daemon=True,
+            ).start()
+            import time as _t; _t.sleep(0.08)
         preview.close_current_preview()
-        preview.flash_screen_edge("#22c55e" if _task_session else "#3b82f6")
+        edge = "#9333ea" if rewrite else ("#f97316" if agent else ("#22c55e" if _task_session else "#3b82f6"))
+        preview.flash_screen_edge(edge)
         tray.set_state("recording")
-        preview.show_badge("recording_task" if _task_session else "recording")
+        badge = "recording_task" if _task_session else "recording"
+        preview.show_badge(badge)
         audio.start()
 
     # ------------------------------------------------------------------
@@ -499,8 +612,35 @@ def main() -> None:
         is_recording=audio.is_recording,
         is_ready=transcribe.is_ready,
         keys=_cfg.get("hotkey", "ctrl+alt"),
+        hotkey_mode=_cfg.get("hotkey_mode", "hold"),
     )
     hotkey.start()
+
+    # Ctrl+Alt+R — rewrite/edit mode
+    import keyboard as _kb
+    _rewrite_hk = _cfg.get("rewrite_hotkey", "ctrl+alt+r")
+    try:
+        _kb.add_hotkey(
+            _rewrite_hk,
+            lambda: _on_recording_start(rewrite=True) if transcribe.is_ready() and not audio.is_recording() else None,
+            suppress=False,
+        )
+        log("main", f"rewrite hotkey registered: {_rewrite_hk}")
+    except Exception as exc:
+        log_error("main", f"rewrite hotkey failed: {exc}")
+
+    # Ctrl+Alt+C — agent/command mode
+    _agent_hk = _cfg.get("agent_hotkey", "ctrl+alt+c")
+    if _cfg.get("agent_mode_enabled", False):
+        try:
+            _kb.add_hotkey(
+                _agent_hk,
+                lambda: _on_recording_start(agent=True) if transcribe.is_ready() and not audio.is_recording() else None,
+                suppress=False,
+            )
+            log("main", f"agent hotkey registered: {_agent_hk}")
+        except Exception as exc:
+            log_error("main", f"agent hotkey failed: {exc}")
 
     # ------------------------------------------------------------------
     # Model loading
@@ -556,6 +696,37 @@ def main() -> None:
         tray.set_taskflow_status(taskflow.check_health())
 
     threading.Thread(target=_ensure_taskflow, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # HTTP API server (Phase 2)
+    # ------------------------------------------------------------------
+
+    if _cfg.get("api_server_enabled", True):
+        def _api_create_task(title: str, project=None) -> dict | None:
+            spec = taskflow.build_task_spec(title, project)
+            if not taskflow.check_health():
+                return None
+            return taskflow.create_task_from_spec(spec)
+
+        def _api_patch_config(data: dict) -> None:
+            try:
+                with open("config.json") as f:
+                    raw = json.load(f)
+                raw.update(data)
+                with open("config.json", "w") as f:
+                    json.dump(raw, f, indent=2)
+            except Exception as exc:
+                log_error("main", f"api patch_config: {exc}")
+
+        api_server.configure(
+            get_config=_get_cfg,
+            get_history=history.load,
+            create_task=_api_create_task,
+            trigger_dictate=lambda: _on_recording_start() if transcribe.is_ready() and not audio.is_recording() else None,
+            patch_config=_api_patch_config,
+            port=_cfg.get("api_server_port", 8090),
+        )
+        api_server.start()
 
     # ------------------------------------------------------------------
     # Health monitor — toasts a restart action when a backend goes down

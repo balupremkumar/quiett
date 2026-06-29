@@ -29,6 +29,7 @@ import time
 from ctypes import wintypes
 
 import win32api
+import win32clipboard
 import win32con
 import win32gui
 
@@ -98,7 +99,10 @@ class _KEYBDINPUT(ctypes.Structure):
 
 
 class _INPUTunion(ctypes.Union):
-    _fields_ = [("ki", _KEYBDINPUT)]
+    _fields_ = [
+        ("ki",   _KEYBDINPUT),
+        ("_pad", ctypes.c_byte * 32),  # pad to MOUSEINPUT size so sizeof(INPUT)==40
+    ]
 
 
 class _INPUT(ctypes.Structure):
@@ -110,7 +114,9 @@ class _INPUT(ctypes.Structure):
 
 
 def _make_key_input(vk: int, key_up: bool) -> _INPUT:
-    scan = _user32.MapVirtualKeyW(vk, _MAPVK_VK_TO_VSC) & 0xFFFF
+    hkl = _user32.GetKeyboardLayout(0)
+    scan = (_user32.MapVirtualKeyExW(vk, _MAPVK_VK_TO_VSC, hkl) or
+            _user32.MapVirtualKeyW(vk, _MAPVK_VK_TO_VSC)) & 0xFFFF
     flags = _KEYEVENTF_SCANCODE
     if key_up:
         flags |= _KEYEVENTF_KEYUP
@@ -124,7 +130,11 @@ def _make_key_input(vk: int, key_up: bool) -> _INPUT:
 def _send_inputs(inputs: list) -> int:
     n = len(inputs)
     arr = (_INPUT * n)(*inputs)
-    return _user32.SendInput(n, ctypes.byref(arr), ctypes.sizeof(_INPUT))
+    result = _user32.SendInput(n, ctypes.byref(arr), ctypes.sizeof(_INPUT))
+    if result == 0:
+        err = _kernel32.GetLastError()
+        warn("inject", f"SendInput returned 0 for {n} events, GetLastError={err}")
+    return result
 
 
 def _make_unicode_input(code: int, key_up: bool) -> _INPUT:
@@ -234,8 +244,12 @@ def _flush_modifier(vk: int) -> None:
 
 
 def _flush_all_modifiers() -> None:
+    # Only flush keys that are still physically held — don't send spurious
+    # synthetic key-ups for already-released keys (confuses Electron/VS Code).
+    held = _modifiers_physically_down()
     for vk in (_VK_CONTROL, _VK_MENU, _VK_SHIFT, _VK_LWIN, _VK_RWIN):
-        _flush_modifier(vk)
+        if vk in held:
+            _flush_modifier(vk)
 
 
 def _modifiers_physically_down() -> list[int]:
@@ -274,6 +288,17 @@ def _wait_modifiers_released(timeout_ms: int = 400) -> bool:
 _CF_UNICODETEXT = 13
 _GMEM_MOVEABLE  = 0x0002
 
+# Formats that are GDI handles, not HGLOBALs — skip during snapshot
+_NON_HGLOBAL_FORMATS = {
+    2,   # CF_BITMAP
+    3,   # CF_METAFILEPICT (actually HGLOBAL but structure, skip for safety)
+    9,   # CF_PALETTE
+    14,  # CF_ENHMETAFILE
+    0x0080,  # CF_DSPBITMAP
+    0x0082,  # CF_DSPENHMETAFILE
+    0x0085,  # CF_OWNERDISPLAY
+}
+
 
 def _clipboard_open(timeout_ms: int = 500) -> bool:
     deadline = time.monotonic() + timeout_ms / 1000.0
@@ -302,27 +327,83 @@ def _clipboard_get_text() -> str:
         _user32.CloseClipboard()
 
 
-def _clipboard_set_text(text: str) -> bool:
+_SNAPSHOT_FORMATS = frozenset([13])  # CF_UNICODETEXT only
+# CF_TEXT (1) is auto-synthesised by Windows from CF_UNICODETEXT; reading it
+# triggers synthesis which modifies the clipboard, fires WM_CLIPBOARDUPDATE,
+# and causes VS Code's clipboard monitor to grab the clipboard, blocking our
+# subsequent _clipboard_set_text call.
+
+
+def _clipboard_snapshot() -> list:
+    """Capture text/file clipboard formats as [(format_id, bytes), ...].
+
+    Only reads the small set of formats we can safely round-trip. Deliberately
+    skips custom registered formats (ID > 0xBFFF) owned by Electron/VS Code —
+    reading those triggers delayed-rendering WM_RENDERFORMAT messages, VS Code
+    then reclaims the clipboard, and our subsequent SetClipboardData fails.
+    """
+    result: list = []
     if not _clipboard_open():
-        warn("inject", "clipboard open failed")
-        return False
+        return result
     try:
-        _user32.EmptyClipboard()
-        data = text.encode("utf-16le") + b"\x00\x00"
-        h = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
-        if not h:
-            return False
-        ptr = _kernel32.GlobalLock(h)
-        if not ptr:
-            return False
-        ctypes.memmove(ptr, data, len(data))
-        _kernel32.GlobalUnlock(h)
-        if not _user32.SetClipboardData(_CF_UNICODETEXT, h):
-            _kernel32.GlobalFree(h)
-            return False
-        return True
+        fmt = _user32.EnumClipboardFormats(0)
+        while fmt:
+            if fmt in _SNAPSHOT_FORMATS:
+                h = _user32.GetClipboardData(fmt)
+                if h:
+                    size = _kernel32.GlobalSize(h)
+                    if size and size < 8 * 1024 * 1024:  # skip blobs >8 MB
+                        ptr = _kernel32.GlobalLock(h)
+                        if ptr:
+                            try:
+                                buf = (ctypes.c_char * size)()
+                                ctypes.memmove(buf, ptr, size)
+                                result.append((fmt, bytes(buf)))
+                            except Exception:
+                                pass
+                            finally:
+                                _kernel32.GlobalUnlock(h)
+            fmt = _user32.EnumClipboardFormats(fmt)
+    except Exception:
+        pass
     finally:
         _user32.CloseClipboard()
+    return result
+
+
+def _clipboard_restore_snapshot(snapshot: list) -> bool:
+    """Restore CF_UNICODETEXT clipboard data captured by _clipboard_snapshot()."""
+    if not snapshot:
+        return True
+    try:
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            for fmt, data in snapshot:
+                if fmt == _CF_UNICODETEXT:
+                    text = data.decode("utf-16le").rstrip("\x00")
+                    win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+            return True
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception as exc:
+        warn("inject", f"clipboard restore failed: {exc}")
+        return False
+
+
+def _clipboard_set_text(text: str) -> bool:
+    """Write text to clipboard using win32clipboard (handles 64-bit HGLOBAL correctly)."""
+    try:
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+            return True
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception as exc:
+        warn("inject", f"clipboard set_text failed: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +520,17 @@ def prime_foreground(hwnd: int) -> None:
     """
     if hwnd and win32gui.IsWindow(hwnd):
         _force_foreground(hwnd)
+
+
+def activate_window(hwnd: int) -> None:
+    """Bring hwnd to the foreground and give it keyboard focus.
+
+    Uses AttachThreadInput so the call works even when our process is NOT the
+    current foreground (e.g. VS Code has focus when the preview panel opens).
+    overrideredirect(True) Tkinter popups don't auto-activate on Windows, so we
+    must call this explicitly to steal OS-level keyboard focus from the target app.
+    """
+    _force_foreground(hwnd)
 
 
 class _GUITHREADINFO(ctypes.Structure):
@@ -569,9 +661,15 @@ def _try_wm_paste(hwnd: int) -> bool:
     """Fallback: send WM_PASTE to the focused control inside hwnd.
 
     Works for standard Win32 edit controls (Notepad, classic input fields).
-    Doesn't work for Electron/Chromium/UWP (they don't honor WM_PASTE), but it's
-    a cheap last resort for the cases where SendInput is blocked.
+    Electron/Chromium/UWP and RDP hosts silently ignore WM_PASTE — claiming
+    success for them suppresses the failure toast AND lets the restore thread
+    wipe our text off the clipboard, so nothing pastes and the text vanishes.
+    Refuse the fallback for those targets so the caller surfaces the toast and
+    leaves the text on the clipboard for a manual Ctrl+V.
     """
+    cls = _get_class(hwnd)
+    if any(s in cls for s in _SLOW_FOCUS_CLASSES_SUBSTR):
+        return False
     try:
         info = _GUITHREADINFO()
         info.cbSize = ctypes.sizeof(_GUITHREADINFO)
@@ -728,10 +826,16 @@ def inject_text(text: str, hwnd: int) -> None:
 
     # Clipboard paste path — terminals (Ctrl+Shift+V), RDP/Electron (Ctrl+V), and the
     # type-path fallback above.
-    original = _clipboard_get_text()
+    snapshot = _clipboard_snapshot()  # save ALL formats (CF_HDROP, CF_DIB, HTML, etc.)
     if not _clipboard_set_text(text):
         _notify_failure("Could not place text on clipboard")
         return
+
+    # Brief pause so VS Code's clipboard-change listener (WM_CLIPBOARDUPDATE) finishes
+    # processing before we send Ctrl+V. Without this, Electron can have BlockInput active
+    # for a few ms while handling the clipboard notification.
+    if is_electron:
+        time.sleep(0.08)
 
     if method == "ctrl_shift_v":
         n = _send_keystroke([_VK_CONTROL, _VK_SHIFT], _VK_V)
@@ -753,13 +857,21 @@ def inject_text(text: str, hwnd: int) -> None:
         return
 
     def _restore():
-        time.sleep(_restore_delay_ms / 1000)
+        # Poll until clipboard no longer holds our injected text (paste consumed),
+        # or until the configured deadline — whichever comes first.
+        deadline = time.monotonic() + _restore_delay_ms / 1000 * 3
+        step = 0.015
+        while time.monotonic() < deadline:
+            time.sleep(step)
+            try:
+                current = _clipboard_get_text()
+                if current != text:
+                    log("inject", "clipboard consumed early, restoring now")
+                    break
+            except Exception:
+                break
         try:
-            current = _clipboard_get_text()
-            if current == text:
-                _clipboard_set_text(original)
-            else:
-                log("inject", "clipboard changed during paste, skipping restore")
+            _clipboard_restore_snapshot(snapshot)
         except Exception as exc:
             warn("inject", f"clipboard restore failed: {exc}")
 

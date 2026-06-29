@@ -16,6 +16,7 @@ from datetime import date, datetime
 import math
 
 import pyperclip
+import keyboard as _keyboard
 import win32api
 from PIL import ImageEnhance, ImageTk
 
@@ -36,13 +37,15 @@ _CONFIG_FILE = "config.json"
 # Public API — safe to call from any thread
 # ---------------------------------------------------------------------------
 
-_preview_q:   queue.Queue = queue.Queue()
-_history_q:   queue.Queue = queue.Queue()
-_profile_q:   queue.Queue = queue.Queue()
-_settings_q:  queue.Queue = queue.Queue()
-_badge_q:     queue.Queue = queue.Queue()
-_toast_q:     queue.Queue = queue.Queue()
-_flash_q:     queue.Queue = queue.Queue()
+_preview_q:      queue.Queue = queue.Queue()
+_history_q:      queue.Queue = queue.Queue()
+_profile_q:      queue.Queue = queue.Queue()
+_settings_q:     queue.Queue = queue.Queue()
+_badge_q:        queue.Queue = queue.Queue()
+_toast_q:        queue.Queue = queue.Queue()
+_flash_q:        queue.Queue = queue.Queue()
+_agent_q:        queue.Queue = queue.Queue()
+_rewrite_q:      queue.Queue = queue.Queue()
 _root:        tk.Tk | None = None
 _ready = threading.Event()
 
@@ -197,6 +200,17 @@ def set_rerecord_callback(fn) -> None:
     _on_rerecord = fn
 
 
+def show_agent_confirm(desc: str, confirm_cb) -> None:
+    """Show a modal confirm gate for an agent action. Safe to call from any thread."""
+    _agent_q.put({"desc": desc, "cb": confirm_cb})
+
+
+def show_rewrite_preview(selection: str, instruction: str, rewritten: str, hwnd: int) -> None:
+    """Show a rewrite preview panel for accept/reject. Safe to call from any thread."""
+    _rewrite_q.put({"selection": selection, "instruction": instruction,
+                    "rewritten": rewritten, "hwnd": hwnd})
+
+
 # ---------------------------------------------------------------------------
 # Internal — everything below runs exclusively on the tkinter worker thread
 # ---------------------------------------------------------------------------
@@ -347,6 +361,28 @@ def _tick() -> None:
         try:
             colour = _flash_q.get_nowait()
             _show_edge_flash(colour)
+        except queue.Empty:
+            break
+
+    # Drain agent confirm queue
+    while True:
+        try:
+            a = _agent_q.get_nowait()
+            try:
+                _open_agent_confirm(a["desc"], a["cb"])
+            except Exception as exc:
+                print(f"agent confirm error: {exc}")
+        except queue.Empty:
+            break
+
+    # Drain rewrite preview queue
+    while True:
+        try:
+            r = _rewrite_q.get_nowait()
+            try:
+                _open_rewrite_preview(r["selection"], r["instruction"], r["rewritten"], r["hwnd"])
+            except Exception as exc:
+                print(f"rewrite preview error: {exc}")
         except queue.Empty:
             break
 
@@ -843,14 +879,24 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     # 1-pixel outer ring for depth (task mode: accent-coloured, thicker)
     ring = tk.Frame(win, bg=(accent if task_mode else _BORDER2), bd=0)
     ring.pack(fill=tk.BOTH, expand=True, padx=(2 if task_mode else 1), pady=(2 if task_mode else 1))
-    frame = tk.Frame(ring, bg=_BG, padx=18, pady=16)
+
+    # Premium accent bar — 3px coloured strip at the very top
+    tk.Frame(ring, bg=accent, height=3).pack(fill=tk.X, side=tk.TOP)
+
+    frame = tk.Frame(ring, bg=_BG, padx=20, pady=16)
     frame.pack(fill=tk.BOTH, expand=True)
 
-    # Task-mode heading — window is borderless (overrideredirect), so this
-    # label stands in for a title bar.
+    # Header row: label (left) + branding mark (right)
+    header_row = tk.Frame(frame, bg=_BG)
+    header_row.pack(fill=tk.X, pady=(0, 8))
     if task_mode:
-        tk.Label(frame, text="✓ Add to To-Do List", bg=_BG, fg=accent,
-                 font=(_FONT_FAM_DISPLAY, 11, "bold"), anchor="w").pack(fill=tk.X, pady=(0, 6))
+        tk.Label(header_row, text="Add to To-Do List", bg=_BG, fg=accent,
+                 font=(_FONT_FAM_DISPLAY, 11, "bold"), anchor="w").pack(side=tk.LEFT)
+    else:
+        tk.Label(header_row, text="VoiceDictate", bg=_BG, fg=_FG3,
+                 font=(_FONT_FAM_DISPLAY, 9, "normal"), anchor="w").pack(side=tk.LEFT)
+    tk.Label(header_row, text=f"v2", bg=_BG, fg=_FG3,
+             font=(_FONT_FAM_TEXT, 8, "normal"), anchor="e").pack(side=tk.RIGHT)
 
     # ── Text entry ─────────────────────────────────────────────────────────
     if empty:
@@ -942,8 +988,16 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     btns = tk.Frame(frame, bg=_BG)
     btns.pack(anchor=tk.W)
 
+    _hooks: list = []  # WH_KEYBOARD_LL hooks active while this preview is open
+
     def _close() -> None:
         global _preview_open, _current_preview_win
+        for _h in list(_hooks):
+            try:
+                _keyboard.remove_hotkey(_h)
+            except Exception:
+                pass
+        _hooks.clear()
         _preview_open = False
         _current_preview_win = None
         try:
@@ -1134,6 +1188,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         entry.bind("<Return>",  _on_return)
         entry.bind("<Insert>",  _on_return)   # Insert key also pastes
         entry.bind("<Shift-Return>", lambda e: None)  # allow literal newline
+        win.bind("<Insert>",    _on_return)   # belt-and-suspenders: fires if focus drifts off entry
 
     # Redo bindings (Tkinter Text only auto-binds Ctrl+Z for undo)
     entry.bind("<Control-y>",       lambda e: (entry.edit_redo(), "break")[1])
@@ -1150,6 +1205,30 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
     win.bind("<Escape>", lambda _: on_cancel())
     win.protocol("WM_DELETE_WINDOW", on_cancel)
+
+    # ── Global WH_KEYBOARD_LL hooks ─────────────────────────────────────────
+    # VS Code / Electron calls LockSetForegroundWindow so the preview often
+    # cannot steal OS keyboard focus even after activate_window(). Without
+    # focus, Insert/Enter keypresses go to VS Code (toggling overwrite mode)
+    # instead of triggering on_insert(). A low-level keyboard hook captures
+    # the key BEFORE it reaches any application's message queue and, with
+    # suppress=True, prevents VS Code from ever seeing it.
+    # The hook thread is not the Tkinter thread — marshal via _root.after().
+    if not empty:
+        def _global_commit():
+            _root.after(0, lambda: on_insert() if _preview_open else None)
+        try:
+            _hooks.append(_keyboard.add_hotkey('insert', _global_commit, suppress=True))
+            _hooks.append(_keyboard.add_hotkey('enter',  _global_commit, suppress=True))
+        except Exception:
+            pass
+
+    def _global_cancel():
+        _root.after(0, lambda: on_cancel() if _preview_open else None)
+    try:
+        _hooks.append(_keyboard.add_hotkey('escape', _global_cancel, suppress=True))
+    except Exception:
+        pass
 
     # ── Drag ───────────────────────────────────────────────────────────────
     def _drag_start(event):
@@ -1170,6 +1249,18 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
     x, y = _calc_position(cx, cy, w, h, sw, sh, _preview_position)
     win.geometry(f"{w}x{h}+{x}+{y}")
+
+    # Activate the preview so keyboard input (Enter/Insert) goes here, not to
+    # VS Code / Electron. overrideredirect(True) popup windows don't auto-activate
+    # on Windows — the previously-focused app keeps OS keyboard focus and the
+    # user's Insert/Enter keypress goes straight to VS Code (toggling overwrite
+    # mode or whatever) instead of triggering on_insert().
+    # activate_window uses AttachThreadInput to steal foreground even when our
+    # process is not the current foreground process.
+    inject.activate_window(win.winfo_id())
+    win.lift()
+    win.focus_force()
+    entry.focus_set()
 
     # ── Rounded corners + slide-up entrance ────────────────────────────────
     winfx.apply_rounded_region(win, radius=12)
@@ -1199,6 +1290,150 @@ def _fmt_ts(iso: str) -> str:
             return dt.strftime("%d %b %Y  %H:%M")
     except Exception:
         return iso
+
+
+def _open_agent_confirm(desc: str, confirm_cb) -> None:
+    """Modal confirm gate for agent actions. Runs on the tkinter thread."""
+    win = tk.Toplevel(_root)
+    win.title("Agent Command")
+    win.configure(bg=_BG)
+    win.resizable(False, False)
+    win.attributes("-topmost", True)
+    win.attributes("-alpha", 0.0)
+    winfx.apply_rounded_corners(win)
+
+    # Accent top bar (orange for agent)
+    accent_bar = tk.Frame(win, bg="#f97316", height=3)
+    accent_bar.pack(fill=tk.X, side=tk.TOP)
+
+    body = tk.Frame(win, bg=_BG)
+    body.pack(fill=tk.BOTH, expand=True, padx=24, pady=(18, 14))
+
+    tk.Label(body, text="Run this command?", bg=_BG, fg=_FG,
+             font=(_FONT_FAM_DISPLAY, 13, "bold")).pack(anchor="w")
+
+    tk.Label(body, text=desc, bg=_BG2, fg=_FG,
+             font=_FONT_BODY, wraplength=380, justify="left",
+             padx=12, pady=8).pack(fill=tk.X, pady=(10, 0))
+
+    hint = tk.Label(body, text="Enter to run  ·  Esc to cancel",
+                    bg=_BG, fg=_FG3, font=_FONT_HINT)
+    hint.pack(anchor="w", pady=(8, 0))
+
+    btns = tk.Frame(body, bg=_BG)
+    btns.pack(fill=tk.X, pady=(14, 0))
+
+    def do_run():
+        win.destroy()
+        if confirm_cb:
+            threading.Thread(target=confirm_cb, daemon=True).start()
+
+    def do_cancel():
+        win.destroy()
+
+    tk.Button(btns, text="Cancel", command=do_cancel,
+              bg=_BG2, fg=_FG2, activebackground=_BG3, activeforeground=_FG,
+              relief="flat", bd=0, font=_FONT_BTN, padx=12, pady=6,
+              cursor="hand2").pack(side=tk.RIGHT, padx=(6, 0))
+    tk.Button(btns, text="Run", command=do_run,
+              bg="#f97316", fg="#ffffff", activebackground="#ea6900",
+              activeforeground="#ffffff", relief="flat", bd=0,
+              font=_FONT_BTN, padx=16, pady=6, cursor="hand2").pack(side=tk.RIGHT)
+
+    win.bind("<Return>", lambda _: do_run())
+    win.bind("<Escape>", lambda _: do_cancel())
+
+    win.update_idletasks()
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    w  = win.winfo_reqwidth()
+    h  = win.winfo_reqheight()
+    win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    winfx.fade_in(win, target=0.97, duration_ms=150)
+    win.focus_force()
+
+
+def _open_rewrite_preview(selection: str, instruction: str,
+                           rewritten: str, hwnd: int) -> None:
+    """Rewrite accept/reject panel. Runs on the tkinter thread."""
+    win = tk.Toplevel(_root)
+    win.title("Rewrite")
+    win.configure(bg=_BG)
+    win.resizable(False, False)
+    win.attributes("-topmost", True)
+    win.attributes("-alpha", 0.0)
+    winfx.apply_rounded_corners(win)
+
+    # Accent top bar (purple for rewrite)
+    tk.Frame(win, bg="#9333ea", height=3).pack(fill=tk.X, side=tk.TOP)
+
+    body = tk.Frame(win, bg=_BG)
+    body.pack(fill=tk.BOTH, expand=True, padx=24, pady=(18, 14))
+
+    tk.Label(body, text="Rewrite", bg=_BG, fg=_FG,
+             font=(_FONT_FAM_DISPLAY, 13, "bold")).pack(anchor="w")
+
+    tk.Label(body, text="Instruction:", bg=_BG, fg=_FG3, font=_FONT_HINT).pack(
+        anchor="w", pady=(10, 2))
+    tk.Label(body, text=instruction, bg=_BG2, fg=_FG, font=_FONT_BODY,
+             wraplength=400, justify="left", padx=10, pady=6).pack(fill=tk.X)
+
+    tk.Label(body, text="Before:", bg=_BG, fg=_FG3, font=_FONT_HINT).pack(
+        anchor="w", pady=(10, 2))
+    tk.Label(body, text=selection, bg=_BG2, fg=_FG2, font=_FONT_BODY,
+             wraplength=400, justify="left", padx=10, pady=6).pack(fill=tk.X)
+
+    tk.Label(body, text="After:", bg=_BG, fg=_FG3, font=_FONT_HINT).pack(
+        anchor="w", pady=(10, 2))
+
+    # Editable result
+    txt = tk.Text(body, height=4, bg=_BG2, fg=_FG, font=_FONT_BODY,
+                  bd=0, padx=10, pady=6, wrap="word",
+                  insertbackground=_FG, relief="flat", highlightthickness=0)
+    txt.insert("1.0", rewritten)
+    txt.pack(fill=tk.X)
+
+    hint = tk.Label(body, text="Enter to apply  ·  Esc to cancel",
+                    bg=_BG, fg=_FG3, font=_FONT_HINT)
+    hint.pack(anchor="w", pady=(6, 0))
+
+    btns = tk.Frame(body, bg=_BG)
+    btns.pack(fill=tk.X, pady=(12, 0))
+
+    def do_apply():
+        result = txt.get("1.0", "end-1c").strip()
+        win.destroy()
+        if result:
+            threading.Thread(
+                target=lambda: inject.inject_text(result, hwnd),
+                daemon=True,
+            ).start()
+
+    def do_cancel():
+        win.destroy()
+
+    tk.Button(btns, text="Cancel", command=do_cancel,
+              bg=_BG2, fg=_FG2, activebackground=_BG3, activeforeground=_FG,
+              relief="flat", bd=0, font=_FONT_BTN, padx=12, pady=6,
+              cursor="hand2").pack(side=tk.RIGHT, padx=(6, 0))
+    tk.Button(btns, text="Apply", command=do_apply,
+              bg="#9333ea", fg="#ffffff", activebackground="#7e22ce",
+              activeforeground="#ffffff", relief="flat", bd=0,
+              font=_FONT_BTN, padx=16, pady=6, cursor="hand2").pack(side=tk.RIGHT)
+
+    win.bind("<Return>", lambda e: do_apply() if not isinstance(e.widget, tk.Text) else None)
+    win.bind("<Escape>", lambda _: do_cancel())
+
+    win.update_idletasks()
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    w  = win.winfo_reqwidth()
+    h  = win.winfo_reqheight()
+    win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    winfx.fade_in(win, target=0.97, duration_ms=150)
+    win.focus_force()
 
 
 def _open_history() -> None:

@@ -11,8 +11,11 @@ _on_too_short  = None   # called when hotkey released too quickly
 _on_not_ready  = None   # called when model is still loading
 _is_recording  = None
 _is_ready      = None
-_paused        = False
-_press_time: float = 0.0
+_paused              = False
+_press_time: float   = 0.0
+_hotkey_mode         = "hold"   # "hold" | "toggle" | "auto"
+_toggle_armed        = False    # True once all mods went down together (toggle mode)
+_external_recording  = False    # True when agent/rewrite mode started the recording
 
 _MIN_HOLD_MS = 300  # ms — ignore releases faster than this
 
@@ -23,9 +26,10 @@ _held: list[bool] = []
 
 
 def configure(on_start, on_stop, is_recording, is_ready, keys: str = "ctrl+alt",
-              on_cancel=None, on_too_short=None, on_not_ready=None) -> None:
+              on_cancel=None, on_too_short=None, on_not_ready=None,
+              hotkey_mode: str = "hold") -> None:
     global _on_start, _on_stop, _is_recording, _is_ready, _mod_sets, _held
-    global _on_cancel, _on_too_short, _on_not_ready
+    global _on_cancel, _on_too_short, _on_not_ready, _hotkey_mode
     _on_start     = on_start
     _on_stop      = on_stop
     _on_cancel    = on_cancel
@@ -33,6 +37,7 @@ def configure(on_start, on_stop, is_recording, is_ready, keys: str = "ctrl+alt",
     _on_not_ready = on_not_ready
     _is_recording = is_recording
     _is_ready     = is_ready
+    _hotkey_mode  = hotkey_mode if hotkey_mode in ("hold", "toggle", "auto") else "hold"
     _mod_sets     = _parse_hotkey(keys)
     _held[:]      = [False] * len(_mod_sets)
 
@@ -56,6 +61,12 @@ def set_paused(val: bool) -> None:
     _paused = val
 
 
+def set_external_recording(active: bool) -> None:
+    """Prevent hold-mode stop logic while agent/rewrite recording is active."""
+    global _external_recording
+    _external_recording = active
+
+
 def rebind(keys: str) -> None:
     """Re-parse hotkey at runtime. Resets held state."""
     global _mod_sets, _held
@@ -69,7 +80,7 @@ def start() -> None:
 
 
 def _on_key(event) -> None:
-    global _press_time
+    global _press_time, _toggle_armed
     if _paused:
         return
 
@@ -80,6 +91,29 @@ def _on_key(event) -> None:
             _held[i] = event.event_type == keyboard.KEY_DOWN
 
     both = all(_held)
+
+    if _hotkey_mode == "toggle":
+        # Toggle: combo-down fires start or stop; combo-up is ignored.
+        if both and event.event_type == keyboard.KEY_DOWN and not _toggle_armed:
+            _toggle_armed = True
+            if _is_recording():
+                _on_stop()
+            else:
+                if not _is_ready():
+                    if _on_not_ready:
+                        _on_not_ready()
+                    return
+                _press_time = time.time()
+                try:
+                    _on_start()
+                except Exception as exc:
+                    warn("hotkey", f"on_start failed: {exc}")
+                    _held[:] = [False] * len(_mod_sets)
+        elif not both:
+            _toggle_armed = False
+        return
+
+    # "hold" and "auto" behave identically (auto = hold, reserved for future smart detection)
     if both and not _is_recording():
         if not _is_ready():
             if _on_not_ready:
@@ -93,7 +127,7 @@ def _on_key(event) -> None:
         except Exception as exc:
             warn("hotkey", f"on_start failed, clearing held state: {exc}")
             _held[:] = [False] * len(_mod_sets)
-    elif not both and _is_recording():
+    elif not both and _is_recording() and not _external_recording:
         held_ms = (time.time() - _press_time) * 1000
         if held_ms < _MIN_HOLD_MS and _on_cancel:
             # Too short — cancel silently, show feedback

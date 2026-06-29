@@ -321,6 +321,57 @@ def last_backend_used() -> str:
     return _last_backend_used
 
 
+_REWRITE_PROMPT = (
+    "You rewrite a selected piece of text according to a voice instruction.\n"
+    "Preserve the original meaning unless instructed to change it.\n"
+    "Output only the rewritten text. No preamble, no explanation.\n"
+    "\n"
+    "Example 1\n"
+    "Selection: 'The code is broken and needs to be fixed urgently.'\n"
+    "Instruction: make it more professional\n"
+    "Rewrite: The code contains a critical defect requiring immediate attention.\n"
+    "\n"
+    "Example 2\n"
+    "Selection: 'We need to add the dark mode feature to the settings panel.'\n"
+    "Instruction: make it shorter\n"
+    "Rewrite: Add dark mode to settings."
+)
+
+
+def rewrite(selection: str, instruction: str) -> str:
+    """Rewrite selected text according to a voice instruction.
+
+    Uses the current LM Studio backend. Falls back to the original text on error.
+    """
+    if not selection.strip():
+        return selection
+
+    import llm_client
+    if _backend == "lmstudio":
+        try:
+            result = llm_client.call(
+                messages=[
+                    {"role": "system", "content": _REWRITE_PROMPT},
+                    {"role": "user",   "content": (
+                        f"Selection: '{selection.strip()}'\n"
+                        f"Instruction: {instruction.strip()}\n"
+                        f"Rewrite:"
+                    )},
+                ],
+                size="large",
+                timeout=25,
+            )
+            import re
+            result = re.sub(r"^\s*Rewrite\s*:\s*", "", result, flags=re.IGNORECASE)
+            result = result.strip("'\"").strip()
+            log("reformat", f"rewrite: {len(selection)}→{len(result)} chars")
+            return result if result else selection
+        except Exception as exc:
+            warn("reformat", f"rewrite error: {exc}")
+
+    return selection  # fallback — keep original
+
+
 def run(text: str) -> str:
     """Reformat raw dictation. Falls back gracefully on any error."""
     global _last_backend_used
