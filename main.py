@@ -390,7 +390,10 @@ def main() -> None:
                             if not ok:
                                 preview.show_toast(f"Action failed: {desc}", kind="warn")
 
-                        preview.show_agent_confirm(desc, _do_execute)
+                        if action.get("action") == "run_command":
+                            preview.show_agent_confirm(desc, _do_execute)
+                        else:
+                            _do_execute()
                     except Exception as exc:
                         log_error("main", f"agent error: {exc}")
                         preview.hide_badge()
