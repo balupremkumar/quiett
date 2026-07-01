@@ -49,6 +49,7 @@
   "rewrite_hotkey": "ctrl+shift+r",
   "agent_hotkey": "ctrl+shift+c",
   "agent_mode_enabled": true,
+  "agent_command_mode_enabled": false,
   "agent_trigger_phrases": [
     "hey computer",
     "computer run",

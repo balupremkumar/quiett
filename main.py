@@ -80,6 +80,7 @@ _CONFIG_DEFAULTS = {
     "rewrite_hotkey":              "ctrl+alt+r",
     "agent_hotkey":                "ctrl+alt+c",
     "agent_mode_enabled":          False,
+    "agent_command_mode_enabled":  False,
     "agent_trigger_phrases":       ["hey computer", "computer run", "computer open"],
     "api_server_enabled":          True,
     "api_server_port":             8090,
@@ -153,6 +154,7 @@ def _validate_config(raw: dict) -> dict:
     if cfg.get("hotkey_mode") not in ("hold", "toggle", "auto"):
         cfg["hotkey_mode"] = "hold"
     cfg["agent_mode_enabled"] = bool(cfg.get("agent_mode_enabled", False))
+    cfg["agent_command_mode_enabled"] = bool(cfg.get("agent_command_mode_enabled", False))
     if not isinstance(cfg.get("agent_trigger_phrases"), list):
         cfg["agent_trigger_phrases"] = []
     cfg["api_server_enabled"] = bool(cfg.get("api_server_enabled", True))
@@ -682,7 +684,7 @@ def main() -> None:
     # GPU) when vibe mode is actually on — otherwise it sits on standby and
     # gets loaded lazily the moment vibe mode is enabled (see _on_toggle_vibe
     # and the vibe_mode hot-reload sync below).
-    if _cfg.get("vibe_mode", False):
+    if _cfg.get("vibe_mode", False) or _cfg.get("agent_command_mode_enabled", False):
         threading.Thread(target=_load_reformat, daemon=True).start()
 
     # ------------------------------------------------------------------
@@ -750,7 +752,10 @@ def main() -> None:
         toast_fn=preview.show_toast,
         restart_whisper_fn=_restart_whisper,
         restart_lmstudio_fn=_restart_lmstudio,
-        vibe_enabled_fn=lambda: _get_cfg().get("vibe_mode", False),
+        vibe_enabled_fn=lambda: (
+            _get_cfg().get("vibe_mode", False) or
+            _get_cfg().get("agent_command_mode_enabled", False)
+        ),
     )
     health.start()
 
@@ -804,7 +809,17 @@ def main() -> None:
                 tray.set_vibe_mode(new_vibe)
                 if new_vibe and not reformat.is_ready():
                     threading.Thread(target=_load_reformat, daemon=True).start()
-                elif not new_vibe and reformat.is_ready():
+                elif not new_vibe and not _get_cfg().get("agent_command_mode_enabled", False) and reformat.is_ready():
+                    threading.Thread(target=reformat.unload, daemon=True).start()
+            # Sync agent_command_mode_enabled into tray menu
+            new_agent_cmd = validated.get("agent_command_mode_enabled", False)
+            if new_agent_cmd != _cfg.get("agent_command_mode_enabled"):
+                with _cfg_lock:
+                    _cfg["agent_command_mode_enabled"] = new_agent_cmd
+                tray.set_agent_command_mode(new_agent_cmd)
+                if new_agent_cmd and not reformat.is_ready():
+                    threading.Thread(target=_load_reformat, daemon=True).start()
+                elif not new_agent_cmd and not _get_cfg().get("vibe_mode", False) and reformat.is_ready():
                     threading.Thread(target=reformat.unload, daemon=True).start()
             # Sync paste_mode state into tray menu
             new_paste_mode = validated.get("paste_mode", "auto")
@@ -832,7 +847,7 @@ def main() -> None:
             _cfg["vibe_mode"] = enabled
         if enabled and not reformat.is_ready():
             threading.Thread(target=_load_reformat, daemon=True).start()
-        elif not enabled and reformat.is_ready():
+        elif not enabled and not _get_cfg().get("agent_command_mode_enabled", False) and reformat.is_ready():
             threading.Thread(target=reformat.unload, daemon=True).start()
         try:
             with open("config.json") as f:
@@ -842,6 +857,24 @@ def main() -> None:
                 json.dump(raw, f, indent=2)
         except Exception:
             pass
+
+    def _on_toggle_agent_command_mode(enabled: bool) -> None:
+        global _cfg
+        with _cfg_lock:
+            _cfg["agent_command_mode_enabled"] = enabled
+        if enabled and not reformat.is_ready():
+            threading.Thread(target=_load_reformat, daemon=True).start()
+        elif not enabled and not _get_cfg().get("vibe_mode", False) and reformat.is_ready():
+            threading.Thread(target=reformat.unload, daemon=True).start()
+        try:
+            with open("config.json") as f:
+                raw = json.load(f)
+            raw["agent_command_mode_enabled"] = enabled
+            with open("config.json", "w") as f:
+                json.dump(raw, f, indent=2)
+        except Exception:
+            pass
+        tray.set_agent_command_mode(enabled)
 
     def _on_toggle_clipboard_only(enabled: bool) -> None:
         global _cfg
@@ -892,6 +925,8 @@ def main() -> None:
         on_relaunch_taskflow=lambda: threading.Thread(target=taskflow.ensure_running, daemon=True).start(),
         on_toggle_clipboard_only=_on_toggle_clipboard_only,
         clipboard_only=_cfg.get("paste_mode", "auto") == "clipboard_only",
+        on_toggle_agent_command_mode=_on_toggle_agent_command_mode,
+        agent_command_mode=_cfg.get("agent_command_mode_enabled", False),
     )
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()

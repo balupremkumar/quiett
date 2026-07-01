@@ -13,6 +13,7 @@ type_text   — inject text via the normal dictation path
 unknown     — unrecognised command; surfaced as a toast
 """
 
+import ctypes
 import json
 import re
 import subprocess
@@ -117,11 +118,9 @@ def execute(action: dict, inject_fn=None) -> bool:
         if not app:
             return False
         try:
-            subprocess.Popen(
-                f'start "" "{app}"',
-                shell=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "open", app, None, None, 1)
+            if ret <= 32:
+                raise OSError(f"ShellExecuteW returned {ret}")
             log("agent", f"opened app: {app}")
             return True
         except Exception as exc:
@@ -152,11 +151,9 @@ def execute(action: dict, inject_fn=None) -> bool:
             return False
         try:
             url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
-            subprocess.Popen(
-                f'start "" "{url}"',
-                shell=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "open", url, None, None, 1)
+            if ret <= 32:
+                raise OSError(f"ShellExecuteW returned {ret}")
             log("agent", f"search: {query}")
             return True
         except Exception as exc:

@@ -247,6 +247,8 @@ _clipboard_only   = False
 _on_relaunch_taskflow = None
 _taskflow_status  = "unknown"   # "running" | "down" | "unknown"
 _task_count       = 0           # tasks added to TaskFlow this session
+_on_toggle_agent_command_mode = None
+_agent_command_mode = False
 
 
 def configure(on_view_history, on_toggle_pause=None,
@@ -254,10 +256,12 @@ def configure(on_view_history, on_toggle_pause=None,
               on_toggle_vibe=None, vibe_mode: bool = False,
               on_set_vibe_profile=None, vibe_profile: str = "coding",
               on_toggle_clipboard_only=None, clipboard_only: bool = False,
-              on_relaunch_taskflow=None) -> None:
+              on_relaunch_taskflow=None,
+              on_toggle_agent_command_mode=None, agent_command_mode: bool = False) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
     global _on_toggle_vibe, _vibe_mode, _on_set_vibe_profile, _vibe_profile
     global _on_toggle_clipboard_only, _clipboard_only, _on_relaunch_taskflow
+    global _on_toggle_agent_command_mode, _agent_command_mode
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
@@ -269,6 +273,8 @@ def configure(on_view_history, on_toggle_pause=None,
     _on_toggle_clipboard_only = on_toggle_clipboard_only
     _clipboard_only   = clipboard_only
     _on_relaunch_taskflow = on_relaunch_taskflow
+    _on_toggle_agent_command_mode = on_toggle_agent_command_mode
+    _agent_command_mode = agent_command_mode
 
 
 def increment_task_count() -> None:
@@ -302,6 +308,14 @@ def set_clipboard_only(enabled: bool) -> None:
     """Keep tray menu in sync when paste_mode changes externally (e.g. hot-reload)."""
     global _clipboard_only
     _clipboard_only = enabled
+    if _icon is not None:
+        _icon.update_menu()
+
+
+def set_agent_command_mode(enabled: bool) -> None:
+    """Keep tray menu in sync when agent_command_mode_enabled changes externally."""
+    global _agent_command_mode
+    _agent_command_mode = enabled
     if _icon is not None:
         _icon.update_menu()
 
@@ -377,6 +391,13 @@ def run() -> None:
             _on_toggle_clipboard_only(_clipboard_only)
         icon.update_menu()
 
+    def _toggle_agent_command_mode(icon, item):
+        global _agent_command_mode
+        _agent_command_mode = not _agent_command_mode
+        if _on_toggle_agent_command_mode:
+            _on_toggle_agent_command_mode(_agent_command_mode)
+        icon.update_menu()
+
     def _relaunch_taskflow(icon, item):
         if _on_relaunch_taskflow:
             _on_relaunch_taskflow()
@@ -410,6 +431,7 @@ def run() -> None:
 
     menu = pystray.Menu(
         pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
+        pystray.MenuItem("Agent Command Mode", _toggle_agent_command_mode, checked=lambda item: _agent_command_mode),
         pystray.MenuItem("Vibe Mode", _toggle_vibe, checked=lambda item: _vibe_mode),
         pystray.MenuItem("Vibe Profile", profile_menu),
         pystray.MenuItem("Clipboard Only", _toggle_clipboard_only, checked=lambda item: _clipboard_only),

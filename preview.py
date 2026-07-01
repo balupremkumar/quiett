@@ -2056,6 +2056,31 @@ def _open_settings() -> None:
         be_menu.pack(anchor="w", padx=22)
         return p
 
+    def build_agent() -> tk.Frame:
+        p = tk.Frame(pages_holder, bg=_BG)
+        _h2(p, "Agent Command Mode").pack(fill=tk.X, padx=22, pady=(18, 6))
+        _note(p, "Voice command execution via local LLM. Enable to launch LM Studio "
+                 "and load the model. Disable to unload it and free VRAM.").pack(
+            fill=tk.X, padx=22, pady=(0, 12))
+
+        agent_cmd_var = tk.BooleanVar(value=bool(cfg.get("agent_command_mode_enabled", False)))
+        state["agent_cmd_var"] = agent_cmd_var
+        _toggle_row(p, "Enable Agent Command Mode", agent_cmd_var,
+                    sub="Launches LM Studio on enable; unloads model on disable.")
+
+        _note(p, "Hotkey: Ctrl+Shift+C — hold to record a command, release to classify and confirm.").pack(
+            fill=tk.X, padx=22, pady=(12, 0))
+        _note(p, "Supported commands: open Chrome, search for X, run git status, type Hello.").pack(
+            fill=tk.X, padx=22, pady=(4, 0))
+
+        _label(p, "Model (shared with Vibe Mode)").pack(fill=tk.X, padx=22, pady=(16, 2))
+        model_var_agent = tk.StringVar(value=cfg.get("lmstudio_model", "qwen/qwen3-8b"))
+        state["lmstudio_model_var"] = model_var_agent
+        _entry(p, model_var_agent).pack(fill=tk.X, padx=22)
+        _note(p, "Must be installed in LM Studio. Smaller models (1B–3B) work well for command classification.").pack(
+            fill=tk.X, padx=22, pady=(2, 0))
+        return p
+
     def build_todo() -> tk.Frame:
         p = tk.Frame(pages_holder, bg=_BG)
         _h2(p, "To-Do List").pack(fill=tk.X, padx=22, pady=(18, 6))
@@ -2110,13 +2135,14 @@ def _open_settings() -> None:
         return p
 
     PAGE_DEFS = [
-        ("Audio",         build_audio),
-        ("Hotkey",        build_hotkey),
-        ("Transcription", build_transcription),
-        ("Behaviour",     build_behaviour),
-        ("Appearance",    build_appearance),
-        ("Vibe Coding",   build_vibe),
-        ("To-Do List",    build_todo),
+        ("Audio",              build_audio),
+        ("Hotkey",             build_hotkey),
+        ("Transcription",      build_transcription),
+        ("Behaviour",          build_behaviour),
+        ("Appearance",         build_appearance),
+        ("Vibe Coding",        build_vibe),
+        ("Agent Commands",     build_agent),
+        ("To-Do List",         build_todo),
     ]
 
     # ── Build sidebar items ────────────────────────────────────────────────
@@ -2246,6 +2272,8 @@ def _open_settings() -> None:
             "history_paused":              state["history_paused_var"].get(),
             "vibe_mode":                   state["vibe_var"].get(),
             "vibe_mode_backend":           state["backend_var"].get(),
+            "agent_command_mode_enabled":  state["agent_cmd_var"].get(),
+            "lmstudio_model":              state["lmstudio_model_var"].get().strip() or "qwen/qwen3-8b",
             "theme":                       state["theme_var"].get(),
             "taskflow_enabled":            state["taskflow_var"].get(),
             "taskflow_voice_confirm":      state["voice_confirm_var"].get(),
