@@ -277,6 +277,22 @@ def run(
     return (text if text else None), confidence, (words or None)
 
 
+def run_partial(chunks: list, language: str) -> str | None:
+    """Quick raw transcription of the in-progress recording for the live badge.
+
+    No prompt, no postprocess — speed over polish. Returns None on any failure
+    so the caller can just skip the update.
+    """
+    if not chunks or not _ready.is_set():
+        return None
+    try:
+        wav_bytes = _chunks_to_wav_bytes(chunks)
+        result = _post_inference(wav_bytes, language or "en", None)
+        return (result.get("text") or "").strip()
+    except Exception:
+        return None
+
+
 def _parse_response(result: dict) -> tuple[str, list, float | None]:
     """Extract text, word list, and avg confidence from a whisper-server response."""
     raw = (result.get("text") or "").strip()
@@ -322,9 +338,12 @@ def _build_prompt(initial_prompt: str | None, vocab: list | None) -> str | None:
 
 def _postprocess(text: str, filler_words: list, profile_rules: dict) -> str:
     text = _strip_fillers(text, filler_words)
-    text = _collapse_stutters(text)
-    text = _collapse_acronyms(text)
+    # Spoken punctuation first, so "dot dot dot" isn't eaten as a stutter
     text = _apply_spoken_punctuation(text)
+    text = _collapse_stutters(text)
+    text = _apply_self_corrections(text)
+    text = _collapse_acronyms(text)
+    text = _apply_case_commands(text)
     text = _apply_profile(text, profile_rules)
     text = _words_to_digits(text)
     text = _cleanup_whitespace_around_punct(text)
@@ -341,6 +360,36 @@ def _apply_profile(text: str, rules: dict) -> str:
         escaped = re.escape(whisper_out)
         text = re.sub(r"\b" + escaped + r"\b", correct_out, text, flags=re.IGNORECASE)
     return text
+
+
+_SC_MARKERS = r"(?:actually|no wait|wait,? no|sorry|I mean)"
+
+
+def _apply_self_corrections(text: str) -> str:
+    """Apply mid-utterance self-corrections, conservatively.
+
+    - Number swap: "at 2, actually 3" → "at 3" (any correction marker)
+    - Proper-noun swap, "I mean" only: "Tuesday, I mean Wednesday" → "Wednesday"
+    - "scratch that" removes the clause/sentence spoken before it
+
+    A whole-utterance "scratch that" is left alone — main.py treats that as an
+    undo command for the previous insert, not text to clean.
+    """
+    if re.fullmatch(r"\s*(?:scratch|undo) that[.!?]?\s*", text, flags=re.IGNORECASE):
+        return text
+    text = re.sub(
+        rf"\b(\d[\w.:]*)\s*[,-]?\s*(?:no,?\s+)?{_SC_MARKERS}\s*,?\s+(\d[\w.:]*)",
+        r"\2", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b([A-Z][\w'-]*)\s*,\s*I mean,?\s+([A-Z][\w'-]*)", r"\2", text)
+    text = re.sub(r"[^.!?\n]*[.!?,;]?\s*\bscratch that\b[.,]?\s*", "", text,
+                  flags=re.IGNORECASE)
+    return text
+
+
+def _apply_case_commands(text: str) -> str:
+    """Dragon-style "all caps <word>" → uppercase that word."""
+    return re.sub(r"\ball caps ([\w'-]+)", lambda m: m.group(1).upper(), text,
+                  flags=re.IGNORECASE)
 
 
 def _collapse_stutters(text: str) -> str:
@@ -377,6 +426,18 @@ _SPOKEN_PUNCT = [
     (r"\bclose quote\b",   "\""),
     (r"\bdash\b",          "-"),
     (r"\bhyphen\b",        "-"),
+    (r"\bnew bullet\b",    "\n- "),
+    (r"\bbullet point\b",  "\n- "),
+    (r"\bdot dot dot\b",   "..."),
+    (r"\bellipsis\b",      "..."),
+    (r"\bat sign\b",       "@"),
+    (r"\bampersand\b",     "&"),
+    (r"\bunderscore\b",    "_"),
+    (r"\bpercent sign\b",  "%"),
+    (r"\bdollar sign\b",   "$"),
+    (r"\basterisk\b",      "*"),
+    (r"\bforward slash\b", "/"),
+    (r"\bback slash\b",    "\\\\"),
 ]
 
 
@@ -396,10 +457,13 @@ def _cleanup_whitespace_around_punct(text: str) -> str:
     text = re.sub(r"^,+\s*", "", text)
     # Join a stray space before a contraction suffix: "that 's" -> "that's", "I 'm" -> "I'm"
     text = re.sub(r"\s+'(s|t|re|ll|ve|m|d)\b", r"'\1", text, flags=re.IGNORECASE)
-    # Protect decimal points (digit.digit) so the spacing rule below won't split "4.8" into "4. 8"
+    # Protect decimal points (digit.digit) and ellipses so the spacing rule
+    # below won't split "4.8" into "4. 8" or "..." into ". . ."
+    text = re.sub(r"\.{3}", "\x01", text)
     text = re.sub(r"(?<=\d)\.(?=\d)", "\x00", text)
     text = re.sub(r"([,.;:!?])(?=\S)", r"\1 ", text)
     text = text.replace("\x00", ".")
+    text = text.replace("\x01", "...")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     return text.strip()

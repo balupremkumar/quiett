@@ -175,6 +175,12 @@ def get_silence_timeout() -> float:
     return _silence_timeout
 
 
+def get_chunks_snapshot() -> list:
+    """Copy of the chunks recorded so far this session (for live partial preview)."""
+    chunks = _session_chunks
+    return list(chunks) if chunks else []
+
+
 def get_recent_levels(n: int = 32) -> list[float]:
     """Return the n most recent RMS values (oldest first). Used for the recording waveform."""
     if n >= len(_levels):

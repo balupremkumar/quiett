@@ -22,6 +22,7 @@ import ctypes
 import json
 import sys
 import threading
+import time
 
 import win32api
 import win32event
@@ -48,6 +49,9 @@ _cfg: dict = {}
 _cfg_lock = threading.Lock()
 _task_session: bool = False   # True when Ctrl+Shift+Alt was held at recording start
 _agent_session: bool = False  # True when Ctrl+Shift+C triggered this recording
+_last_dictation_text: str = ""  # newest final transcription — used by the repaste hotkey
+
+_UNDO_PHRASES = {"scratch that", "undo that", "undo last insert"}
 
 _HOT_RELOAD_INTERVAL = 30  # seconds
 
@@ -92,6 +96,9 @@ _CONFIG_DEFAULTS = {
                                      "read my tasks", "what are my tasks"],
     "taskflow_default_project":    "",
     "taskflow_voice_confirm":      False,
+    "snippets":                    {},
+    "repaste_hotkey":              "ctrl+shift+space",
+    "live_preview_enabled":        True,
 }
 
 _VALID_POSITIONS = {"cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"}
@@ -167,6 +174,11 @@ def _validate_config(raw: dict) -> dict:
     if not isinstance(cfg.get("taskflow_default_project"), str):
         cfg["taskflow_default_project"] = ""
     cfg["taskflow_voice_confirm"] = bool(cfg.get("taskflow_voice_confirm", False))
+    if not isinstance(cfg.get("snippets"), dict):
+        cfg["snippets"] = {}
+    if not isinstance(cfg.get("repaste_hotkey"), str):
+        cfg["repaste_hotkey"] = ""
+    cfg["live_preview_enabled"] = bool(cfg.get("live_preview_enabled", True))
     return cfg
 
 
@@ -362,6 +374,18 @@ def main() -> None:
             preview.hide_badge()
         if text is None:
             return
+
+        lowered = text.strip().lower().rstrip(" .!?,")
+
+        # Spoken undo: "scratch that" as the whole utterance undoes the last
+        # insert instead of pasting the phrase. Checked before history save so
+        # command utterances don't pollute history.
+        if not agent_session and not task_session and lowered in _UNDO_PHRASES:
+            ok = inject.undo_last()
+            preview.show_toast("Undid last insert" if ok else "Nothing to undo",
+                               kind="info")
+            return
+
         if text.strip() and not cfg.get("history_paused", False):
             history.save(text.strip())
 
@@ -428,6 +452,18 @@ def main() -> None:
             )
             return
 
+        global _last_dictation_text
+        if text.strip():
+            _last_dictation_text = text.strip()
+
+        # Voice snippets: whole-utterance trigger → paste the expansion directly
+        # ("insert my email" → the address). Deterministic, so no preview.
+        if text.strip():
+            for trig, expansion in (cfg.get("snippets") or {}).items():
+                if isinstance(trig, str) and lowered == trig.strip().lower():
+                    inject.inject_text(str(expansion), hwnd)
+                    return
+
         # TaskFlow: read-back, mark-done, and add-task trigger handling.
         # Must run before the auto-paste threshold below, else a confident
         # "add this to TaskFlow X" would get silently pasted as raw text.
@@ -477,9 +513,13 @@ def main() -> None:
                 text = remainder
                 task_extracted = True
 
+        # Per-app auto-paste ("auto_paste": true in per_app_context) skips the
+        # preview entirely for trusted apps; the global confidence threshold
+        # still applies everywhere else.
         threshold = cfg.get("auto_paste_threshold", 0.0)
-        if (threshold > 0.0 and confidence is not None
-                and confidence >= threshold and text.strip()):
+        app_auto = bool(app_ctx.get("auto_paste"))
+        if text.strip() and (app_auto or (threshold > 0.0 and confidence is not None
+                                          and confidence >= threshold)):
             inject.inject_text(text.strip(), hwnd)
             return
 
@@ -504,6 +544,27 @@ def main() -> None:
             daemon=True,
         ).start()
 
+    def _partial_worker() -> None:
+        """Live partial transcription while recording — feeds the badge.
+
+        Paced so a partial inference is only started when at least ~1.2s of new
+        audio exists, and never more than one at a time (the call itself blocks),
+        keeping whisper-server free when the final inference arrives.
+        """
+        last_dur = 0.0
+        while audio.is_recording():
+            time.sleep(0.25)
+            chunks = audio.get_chunks_snapshot()
+            dur = sum(len(c) for c in chunks) / audio.SAMPLE_RATE
+            if dur < 1.5 or dur - last_dur < 1.2:
+                continue
+            if not audio.is_recording():
+                break
+            txt = transcribe.run_partial(chunks, _get_cfg().get("language", "en"))
+            last_dur = dur
+            if txt and audio.is_recording():
+                preview.set_partial_text(txt)
+
     def _on_recording_start(agent: bool = False) -> None:
         global _task_session, _agent_session
         _agent_session = agent
@@ -521,6 +582,8 @@ def main() -> None:
         badge = "recording_task" if _task_session else "recording"
         preview.show_badge(badge)
         audio.start()
+        if _get_cfg().get("live_preview_enabled", True):
+            threading.Thread(target=_partial_worker, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Module configuration
@@ -598,6 +661,21 @@ def main() -> None:
             log("main", f"agent hotkey registered: {_agent_hk}")
         except Exception as exc:
             log_error("main", f"agent hotkey failed: {exc}")
+
+    # Repaste hotkey — re-insert the last dictation into the focused app
+    _repaste_hk = _cfg.get("repaste_hotkey", "")
+    if _repaste_hk:
+        def _repaste() -> None:
+            if _last_dictation_text and not audio.is_recording():
+                hwnd = inject.capture_foreground()
+                threading.Thread(target=inject.inject_text,
+                                 args=(_last_dictation_text, hwnd),
+                                 daemon=True).start()
+        try:
+            _kb.add_hotkey(_repaste_hk, _repaste, suppress=False)
+            log("main", f"repaste hotkey registered: {_repaste_hk}")
+        except Exception as exc:
+            log_error("main", f"repaste hotkey failed: {exc}")
 
     # ------------------------------------------------------------------
     # Model loading
@@ -727,7 +805,8 @@ def main() -> None:
                             "taskflow_enabled", "taskflow_trigger_phrases",
                             "taskflow_trailing_trigger_phrases", "taskflow_readback_phrases",
                             "taskflow_default_project", "taskflow_voice_confirm",
-                            "taskflow_direct_capture_modifiers"):
+                            "taskflow_direct_capture_modifiers",
+                            "snippets", "live_preview_enabled", "per_app_context"):
                     _cfg[key] = validated[key]
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],

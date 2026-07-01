@@ -204,6 +204,14 @@ def show_agent_confirm(desc: str, confirm_cb) -> None:
     _agent_q.put({"desc": desc, "cb": confirm_cb})
 
 
+_partial_q: queue.Queue = queue.Queue()
+
+
+def set_partial_text(text: str) -> None:
+    """Live partial transcription shown under the recording badge. Any thread."""
+    _partial_q.put(text or "")
+
+
 # ---------------------------------------------------------------------------
 # Internal — everything below runs exclusively on the tkinter worker thread
 # ---------------------------------------------------------------------------
@@ -228,6 +236,7 @@ _badge_logo_idx: int = 0
 _badge_state:  str | None = None
 _badge_anim_phase: float = 0.0            # drives the processing sweep
 _badge_smoothed: list[float] = []         # interpolated bar heights for ease-out decay
+_badge_partial_lbl: tk.Label | None = None  # live partial transcription line
 
 
 def _tick() -> None:
@@ -340,6 +349,16 @@ def _tick() -> None:
             _handle_badge(badge_cmd)
         except queue.Empty:
             break
+
+    # Drain partial-transcription queue — keep only the latest
+    latest_partial = None
+    while True:
+        try:
+            latest_partial = _partial_q.get_nowait()
+        except queue.Empty:
+            break
+    if latest_partial is not None:
+        _update_badge_partial(latest_partial)
 
     # Drain toast queue
     while True:
@@ -503,6 +522,7 @@ def _badge_alive() -> bool:
     """Return True only if _badge_win is a live Tkinter window."""
     global _badge_win, _badge_label, _badge_dot, _badge_canvas
     global _badge_time, _badge_logo_lbl, _badge_logo_variants
+    global _badge_partial_lbl
     if _badge_win is None:
         return False
     try:
@@ -516,6 +536,7 @@ def _badge_alive() -> bool:
         _badge_time = None
         _badge_logo_lbl = None
         _badge_logo_variants = []
+        _badge_partial_lbl = None
         return False
 
 
@@ -541,6 +562,7 @@ def _build_recording_badge(cfg: dict) -> None:
     global _badge_win, _badge_canvas, _badge_time
     global _badge_label, _badge_dot, _badge_logo_lbl
     global _badge_logo_variants, _badge_logo_idx, _badge_smoothed
+    global _badge_partial_lbl
 
     _badge_win = tk.Toplevel(_root)
     _badge_win.overrideredirect(True)
@@ -554,24 +576,34 @@ def _build_recording_badge(cfg: dict) -> None:
     inner = tk.Frame(outer, bg=_BG, padx=12, pady=10)
     inner.pack(fill=tk.BOTH, expand=True)
 
+    row = tk.Frame(inner, bg=_BG)
+    row.pack(fill=tk.X)
+
     _badge_logo_variants = _build_logo_variants(cfg["logo_bg"])
     _badge_logo_idx = 0
-    _badge_logo_lbl = tk.Label(inner, image=_badge_logo_variants[0], bg=_BG, bd=0)
+    _badge_logo_lbl = tk.Label(row, image=_badge_logo_variants[0], bg=_BG, bd=0)
     _badge_logo_lbl.pack(side=tk.LEFT, padx=(0, 12))
 
     wave_w = _WAVE_BAR_N * (_WAVE_BAR_W + _WAVE_BAR_GAP)
     _badge_canvas = tk.Canvas(
-        inner, width=wave_w, height=_LOGO_SIZE,
+        row, width=wave_w, height=_LOGO_SIZE,
         bg=_BG, bd=0, highlightthickness=0,
     )
     _badge_canvas.pack(side=tk.LEFT)
 
     _badge_time = tk.Label(
-        inner, text="0:00", bg=_BG, fg=_FG2,
+        row, text="0:00", bg=_BG, fg=_FG2,
         font=("Segoe UI Variable Display", 11, "normal"),
         width=4, anchor="e",
     )
     _badge_time.pack(side=tk.LEFT, padx=(12, 0))
+
+    # Live partial transcription line — packed lazily when text first arrives
+    _badge_partial_lbl = tk.Label(
+        inner, text="", bg=_BG, fg=_FG2,
+        font=(_FONT_FAM_TEXT, 9), wraplength=300,
+        justify="left", anchor="w",
+    )
 
     _badge_label = None
     _badge_dot = None
@@ -592,6 +624,8 @@ def _build_text_badge(cfg: dict) -> None:
     """Lightweight text badge for too_short / not_ready toasts."""
     global _badge_win, _badge_label, _badge_dot
     global _badge_canvas, _badge_time, _badge_logo_lbl, _badge_logo_variants
+    global _badge_partial_lbl
+    _badge_partial_lbl = None
 
     _badge_win = tk.Toplevel(_root)
     _badge_win.overrideredirect(True)
@@ -746,6 +780,31 @@ def _draw_badge_frame() -> None:
         elif _badge_time is not None and _badge_state not in ("recording", "recording_task"):
             if _badge_time.cget("text") != "":
                 _badge_time.config(text="")
+    except Exception:
+        pass
+
+
+def _update_badge_partial(text: str) -> None:
+    """Show/refresh the live partial transcription line under the waveform."""
+    if not _badge_alive() or _badge_partial_lbl is None:
+        return
+    try:
+        disp = text if len(text) <= 160 else "…" + text[-160:]
+        if disp:
+            if not _badge_partial_lbl.winfo_ismapped():
+                _badge_partial_lbl.pack(fill=tk.X, pady=(6, 0))
+            _badge_partial_lbl.config(text=disp)
+        else:
+            _badge_partial_lbl.pack_forget()
+        # Badge grows with the text — recompute size and keep it anchored
+        # to the bottom-right corner.
+        _badge_win.update_idletasks()
+        w = _badge_win.winfo_reqwidth()
+        h = _badge_win.winfo_reqheight()
+        sw = _badge_win.winfo_screenwidth()
+        sh = _badge_win.winfo_screenheight()
+        _badge_win.geometry(f"{w}x{h}+{sw - w - 20}+{sh - h - 60}")
+        winfx.apply_rounded_region(_badge_win, radius=14)
     except Exception:
         pass
 
@@ -987,15 +1046,22 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         except Exception:
             pass
 
-    def on_insert() -> None:
+    def on_insert(submit: bool = False) -> None:
+        submit = submit and not task_mode
         result = entry.get("1.0", "end-1c").rstrip()
         if not empty:
             original = text.rstrip()
             if original != result:
                 try:
-                    profile.log_correction(original, result)
+                    promoted = profile.log_correction(original, result)
                 except Exception:
-                    pass
+                    promoted = []
+                for w_out, c_out in (promoted or []):
+                    show_toast(
+                        f'Learned: "{w_out}" → "{c_out or "(removed)"}" — will now auto-apply',
+                        kind="info", action_label="Forget",
+                        action_cb=(lambda w=w_out, c=c_out: profile.delete_rule(w, c)),
+                    )
 
         if task_mode:
             # Prime + close immediately, same as the normal Insert path below —
@@ -1068,7 +1134,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         inject.prime_foreground(hwnd)
         _close()
         to_paste = (" " + result) if append_var.get() else result
-        threading.Thread(target=inject.inject_text, args=(to_paste, hwnd), daemon=True).start()
+        target_fn = inject.inject_text_and_submit if submit else inject.inject_text
+        threading.Thread(target=target_fn, args=(to_paste, hwnd), daemon=True).start()
 
     def on_cancel() -> None:
         _close()
@@ -1158,6 +1225,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         outer.pack(side=tk.LEFT, padx=(0, 6))
 
     _chip(chip_row, "↵",       "Add to List" if task_mode else "Insert", accent=True, key_color=accent)
+    if not task_mode:
+        _chip(chip_row, "Ctrl+↵", "Insert & Send")
     _chip(chip_row, "Esc",     "Cancel")
     _chip(chip_row, "Ctrl+R",  "Re-record")
     _chip(chip_row, "Shift+↵", "Newline")
@@ -1167,7 +1236,11 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         def _on_return(e):
             on_insert()
             return "break"
+        def _on_ctrl_return(e):
+            on_insert(submit=True)
+            return "break"
         entry.bind("<Return>",  _on_return)
+        entry.bind("<Control-Return>", _on_ctrl_return)  # insert-and-send
         entry.bind("<Insert>",  _on_return)   # Insert key also pastes
         entry.bind("<Shift-Return>", lambda e: None)  # allow literal newline
         win.bind("<Insert>",    _on_return)   # belt-and-suspenders: fires if focus drifts off entry
@@ -1198,7 +1271,9 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     # The hook thread is not the Tkinter thread — marshal via _root.after().
     if not empty:
         def _global_commit():
-            _root.after(0, lambda: on_insert() if _preview_open else None)
+            # Ctrl held at commit time = insert-and-send (forward one Enter)
+            submit = bool(win32api.GetAsyncKeyState(0x11) & 0x8000)
+            _root.after(0, lambda s=submit: on_insert(submit=s) if _preview_open else None)
         try:
             _hooks.append(_keyboard.add_hotkey('insert', _global_commit, suppress=True))
             _hooks.append(_keyboard.add_hotkey('enter',  _global_commit, suppress=True))

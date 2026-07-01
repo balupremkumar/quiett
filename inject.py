@@ -55,6 +55,7 @@ _KEYEVENTF_EXTENDED = 0x0001
 _VK_RETURN = 0x0D
 _VK_TAB    = 0x09
 _VK_BACK   = 0x08
+_VK_Z      = 0x5A
 
 _INPUT_KEYBOARD = 1
 _MAPVK_VK_TO_VSC = 0
@@ -759,7 +760,50 @@ def _decide_method(hwnd: int) -> str:
     return "type"
 
 
+_last_insert: dict | None = None   # {"hwnd": int, "chars": int} of the newest insert
+
+
+def undo_last() -> bool:
+    """Undo the most recent successful insert by sending Ctrl+Z to its target.
+
+    One Ctrl+Z undoes a clipboard paste atomically in almost every app; typed
+    (KEYEVENTF_UNICODE) inserts may need the app's own undo grouping, which
+    modern editors also treat as one chunk.
+    """
+    global _last_insert
+    li = _last_insert
+    if not li:
+        return False
+    hwnd = li["hwnd"]
+    if not win32gui.IsWindow(hwnd):
+        return False
+    _force_foreground(hwnd)
+    time.sleep(0.15)
+    _wait_modifiers_released(timeout_ms=400)
+    _flush_all_modifiers()
+    time.sleep(0.03)
+    _send_keystroke([_VK_CONTROL], _VK_Z)
+    log("inject", f"undo_last: sent Ctrl+Z to hwnd={hwnd}")
+    _last_insert = None
+    return True
+
+
+def inject_text_and_submit(text: str, hwnd: int) -> None:
+    """Insert text, then forward a single Enter to the target (insert-and-send)."""
+    inject_text(text, hwnd)
+    if _paste_mode == "clipboard_only":
+        return
+    time.sleep(0.15)  # let the target app process the paste before Enter lands
+    _wait_modifiers_released(timeout_ms=600)
+    _flush_all_modifiers()
+    time.sleep(0.03)
+    _send_inputs([_make_vk_input(_VK_RETURN, key_up=False),
+                  _make_vk_input(_VK_RETURN, key_up=True)])
+    log("inject", "inject_text_and_submit: forwarded Enter")
+
+
 def inject_text(text: str, hwnd: int) -> None:
+    global _last_insert
     if not text:
         return
 
@@ -830,6 +874,7 @@ def inject_text(text: str, hwnd: int) -> None:
         sent = _send_unicode_text(text)
         log("inject", f"typed {sent} chars via KEYEVENTF_UNICODE")
         if sent > 0:
+            _last_insert = {"hwnd": hwnd, "chars": sent}
             return
         # SendInput inserted nothing (throttled / blocked / secure desktop). Safe to
         # fall back to clipboard paste because nothing landed — no duplication risk.
@@ -867,6 +912,8 @@ def inject_text(text: str, hwnd: int) -> None:
     if paste_blocked:
         # Leave text on clipboard so the manual Ctrl+V in the toast actually works.
         return
+
+    _last_insert = {"hwnd": hwnd, "chars": len(text)}
 
     def _restore():
         # Poll until clipboard no longer holds our injected text (paste consumed),

@@ -31,13 +31,18 @@ def init() -> None:
     _ensure_init()
 
 
-def log_correction(raw_text: str, edited_text: str) -> None:
-    """Diff raw transcription against user edit and update substitution counts."""
+def log_correction(raw_text: str, edited_text: str) -> list[tuple[str, str]]:
+    """Diff raw transcription against user edit and update substitution counts.
+
+    Returns the (whisper_out, correct_out) pairs that just crossed
+    MIN_OCCURRENCES with this correction — i.e. rules newly promoted to
+    auto-apply — so the caller can surface them to the user.
+    """
     _ensure_init()
     raw_words  = raw_text.strip().split()
     edit_words = edited_text.strip().split()
     if raw_words == edit_words:
-        return
+        return []
 
     matcher = difflib.SequenceMatcher(None, raw_words, edit_words, autojunk=False)
     now = datetime.now().isoformat()
@@ -56,8 +61,9 @@ def log_correction(raw_text: str, edited_text: str) -> None:
                 pairs.append((whisper_out, ""))
 
     if not pairs:
-        return
+        return []
 
+    promoted: list[tuple[str, str]] = []
     with _lock:
         with _connect() as conn:
             for whisper_out, correct_out in pairs:
@@ -71,6 +77,13 @@ def log_correction(raw_text: str, edited_text: str) -> None:
                     ON CONFLICT(whisper_out, correct_out)
                     DO UPDATE SET count=count+1, last_seen=excluded.last_seen
                 """, (whisper_out, correct_out, now))
+                row = conn.execute(
+                    "SELECT count FROM substitutions WHERE whisper_out=? AND correct_out=?",
+                    (whisper_out, correct_out),
+                ).fetchone()
+                if row and row[0] == MIN_OCCURRENCES:
+                    promoted.append((whisper_out, correct_out))
+    return promoted
 
 
 def get_active_rules() -> dict:
