@@ -553,11 +553,32 @@ def main() -> None:
     _agent_hk = _cfg.get("agent_hotkey", "ctrl+shift+c")
     if _cfg.get("agent_mode_enabled", False):
         try:
+            # Build the set of key names to watch for release
+            _agent_hk_keys: set[str] = set()
+            for _part in _agent_hk.lower().split("+"):
+                _part = _part.strip()
+                if _part == "ctrl":
+                    _agent_hk_keys.update(["ctrl", "left ctrl", "right ctrl"])
+                elif _part == "shift":
+                    _agent_hk_keys.update(["shift", "left shift", "right shift"])
+                elif _part == "alt":
+                    _agent_hk_keys.update(["alt", "left alt", "right alt"])
+                else:
+                    _agent_hk_keys.add(_part)
+
+            def _agent_key_up(event):
+                if (event.event_type == "up"
+                        and event.name in _agent_hk_keys
+                        and _agent_session
+                        and audio.is_recording()):
+                    audio.stop()
+
             _kb.add_hotkey(
                 _agent_hk,
                 lambda: _on_recording_start(agent=True) if transcribe.is_ready() and not audio.is_recording() else None,
                 suppress=False,
             )
+            _kb.hook(_agent_key_up)
             log("main", f"agent hotkey registered: {_agent_hk}")
         except Exception as exc:
             log_error("main", f"agent hotkey failed: {exc}")
