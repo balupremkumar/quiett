@@ -45,7 +45,6 @@ _badge_q:        queue.Queue = queue.Queue()
 _toast_q:        queue.Queue = queue.Queue()
 _flash_q:        queue.Queue = queue.Queue()
 _agent_q:        queue.Queue = queue.Queue()
-_rewrite_q:      queue.Queue = queue.Queue()
 _root:        tk.Tk | None = None
 _ready = threading.Event()
 
@@ -203,12 +202,6 @@ def set_rerecord_callback(fn) -> None:
 def show_agent_confirm(desc: str, confirm_cb) -> None:
     """Show a modal confirm gate for an agent action. Safe to call from any thread."""
     _agent_q.put({"desc": desc, "cb": confirm_cb})
-
-
-def show_rewrite_preview(selection: str, instruction: str, rewritten: str, hwnd: int) -> None:
-    """Show a rewrite preview panel for accept/reject. Safe to call from any thread."""
-    _rewrite_q.put({"selection": selection, "instruction": instruction,
-                    "rewritten": rewritten, "hwnd": hwnd})
 
 
 # ---------------------------------------------------------------------------
@@ -372,17 +365,6 @@ def _tick() -> None:
                 _open_agent_confirm(a["desc"], a["cb"])
             except Exception as exc:
                 print(f"agent confirm error: {exc}")
-        except queue.Empty:
-            break
-
-    # Drain rewrite preview queue
-    while True:
-        try:
-            r = _rewrite_q.get_nowait()
-            try:
-                _open_rewrite_preview(r["selection"], r["instruction"], r["rewritten"], r["hwnd"])
-            except Exception as exc:
-                print(f"rewrite preview error: {exc}")
         except queue.Empty:
             break
 
@@ -1354,86 +1336,6 @@ def _open_agent_confirm(desc: str, confirm_cb) -> None:
     win.focus_force()
 
 
-def _open_rewrite_preview(selection: str, instruction: str,
-                           rewritten: str, hwnd: int) -> None:
-    """Rewrite accept/reject panel. Runs on the tkinter thread."""
-    win = tk.Toplevel(_root)
-    win.title("Rewrite")
-    win.configure(bg=_BG)
-    win.resizable(False, False)
-    win.attributes("-topmost", True)
-    win.attributes("-alpha", 0.0)
-    winfx.apply_rounded_corners(win)
-
-    # Accent top bar (purple for rewrite)
-    tk.Frame(win, bg="#9333ea", height=3).pack(fill=tk.X, side=tk.TOP)
-
-    body = tk.Frame(win, bg=_BG)
-    body.pack(fill=tk.BOTH, expand=True, padx=24, pady=(18, 14))
-
-    tk.Label(body, text="Rewrite", bg=_BG, fg=_FG,
-             font=(_FONT_FAM_DISPLAY, 13, "bold")).pack(anchor="w")
-
-    tk.Label(body, text="Instruction:", bg=_BG, fg=_FG3, font=_FONT_HINT).pack(
-        anchor="w", pady=(10, 2))
-    tk.Label(body, text=instruction, bg=_BG2, fg=_FG, font=_FONT_BODY,
-             wraplength=400, justify="left", padx=10, pady=6).pack(fill=tk.X)
-
-    tk.Label(body, text="Before:", bg=_BG, fg=_FG3, font=_FONT_HINT).pack(
-        anchor="w", pady=(10, 2))
-    tk.Label(body, text=selection, bg=_BG2, fg=_FG2, font=_FONT_BODY,
-             wraplength=400, justify="left", padx=10, pady=6).pack(fill=tk.X)
-
-    tk.Label(body, text="After:", bg=_BG, fg=_FG3, font=_FONT_HINT).pack(
-        anchor="w", pady=(10, 2))
-
-    # Editable result
-    txt = tk.Text(body, height=4, bg=_BG2, fg=_FG, font=_FONT_BODY,
-                  bd=0, padx=10, pady=6, wrap="word",
-                  insertbackground=_FG, relief="flat", highlightthickness=0)
-    txt.insert("1.0", rewritten)
-    txt.pack(fill=tk.X)
-
-    hint = tk.Label(body, text="Enter to apply  ·  Esc to cancel",
-                    bg=_BG, fg=_FG3, font=_FONT_HINT)
-    hint.pack(anchor="w", pady=(6, 0))
-
-    btns = tk.Frame(body, bg=_BG)
-    btns.pack(fill=tk.X, pady=(12, 0))
-
-    def do_apply():
-        result = txt.get("1.0", "end-1c").strip()
-        win.destroy()
-        if result:
-            threading.Thread(
-                target=lambda: inject.inject_text(result, hwnd),
-                daemon=True,
-            ).start()
-
-    def do_cancel():
-        win.destroy()
-
-    tk.Button(btns, text="Cancel", command=do_cancel,
-              bg=_BG2, fg=_FG2, activebackground=_BG3, activeforeground=_FG,
-              relief="flat", bd=0, font=_FONT_BTN, padx=12, pady=6,
-              cursor="hand2").pack(side=tk.RIGHT, padx=(6, 0))
-    tk.Button(btns, text="Apply", command=do_apply,
-              bg="#9333ea", fg="#ffffff", activebackground="#7e22ce",
-              activeforeground="#ffffff", relief="flat", bd=0,
-              font=_FONT_BTN, padx=16, pady=6, cursor="hand2").pack(side=tk.RIGHT)
-
-    win.bind("<Return>", lambda e: do_apply() if not isinstance(e.widget, tk.Text) else None)
-    win.bind("<Escape>", lambda _: do_cancel())
-
-    win.update_idletasks()
-    sw = win.winfo_screenwidth()
-    sh = win.winfo_screenheight()
-    w  = win.winfo_reqwidth()
-    h  = win.winfo_reqheight()
-    win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
-
-    winfx.fade_in(win, target=0.97, duration_ms=150)
-    win.focus_force()
 
 
 def _open_history() -> None:
@@ -2036,26 +1938,6 @@ def _open_settings() -> None:
             rb.pack(side=tk.LEFT, padx=(0, 16))
         return p
 
-    def build_vibe() -> tk.Frame:
-        p = tk.Frame(pages_holder, bg=_BG)
-        _h2(p, "Vibe Coding").pack(fill=tk.X, padx=22, pady=(18, 6))
-        _note(p, "Restructures dictation into a clean prompt via Qwen3-8B (local, GPU).").pack(
-            fill=tk.X, padx=22, pady=(0, 12))
-
-        vibe_var = tk.BooleanVar(value=bool(cfg.get("vibe_mode", False)))
-        state["vibe_var"] = vibe_var
-        _toggle_row(p, "Enable vibe mode", vibe_var,
-                    sub="Adds ~2–3 seconds for the reformat pass.")
-
-        backend_var = tk.StringVar(value=cfg.get("vibe_mode_backend", "lmstudio"))
-        state["backend_var"] = backend_var
-        _label(p, "Backend").pack(fill=tk.X, padx=22, pady=(16, 2))
-        be_menu = tk.OptionMenu(p, backend_var, "lmstudio", "rules")
-        be_menu.config(bg=_BG2, fg=_FG, activebackground=_BORDER, activeforeground=_FG,
-                       relief="flat", highlightthickness=0, font=_FONT_BODY)
-        be_menu.pack(anchor="w", padx=22)
-        return p
-
     def build_agent() -> tk.Frame:
         p = tk.Frame(pages_holder, bg=_BG)
         _h2(p, "Agent Command Mode").pack(fill=tk.X, padx=22, pady=(18, 6))
@@ -2135,14 +2017,13 @@ def _open_settings() -> None:
         return p
 
     PAGE_DEFS = [
-        ("Audio",              build_audio),
-        ("Hotkey",             build_hotkey),
-        ("Transcription",      build_transcription),
-        ("Behaviour",          build_behaviour),
-        ("Appearance",         build_appearance),
-        ("Vibe Coding",        build_vibe),
-        ("Agent Commands",     build_agent),
-        ("To-Do List",         build_todo),
+        ("Audio",          build_audio),
+        ("Hotkey",         build_hotkey),
+        ("Transcription",  build_transcription),
+        ("Behaviour",      build_behaviour),
+        ("Appearance",     build_appearance),
+        ("Agent Commands", build_agent),
+        ("To-Do List",     build_todo),
     ]
 
     # ── Build sidebar items ────────────────────────────────────────────────
@@ -2270,8 +2151,6 @@ def _open_settings() -> None:
             "custom_vocabulary":           vocab,
             "input_device":                mic_idx,
             "history_paused":              state["history_paused_var"].get(),
-            "vibe_mode":                   state["vibe_var"].get(),
-            "vibe_mode_backend":           state["backend_var"].get(),
             "agent_command_mode_enabled":  state["agent_cmd_var"].get(),
             "lmstudio_model":              state["lmstudio_model_var"].get().strip() or "qwen/qwen3-8b",
             "theme":                       state["theme_var"].get(),

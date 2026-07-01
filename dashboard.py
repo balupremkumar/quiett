@@ -658,30 +658,10 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
-      <div class="s-sec-ttl">Vibe Mode (LLM cleanup)</div>
+      <div class="s-sec-ttl">Agent Command Mode</div>
       <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Enable Vibe Mode</div><div class="s-lbl-s">Reformat dictation with a local LLM. Uncheck to free VRAM.</div></div>
-        <div class="tog" data-key="vibe_mode" onclick="togClick(this)"><div class="tog-k"></div></div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Backend</div></div>
-        <select class="sel-in" data-key="vibe_mode_backend">
-          <option value="lmstudio">LM Studio (local)</option>
-          <option value="api">Claude API</option>
-          <option value="rules">Rule-based only</option>
-        </select>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">LM Studio model</div><div class="s-lbl-s">Model identifier as shown in lms ls</div></div>
+        <div class="s-lbl"><div class="s-lbl-t">LM Studio model</div><div class="s-lbl-s">Model identifier as shown in lms ls (e.g. qwen/qwen2.5-1.5b-instruct)</div></div>
         <input class="t-in wide" type="text" data-key="lmstudio_model">
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Profile</div><div class="s-lbl-s">Prompt style applied during cleanup</div></div>
-        <select class="sel-in" data-key="vibe_profile">
-          <option value="coding">Coding</option>
-          <option value="chat">Chat</option>
-          <option value="longform">Long-form</option>
-        </select>
       </div>
     </div>
 

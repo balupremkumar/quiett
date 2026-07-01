@@ -47,8 +47,7 @@ from logger import log, error as log_error
 _cfg: dict = {}
 _cfg_lock = threading.Lock()
 _task_session: bool = False   # True when Ctrl+Shift+Alt was held at recording start
-_rewrite_session: bool = False  # True when Ctrl+Alt+R triggered this recording
-_agent_session: bool = False    # True when Ctrl+Alt+C triggered this recording
+_agent_session: bool = False  # True when Ctrl+Shift+C triggered this recording
 
 _HOT_RELOAD_INTERVAL = 30  # seconds
 
@@ -77,16 +76,13 @@ _CONFIG_DEFAULTS = {
     "electron_paste_method":       "ctrl_v",
     "paste_mode":                  "auto",
     "hotkey_mode":                 "hold",
-    "rewrite_hotkey":              "ctrl+alt+r",
-    "agent_hotkey":                "ctrl+alt+c",
+    "agent_hotkey":                "ctrl+shift+c",
     "agent_mode_enabled":          False,
     "agent_command_mode_enabled":  False,
     "agent_trigger_phrases":       ["hey computer", "computer run", "computer open"],
     "api_server_enabled":          True,
     "api_server_port":             8090,
-    "vibe_mode":                   False,
-    "vibe_mode_backend":           "lmstudio",
-    "lmstudio_model":              "qwen/qwen3-8b",
+    "lmstudio_model":              "qwen/qwen2.5-1.5b-instruct",
     "taskflow_enabled":            True,
     "taskflow_trigger_phrases":    ["add this to TaskFlow", "add to my tasks", "add a task"],
     "taskflow_trailing_trigger_phrases": ["add that to TaskFlow", "add that to my tasks",
@@ -333,7 +329,7 @@ def main() -> None:
     # ------------------------------------------------------------------
 
     def _run_transcription(chunks: list, hwnd: int, task_session: bool = False,
-                           rewrite_session: bool = False, agent_session: bool = False) -> None:
+                           agent_session: bool = False) -> None:
         cfg = _get_cfg()
 
         # QW-5: per-app vocabulary/prompt override based on foreground exe
@@ -403,56 +399,15 @@ def main() -> None:
                 threading.Thread(target=_run_agent, daemon=True).start()
             return
 
-        # Ctrl+Alt+R rewrite mode: capture selection via clipboard, rewrite with LLM
-        if rewrite_session and text.strip():
-            instruction = text.strip()
-            tray.set_state("idle")
-            preview.hide_badge()
-            if not llm_client.is_available():
-                preview.show_toast("LM Studio not running — rewrite requires local LLM.", kind="warn")
-                return
-            preview.show_badge("reformatting")
-            def _run_rewrite():
-                try:
-                    # Selection was captured via Ctrl+C just before recording started
-                    selection = inject._clipboard_get_text().strip()
-                    if not selection:
-                        preview.hide_badge()
-                        preview.show_toast("No text selected — select text first, then Ctrl+Alt+R.", kind="warn")
-                        return
-                    rewritten = reformat.rewrite(selection, instruction)
-                    preview.hide_badge()
-                    preview.show_rewrite_preview(selection, instruction, rewritten, hwnd)
-                except Exception as exc:
-                    log_error("main", f"rewrite error: {exc}")
-                    preview.hide_badge()
-                    preview.show_toast("Rewrite error — check app.log.", kind="error")
-
-            threading.Thread(target=_run_rewrite, daemon=True).start()
-            return
-
         # Ctrl+Shift+Alt direct-capture mode: skip all phrase matching and route
         # the full transcript straight to the task confirm panel.
         if task_session and text.strip():
-            raw_text = text
-            reformat_backend = None
-            if cfg.get("vibe_mode") and reformat.is_ready():
-                preview.show_badge("reformatting")
-                try:
-                    text = reformat.run(text)
-                    reformat_backend = reformat.last_backend_used()
-                except Exception as exc:
-                    log_error("main", f"reformat error (task session): {exc}")
-                finally:
-                    preview.hide_badge()
             preview.show(
                 text, hwnd,
                 empty=False,
                 confidence=confidence,
                 words=words,
                 auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
-                raw=raw_text if cfg.get("vibe_mode") and raw_text != text else None,
-                reformat_backend=reformat_backend,
                 task_mode=True,
             )
             return
@@ -512,64 +467,39 @@ def main() -> None:
             inject.inject_text(text.strip(), hwnd)
             return
 
-        # Vibe mode: reformat raw Whisper text into a structured coding prompt.
-        # raw_text preserved so the preview Raw toggle can show the original.
-        raw_text = text
-        reformat_backend = None
-        if cfg.get("vibe_mode") and text.strip() and reformat.is_ready():
-            preview.show_badge("reformatting")
-            try:
-                text = reformat.run(text)
-                reformat_backend = reformat.last_backend_used()
-            except Exception as exc:
-                log_error("main", f"reformat error: {exc}")
-            finally:
-                preview.hide_badge()
-
         preview.show(
             text, hwnd,
             empty=not text.strip(),
             confidence=confidence,
             words=None if task_extracted else words,
             auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
-            raw=raw_text if cfg.get("vibe_mode") and raw_text != text else None,
-            reformat_backend=reformat_backend,
         )
 
     def _on_audio_stop(chunks: list) -> None:
         hotkey.set_external_recording(False)  # release hold-mode suppression
         hwnd = inject.capture_foreground()
-        task_mode    = _task_session
-        rewrite_mode = _rewrite_session
-        agent_mode   = _agent_session
+        task_mode  = _task_session
+        agent_mode = _agent_session
         tray.set_state("processing")
         preview.show_badge("processing")
         threading.Thread(
             target=_run_transcription,
-            args=(chunks, hwnd, task_mode, rewrite_mode, agent_mode),
+            args=(chunks, hwnd, task_mode, agent_mode),
             daemon=True,
         ).start()
 
-    def _on_recording_start(rewrite: bool = False, agent: bool = False) -> None:
-        global _task_session, _rewrite_session, _agent_session
-        _rewrite_session = rewrite
-        _agent_session   = agent
+    def _on_recording_start(agent: bool = False) -> None:
+        global _task_session, _agent_session
+        _agent_session = agent
         _task_session = bool(
-            not rewrite and not agent
+            not agent
             and _get_cfg().get("taskflow_direct_capture_modifiers")
             and (win32api.GetAsyncKeyState(0x10) & 0x8000)  # VK_SHIFT
         )
-        if rewrite or agent:
+        if agent:
             hotkey.set_external_recording(True)
-        if rewrite:
-            # Capture selection before recording starts
-            threading.Thread(
-                target=lambda: inject._send_keystroke([inject._VK_CONTROL], ord('C')),
-                daemon=True,
-            ).start()
-            import time as _t; _t.sleep(0.08)
         preview.close_current_preview()
-        edge = "#9333ea" if rewrite else ("#f97316" if agent else ("#22c55e" if _task_session else "#3b82f6"))
+        edge = "#f97316" if agent else ("#22c55e" if _task_session else "#3b82f6")
         preview.flash_screen_edge(edge)
         tray.set_state("recording")
         badge = "recording_task" if _task_session else "recording"
@@ -618,21 +548,9 @@ def main() -> None:
     )
     hotkey.start()
 
-    # Ctrl+Alt+R — rewrite/edit mode
+    # Ctrl+Shift+C — agent/command mode
     import keyboard as _kb
-    _rewrite_hk = _cfg.get("rewrite_hotkey", "ctrl+alt+r")
-    try:
-        _kb.add_hotkey(
-            _rewrite_hk,
-            lambda: _on_recording_start(rewrite=True) if transcribe.is_ready() and not audio.is_recording() else None,
-            suppress=False,
-        )
-        log("main", f"rewrite hotkey registered: {_rewrite_hk}")
-    except Exception as exc:
-        log_error("main", f"rewrite hotkey failed: {exc}")
-
-    # Ctrl+Alt+C — agent/command mode
-    _agent_hk = _cfg.get("agent_hotkey", "ctrl+alt+c")
+    _agent_hk = _cfg.get("agent_hotkey", "ctrl+shift+c")
     if _cfg.get("agent_mode_enabled", False):
         try:
             _kb.add_hotkey(
@@ -675,16 +593,9 @@ def main() -> None:
     atexit.register(transcribe.shutdown)
 
     def _load_reformat() -> None:
-        reformat.load(
-            backend=_cfg.get("vibe_mode_backend", "lmstudio"),
-            model=_cfg.get("lmstudio_model", "qwen/qwen3-8b"),
-        )
+        reformat.load(model=_cfg.get("lmstudio_model", "qwen/qwen2.5-1.5b-instruct"))
 
-    # Only load the LLM backend (launches LM Studio, loads the model onto the
-    # GPU) when vibe mode is actually on — otherwise it sits on standby and
-    # gets loaded lazily the moment vibe mode is enabled (see _on_toggle_vibe
-    # and the vibe_mode hot-reload sync below).
-    if _cfg.get("vibe_mode", False) or _cfg.get("agent_command_mode_enabled", False):
+    if _cfg.get("agent_command_mode_enabled", False):
         threading.Thread(target=_load_reformat, daemon=True).start()
 
     # ------------------------------------------------------------------
@@ -752,10 +663,7 @@ def main() -> None:
         toast_fn=preview.show_toast,
         restart_whisper_fn=_restart_whisper,
         restart_lmstudio_fn=_restart_lmstudio,
-        vibe_enabled_fn=lambda: (
-            _get_cfg().get("vibe_mode", False) or
-            _get_cfg().get("agent_command_mode_enabled", False)
-        ),
+        vibe_enabled_fn=lambda: _get_cfg().get("agent_command_mode_enabled", False),
     )
     health.start()
 
@@ -801,16 +709,6 @@ def main() -> None:
                 hotkey.rebind(new_keys)
                 with _cfg_lock:
                     _cfg["_active_hotkey"] = new_keys
-            # Sync vibe_mode state into tray menu
-            new_vibe = validated.get("vibe_mode", False)
-            if new_vibe != _cfg.get("vibe_mode"):
-                with _cfg_lock:
-                    _cfg["vibe_mode"] = new_vibe
-                tray.set_vibe_mode(new_vibe)
-                if new_vibe and not reformat.is_ready():
-                    threading.Thread(target=_load_reformat, daemon=True).start()
-                elif not new_vibe and not _get_cfg().get("agent_command_mode_enabled", False) and reformat.is_ready():
-                    threading.Thread(target=reformat.unload, daemon=True).start()
             # Sync agent_command_mode_enabled into tray menu
             new_agent_cmd = validated.get("agent_command_mode_enabled", False)
             if new_agent_cmd != _cfg.get("agent_command_mode_enabled"):
@@ -819,7 +717,7 @@ def main() -> None:
                 tray.set_agent_command_mode(new_agent_cmd)
                 if new_agent_cmd and not reformat.is_ready():
                     threading.Thread(target=_load_reformat, daemon=True).start()
-                elif not new_agent_cmd and not _get_cfg().get("vibe_mode", False) and reformat.is_ready():
+                elif not new_agent_cmd and reformat.is_ready():
                     threading.Thread(target=reformat.unload, daemon=True).start()
             # Sync paste_mode state into tray menu
             new_paste_mode = validated.get("paste_mode", "auto")
@@ -841,30 +739,13 @@ def main() -> None:
     # Tray
     # ------------------------------------------------------------------
 
-    def _on_toggle_vibe(enabled: bool) -> None:
-        global _cfg
-        with _cfg_lock:
-            _cfg["vibe_mode"] = enabled
-        if enabled and not reformat.is_ready():
-            threading.Thread(target=_load_reformat, daemon=True).start()
-        elif not enabled and not _get_cfg().get("agent_command_mode_enabled", False) and reformat.is_ready():
-            threading.Thread(target=reformat.unload, daemon=True).start()
-        try:
-            with open("config.json") as f:
-                raw = json.load(f)
-            raw["vibe_mode"] = enabled
-            with open("config.json", "w") as f:
-                json.dump(raw, f, indent=2)
-        except Exception:
-            pass
-
     def _on_toggle_agent_command_mode(enabled: bool) -> None:
         global _cfg
         with _cfg_lock:
             _cfg["agent_command_mode_enabled"] = enabled
         if enabled and not reformat.is_ready():
             threading.Thread(target=_load_reformat, daemon=True).start()
-        elif not enabled and not _get_cfg().get("vibe_mode", False) and reformat.is_ready():
+        elif not enabled and reformat.is_ready():
             threading.Thread(target=reformat.unload, daemon=True).start()
         try:
             with open("config.json") as f:
@@ -896,32 +777,11 @@ def main() -> None:
         except Exception:
             pass
 
-    def _on_set_vibe_profile(name: str) -> None:
-        global _cfg
-        reformat.set_profile(name)
-        with _cfg_lock:
-            _cfg["vibe_profile"] = name
-        try:
-            with open("config.json") as f:
-                raw = json.load(f)
-            raw["vibe_profile"] = name
-            with open("config.json", "w") as f:
-                json.dump(raw, f, indent=2)
-        except Exception:
-            pass
-
-    # Apply persisted profile on startup
-    reformat.set_profile(_cfg.get("vibe_profile", "coding"))
-
     tray.configure(
         on_view_history=lambda: dashboard.open("history"),
         on_toggle_pause=hotkey.set_paused,
         on_view_profile=lambda: dashboard.open("home"),
         on_open_settings=lambda: dashboard.open("settings"),
-        on_toggle_vibe=_on_toggle_vibe,
-        vibe_mode=_cfg.get("vibe_mode", False),
-        on_set_vibe_profile=_on_set_vibe_profile,
-        vibe_profile=_cfg.get("vibe_profile", "coding"),
         on_relaunch_taskflow=lambda: threading.Thread(target=taskflow.ensure_running, daemon=True).start(),
         on_toggle_clipboard_only=_on_toggle_clipboard_only,
         clipboard_only=_cfg.get("paste_mode", "auto") == "clipboard_only",

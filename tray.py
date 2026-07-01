@@ -237,11 +237,6 @@ def _stop_pulse() -> None:
 
 
 _on_open_settings = None
-_on_toggle_vibe   = None
-_on_set_vibe_profile = None
-_vibe_mode        = False
-_vibe_profile     = "coding"
-_vibe_profiles    = ("coding", "chat", "longform")
 _on_toggle_clipboard_only = None
 _clipboard_only   = False
 _on_relaunch_taskflow = None
@@ -253,23 +248,16 @@ _agent_command_mode = False
 
 def configure(on_view_history, on_toggle_pause=None,
               on_view_profile=None, on_open_settings=None,
-              on_toggle_vibe=None, vibe_mode: bool = False,
-              on_set_vibe_profile=None, vibe_profile: str = "coding",
               on_toggle_clipboard_only=None, clipboard_only: bool = False,
               on_relaunch_taskflow=None,
               on_toggle_agent_command_mode=None, agent_command_mode: bool = False) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
-    global _on_toggle_vibe, _vibe_mode, _on_set_vibe_profile, _vibe_profile
     global _on_toggle_clipboard_only, _clipboard_only, _on_relaunch_taskflow
     global _on_toggle_agent_command_mode, _agent_command_mode
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
     _on_open_settings = on_open_settings
-    _on_toggle_vibe   = on_toggle_vibe
-    _on_set_vibe_profile = on_set_vibe_profile
-    _vibe_mode        = vibe_mode
-    _vibe_profile     = vibe_profile
     _on_toggle_clipboard_only = on_toggle_clipboard_only
     _clipboard_only   = clipboard_only
     _on_relaunch_taskflow = on_relaunch_taskflow
@@ -294,14 +282,6 @@ def set_taskflow_status(running: bool) -> None:
         _taskflow_status = new_status
         if _icon is not None:
             _icon.update_menu()
-
-
-def set_vibe_mode(enabled: bool) -> None:
-    """Keep tray menu in sync when vibe_mode changes externally (e.g. hot-reload)."""
-    global _vibe_mode
-    _vibe_mode = enabled
-    if _icon is not None:
-        _icon.update_menu()
 
 
 def set_clipboard_only(enabled: bool) -> None:
@@ -377,13 +357,6 @@ def run() -> None:
         if _on_open_settings:
             _on_open_settings()
 
-    def _toggle_vibe(icon, item):
-        global _vibe_mode
-        _vibe_mode = not _vibe_mode
-        if _on_toggle_vibe:
-            _on_toggle_vibe(_vibe_mode)
-        icon.update_menu()
-
     def _toggle_clipboard_only(icon, item):
         global _clipboard_only
         _clipboard_only = not _clipboard_only
@@ -410,30 +383,9 @@ def run() -> None:
     def _task_count_label(_item) -> str:
         return f"Tasks added this session: {_task_count}"
 
-    def _make_profile_setter(name: str):
-        def _set(icon, item):
-            global _vibe_profile
-            _vibe_profile = name
-            if _on_set_vibe_profile:
-                _on_set_vibe_profile(name)
-            icon.update_menu()
-        return _set
-
-    profile_menu = pystray.Menu(*[
-        pystray.MenuItem(
-            p.capitalize(),
-            _make_profile_setter(p),
-            checked=lambda item, p=p: _vibe_profile == p,
-            radio=True,
-        )
-        for p in _vibe_profiles
-    ])
-
     menu = pystray.Menu(
         pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
         pystray.MenuItem("Agent Command Mode", _toggle_agent_command_mode, checked=lambda item: _agent_command_mode),
-        pystray.MenuItem("Vibe Mode", _toggle_vibe, checked=lambda item: _vibe_mode),
-        pystray.MenuItem("Vibe Profile", profile_menu),
         pystray.MenuItem("Clipboard Only", _toggle_clipboard_only, checked=lambda item: _clipboard_only),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(_taskflow_label, _relaunch_taskflow),
