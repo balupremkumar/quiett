@@ -364,7 +364,7 @@ def _tick() -> None:
             try:
                 _open_agent_confirm(a["desc"], a["cb"])
             except Exception as exc:
-                print(f"agent confirm error: {exc}")
+                log_error("preview", f"agent confirm error: {exc}")
         except queue.Empty:
             break
 
@@ -1282,7 +1282,7 @@ def _open_agent_confirm(desc: str, confirm_cb) -> None:
     win.resizable(False, False)
     win.attributes("-topmost", True)
     win.attributes("-alpha", 0.0)
-    winfx.apply_rounded_corners(win)
+    winfx.apply_rounded_region(win, radius=12)
 
     # Accent top bar (orange for agent)
     accent_bar = tk.Frame(win, bg="#f97316", height=3)
