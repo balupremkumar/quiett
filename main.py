@@ -593,9 +593,12 @@ def main() -> None:
     atexit.register(transcribe.shutdown)
 
     def _load_reformat() -> None:
-        reformat.load(model=_cfg.get("lmstudio_model", "qwen2.5-1.5b-instruct"))
+        m = _cfg.get("lmstudio_model", "qwen2.5-1.5b-instruct")
+        agent.set_model(m)
+        reformat.load(model=m)
 
     if _cfg.get("agent_command_mode_enabled", False):
+        agent.set_model(_cfg.get("lmstudio_model", "qwen2.5-1.5b-instruct"))
         threading.Thread(target=_load_reformat, daemon=True).start()
 
     # ------------------------------------------------------------------
@@ -744,6 +747,7 @@ def main() -> None:
         with _cfg_lock:
             _cfg["agent_command_mode_enabled"] = enabled
         if enabled and not reformat.is_ready():
+            agent.set_model(_get_cfg().get("lmstudio_model", "qwen2.5-1.5b-instruct"))
             threading.Thread(target=_load_reformat, daemon=True).start()
         elif not enabled and reformat.is_ready():
             threading.Thread(target=reformat.unload, daemon=True).start()

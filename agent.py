@@ -45,6 +45,13 @@ Examples:
 """
 
 _LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
+_model = "qwen2.5-1.5b-instruct"
+
+
+def set_model(model: str) -> None:
+    global _model
+    _model = model
+
 
 # Commands that are explicitly blocked for safety
 _BLOCKED_CMD_PATTERNS = re.compile(
@@ -60,7 +67,7 @@ def interpret(command: str) -> dict:
         return {"action": "unknown"}
 
     payload = json.dumps({
-        "model": "local-model",
+        "model": _model,
         "messages": [
             {"role": "system", "content": _AGENT_SYSTEM},
             {"role": "user",   "content": command.strip()},
