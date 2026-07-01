@@ -244,16 +244,19 @@ _taskflow_status  = "unknown"   # "running" | "down" | "unknown"
 _task_count       = 0           # tasks added to TaskFlow this session
 _on_toggle_agent_command_mode = None
 _agent_command_mode = False
+_on_rebuild_voice_profile = None
 
 
 def configure(on_view_history, on_toggle_pause=None,
               on_view_profile=None, on_open_settings=None,
               on_toggle_clipboard_only=None, clipboard_only: bool = False,
               on_relaunch_taskflow=None,
-              on_toggle_agent_command_mode=None, agent_command_mode: bool = False) -> None:
+              on_toggle_agent_command_mode=None, agent_command_mode: bool = False,
+              on_rebuild_voice_profile=None) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
     global _on_toggle_clipboard_only, _clipboard_only, _on_relaunch_taskflow
     global _on_toggle_agent_command_mode, _agent_command_mode
+    global _on_rebuild_voice_profile
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
@@ -263,6 +266,7 @@ def configure(on_view_history, on_toggle_pause=None,
     _on_relaunch_taskflow = on_relaunch_taskflow
     _on_toggle_agent_command_mode = on_toggle_agent_command_mode
     _agent_command_mode = agent_command_mode
+    _on_rebuild_voice_profile = on_rebuild_voice_profile
 
 
 def increment_task_count() -> None:
@@ -375,6 +379,10 @@ def run() -> None:
         if _on_relaunch_taskflow:
             _on_relaunch_taskflow()
 
+    def _rebuild_voice_profile(icon, item):
+        if _on_rebuild_voice_profile:
+            _on_rebuild_voice_profile()
+
     def _taskflow_label(_item) -> str:
         if _taskflow_status == "unknown":
             return "TaskFlow: —"
@@ -393,6 +401,7 @@ def run() -> None:
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("View History",    _view_history),
         pystray.MenuItem("Speech Profile",  _view_profile),
+        pystray.MenuItem("Rebuild Voice Profile", _rebuild_voice_profile),
         pystray.MenuItem("Settings",        _open_settings),
         pystray.MenuItem(lambda _: "Resume" if _paused else "Pause", _toggle_pause),
         pystray.MenuItem("Open Config",     _open_config),

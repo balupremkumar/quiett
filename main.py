@@ -45,6 +45,7 @@ import reformat
 import taskflow
 import tray
 import transcribe
+import voiceprofile
 from logger import log, error as log_error
 
 _cfg: dict = {}
@@ -104,6 +105,7 @@ _CONFIG_DEFAULTS = {
     "retain_audio":                True,
     "retain_audio_max_files":      200,
     "retain_audio_min_seconds":    3.0,
+    "voice_profile_max_samples":   10,
 }
 
 _RECORDINGS_DIR = "recordings"
@@ -229,6 +231,10 @@ def _validate_config(raw: dict) -> dict:
         cfg["retain_audio_min_seconds"] = max(0.0, float(cfg.get("retain_audio_min_seconds", 3.0)))
     except (TypeError, ValueError):
         cfg["retain_audio_min_seconds"] = 3.0
+    try:
+        cfg["voice_profile_max_samples"] = max(1, int(cfg.get("voice_profile_max_samples", 10)))
+    except (TypeError, ValueError):
+        cfg["voice_profile_max_samples"] = 10
     return cfg
 
 
@@ -952,6 +958,18 @@ def main() -> None:
         except Exception:
             pass
 
+    def _on_rebuild_voice_profile() -> None:
+        def _worker() -> None:
+            try:
+                result = voiceprofile.rebuild(
+                    max_samples=_get_cfg().get("voice_profile_max_samples", 10))
+                preview.show_toast(f"Voice profile: {result['message']}", kind="info")
+            except Exception as exc:
+                log_error("main", f"voice profile rebuild failed: {exc}")
+                preview.show_toast("Voice profile rebuild failed — check app.log.",
+                                   kind="error")
+        threading.Thread(target=_worker, daemon=True).start()
+
     tray.configure(
         on_view_history=lambda: dashboard.open("history"),
         on_toggle_pause=hotkey.set_paused,
@@ -962,6 +980,7 @@ def main() -> None:
         clipboard_only=_cfg.get("paste_mode", "auto") == "clipboard_only",
         on_toggle_agent_command_mode=_on_toggle_agent_command_mode,
         agent_command_mode=_cfg.get("agent_command_mode_enabled", False),
+        on_rebuild_voice_profile=_on_rebuild_voice_profile,
     )
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()
