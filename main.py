@@ -375,23 +375,36 @@ def main() -> None:
                 preview.show_badge("reformatting")
                 def _run_agent():
                     try:
-                        action = agent.interpret(text.strip())
-                        desc   = agent.describe(action)
+                        actions = agent.interpret(text.strip())
                         preview.hide_badge()
-                        if action.get("action") == "unknown":
+                        known = [a for a in actions if a.get("action") != "unknown"]
+                        if not known:
                             preview.show_toast(f"Didn't understand: {text.strip()}", kind="warn")
                             return
 
-                        def _do_execute():
-                            ok = agent.execute(
-                                action,
-                                inject_fn=lambda t, h: inject.inject_text(t, h or hwnd),
-                            )
-                            if not ok:
-                                preview.show_toast(f"Action failed: {desc}", kind="warn")
+                        def _add_task_fn(title: str) -> bool:
+                            if not taskflow.check_health():
+                                return False
+                            spec = taskflow.build_task_spec(title)
+                            result = taskflow.create_task_from_spec(spec)
+                            if result:
+                                tray.increment_task_count()
+                            return bool(result)
 
-                        if action.get("action") == "run_command":
-                            preview.show_agent_confirm(desc, _do_execute)
+                        def _do_execute():
+                            for action in known:
+                                ok = agent.execute(
+                                    action,
+                                    inject_fn=lambda t, h: inject.inject_text(t, h or hwnd),
+                                    add_task_fn=_add_task_fn,
+                                )
+                                if not ok:
+                                    preview.show_toast(
+                                        f"Failed: {agent.describe([action])}", kind="warn"
+                                    )
+
+                        if any(a.get("action") == "run_command" for a in known):
+                            preview.show_agent_confirm(agent.describe(known), _do_execute)
                         else:
                             _do_execute()
                     except Exception as exc:
