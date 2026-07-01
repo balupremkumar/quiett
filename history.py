@@ -9,12 +9,14 @@ MAX_ENTRIES = 100
 _lock = threading.Lock()
 
 
-def save(text: str, source: str | None = None) -> None:
+def save(text: str, source: str | None = None, audio: str | None = None) -> None:
     with _lock:
         entries = _load()
         entry = {"timestamp": datetime.now().isoformat(), "text": text}
         if source:
             entry["source"] = source
+        if audio:
+            entry["audio"] = audio  # filename in recordings/ (voice-sample dataset)
         entries.insert(0, entry)
         _write(entries[:MAX_ENTRIES])
 

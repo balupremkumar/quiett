@@ -20,9 +20,11 @@ Not hot-reloadable (require restart): model, hotkey
 import atexit
 import ctypes
 import json
+import os
 import sys
 import threading
 import time
+from datetime import datetime
 
 import win32api
 import win32event
@@ -99,7 +101,46 @@ _CONFIG_DEFAULTS = {
     "snippets":                    {},
     "repaste_hotkey":              "ctrl+shift+space",
     "live_preview_enabled":        True,
+    "retain_audio":                True,
+    "retain_audio_max_files":      200,
+    "retain_audio_min_seconds":    3.0,
 }
+
+_RECORDINGS_DIR = "recordings"
+
+
+def _save_recording(chunks: list, cfg: dict) -> str | None:
+    """Keep the raw audio of this dictation as a WAV in recordings/.
+
+    Builds the voice-sample dataset for future voice cloning and enables
+    re-transcribing past dictations. Recordings shorter than
+    retain_audio_min_seconds are skipped (too short to be useful samples);
+    the directory is pruned to the newest retain_audio_max_files.
+    Returns the saved filename, or None.
+    """
+    if not cfg.get("retain_audio", True):
+        return None
+    try:
+        duration = sum(len(c) for c in chunks) / audio.SAMPLE_RATE
+        if duration < float(cfg.get("retain_audio_min_seconds", 3.0)):
+            return None
+        os.makedirs(_RECORDINGS_DIR, exist_ok=True)
+        fname = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3] + ".wav"
+        with open(os.path.join(_RECORDINGS_DIR, fname), "wb") as f:
+            f.write(transcribe._chunks_to_wav_bytes(chunks))
+        cap = max(0, int(cfg.get("retain_audio_max_files", 200)))
+        if cap:
+            files = sorted(f for f in os.listdir(_RECORDINGS_DIR)
+                           if f.endswith(".wav"))
+            for old in files[:-cap]:
+                try:
+                    os.remove(os.path.join(_RECORDINGS_DIR, old))
+                except OSError:
+                    pass
+        return fname
+    except Exception as exc:
+        log_error("main", f"retain audio failed: {exc}")
+        return None
 
 _VALID_POSITIONS = {"cursor", "top-right", "bottom-right", "top-left", "bottom-left", "center"}
 
@@ -179,6 +220,15 @@ def _validate_config(raw: dict) -> dict:
     if not isinstance(cfg.get("repaste_hotkey"), str):
         cfg["repaste_hotkey"] = ""
     cfg["live_preview_enabled"] = bool(cfg.get("live_preview_enabled", True))
+    cfg["retain_audio"] = bool(cfg.get("retain_audio", True))
+    try:
+        cfg["retain_audio_max_files"] = max(0, int(cfg.get("retain_audio_max_files", 200)))
+    except (TypeError, ValueError):
+        cfg["retain_audio_max_files"] = 200
+    try:
+        cfg["retain_audio_min_seconds"] = max(0.0, float(cfg.get("retain_audio_min_seconds", 3.0)))
+    except (TypeError, ValueError):
+        cfg["retain_audio_min_seconds"] = 3.0
     return cfg
 
 
@@ -386,8 +436,9 @@ def main() -> None:
                                kind="info")
             return
 
+        audio_file = _save_recording(chunks, cfg) if text.strip() else None
         if text.strip() and not cfg.get("history_paused", False):
-            history.save(text.strip())
+            history.save(text.strip(), audio=audio_file)
 
         # Ctrl+Alt+C agent mode: classify + confirm gate via preview
         if agent_session and text.strip():
@@ -806,7 +857,9 @@ def main() -> None:
                             "taskflow_trailing_trigger_phrases", "taskflow_readback_phrases",
                             "taskflow_default_project", "taskflow_voice_confirm",
                             "taskflow_direct_capture_modifiers",
-                            "snippets", "live_preview_enabled", "per_app_context"):
+                            "snippets", "live_preview_enabled", "per_app_context",
+                            "retain_audio", "retain_audio_max_files",
+                            "retain_audio_min_seconds"):
                     _cfg[key] = validated[key]
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],
