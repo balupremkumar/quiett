@@ -1212,6 +1212,22 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     except Exception:
         pass
 
+    # These suppressing hooks intercept Enter/Insert/Esc system-wide. _close()
+    # removes them, but _tick() destroys the window directly when a new recording
+    # or replacement transcription arrives — every close path must unhook, or the
+    # leaked hooks keep the keyboard library intercepting all input (stuck
+    # modifiers, swallowed keys). <Destroy> fires on all of them.
+    def _remove_hooks_on_destroy(event):
+        if event.widget is not win:
+            return
+        for _h in list(_hooks):
+            try:
+                _keyboard.remove_hotkey(_h)
+            except Exception:
+                pass
+        _hooks.clear()
+    win.bind("<Destroy>", _remove_hooks_on_destroy)
+
     # ── Drag ───────────────────────────────────────────────────────────────
     def _drag_start(event):
         win._ox = event.x_root - win.winfo_x()

@@ -65,11 +65,8 @@ class TestTaskflowConfig:
     def test_defaults_applied(self):
         result = main._validate_config({})
         assert result["taskflow_enabled"] is True
-        assert result["taskflow_trigger_phrases"] == [
-            "add this to my to-do list", "add to my to-do list",
-            "add to my list", "add a task", "add task",
-            "add this to TaskFlow",
-        ]
+        assert result["taskflow_trigger_phrases"] == \
+            main._CONFIG_DEFAULTS["taskflow_trigger_phrases"]
 
     def test_enabled_coerced_to_bool(self):
         assert main._validate_config({"taskflow_enabled": 0})["taskflow_enabled"] is False

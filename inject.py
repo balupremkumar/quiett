@@ -64,6 +64,18 @@ _WM_PASTE = 0x0302
 _user32   = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
 
+# 64-bit correctness: ctypes defaults return values to 32-bit int, truncating
+# HANDLEs and pointers. A GlobalLock pointer above 4 GB then crashes
+# wstring_at/memmove with an access violation — which silently broke the
+# clipboard snapshot/restore path (restore raced the pending Ctrl+V and could
+# paste stale clipboard content into the target).
+_user32.GetClipboardData.restype = wintypes.HANDLE
+_kernel32.GlobalLock.restype     = ctypes.c_void_p
+_kernel32.GlobalLock.argtypes    = [wintypes.HANDLE]
+_kernel32.GlobalUnlock.argtypes  = [wintypes.HANDLE]
+_kernel32.GlobalSize.restype     = ctypes.c_size_t
+_kernel32.GlobalSize.argtypes    = [wintypes.HANDLE]
+
 _TERMINAL_CLASSES = {
     "CASCADIA_HOSTING_WINDOW_CLASS",  # Windows Terminal
     "mintty",                          # Git Bash / Cygwin

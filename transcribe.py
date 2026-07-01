@@ -322,6 +322,7 @@ def _build_prompt(initial_prompt: str | None, vocab: list | None) -> str | None:
 
 def _postprocess(text: str, filler_words: list, profile_rules: dict) -> str:
     text = _strip_fillers(text, filler_words)
+    text = _collapse_stutters(text)
     text = _collapse_acronyms(text)
     text = _apply_spoken_punctuation(text)
     text = _apply_profile(text, profile_rules)
@@ -340,6 +341,15 @@ def _apply_profile(text: str, rules: dict) -> str:
         escaped = re.escape(whisper_out)
         text = re.sub(r"\b" + escaped + r"\b", correct_out, text, flags=re.IGNORECASE)
     return text
+
+
+def _collapse_stutters(text: str) -> str:
+    """Collapse dictation stutters — a word immediately repeated, optionally with
+    a comma between ("into, into", "also, also", "the the"), becomes one
+    occurrence. Letters/apostrophes only, so counting ("1 1 2") is untouched.
+    """
+    return re.sub(r"\b([A-Za-z']+)((?:\s*,\s*|\s+)\1\b)+", r"\1", text,
+                  flags=re.IGNORECASE)
 
 
 def _strip_fillers(text: str, fillers: list) -> str:
@@ -378,6 +388,12 @@ def _apply_spoken_punctuation(text: str) -> str:
 
 def _cleanup_whitespace_around_punct(text: str) -> str:
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    # Filler/stutter removal leaves orphaned commas behind: "and, , which",
+    # ", so" at the start, ", ." before a full stop, ". , Next" after one.
+    text = re.sub(r",{2,}", ",", text)
+    text = re.sub(r",(?=[.;:!?])", "", text)
+    text = re.sub(r"([.!?]),", r"\1", text)
+    text = re.sub(r"^,+\s*", "", text)
     # Join a stray space before a contraction suffix: "that 's" -> "that's", "I 'm" -> "I'm"
     text = re.sub(r"\s+'(s|t|re|ll|ve|m|d)\b", r"'\1", text, flags=re.IGNORECASE)
     # Protect decimal points (digit.digit) so the spacing rule below won't split "4.8" into "4. 8"
@@ -418,9 +434,9 @@ _NUM_SCALES = {"hundred": 100, "thousand": 1000, "million": 1_000_000, "billion"
 # who", "next one", "one of"), not a count — keep it as a word instead of digit-ising it.
 _PRONOUN_STOP_PREV = {
     "no", "the", "this", "that", "which", "every", "each", "any", "only",
-    "next", "another", "is", "are", "big",
+    "next", "another", "is", "are", "big", "last",
 }
-_PRONOUN_NEXT = {"of", "who", "that"}
+_PRONOUN_NEXT = {"of", "who", "that", "more"}
 
 
 def _words_to_digits(text: str) -> str:
@@ -445,7 +461,10 @@ def _words_to_digits(text: str) -> str:
             and (last_word() in _PRONOUN_STOP_PREV
                  or (next_tok or "").lower().strip("-,.") in _PRONOUN_NEXT)
         )
-        if val is not None and not keep_as_word:
+        # Scale words with no count ("8 billion", "a billion") must stay words —
+        # converting bare "billion" to 1000000000 mangles "the 8 billion model".
+        only_scales = all(w.lower().strip("-,") in _NUM_SCALES for w in words)
+        if val is not None and not keep_as_word and not only_scales:
             out.append(str(val))
         else:
             out.extend(buf)

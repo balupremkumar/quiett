@@ -742,6 +742,8 @@ def main() -> None:
                 silence_timeout_seconds=validated["silence_auto_stop_seconds"],
                 silence_threshold=validated.get("silence_threshold", 0.01),
                 input_device=validated.get("input_device"),
+                vad_silence_mode=validated.get("vad_silence_mode", False),
+                vad_aggressiveness=validated.get("vad_aggressiveness", 2),
             )
             # Hot-reload hotkey if changed
             new_keys = fresh.get("hotkey", "ctrl+alt")
