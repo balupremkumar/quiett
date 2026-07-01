@@ -94,7 +94,7 @@ def _launch_lmstudio_server(model: str) -> bool:
     return False
 
 
-def load(model: str = "qwen/qwen2.5-1.5b-instruct") -> None:
+def load(model: str = "qwen2.5-1.5b-instruct") -> None:
     """Start LM Studio and load the model. Call in a background thread."""
     global _model
     _model = model

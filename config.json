@@ -56,7 +56,7 @@
   ],
   "api_server_enabled": true,
   "api_server_port": 8090,
-  "lmstudio_model": "qwen/qwen2.5-1.5b-instruct",
+  "lmstudio_model": "qwen2.5-1.5b-instruct",
   "silence_threshold": 0.01,
   "preview_auto_dismiss_seconds": 0.0,
   "auto_paste_threshold": 0.0,

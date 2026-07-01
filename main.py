@@ -82,7 +82,7 @@ _CONFIG_DEFAULTS = {
     "agent_trigger_phrases":       ["hey computer", "computer run", "computer open"],
     "api_server_enabled":          True,
     "api_server_port":             8090,
-    "lmstudio_model":              "qwen/qwen2.5-1.5b-instruct",
+    "lmstudio_model":              "qwen2.5-1.5b-instruct",
     "taskflow_enabled":            True,
     "taskflow_trigger_phrases":    ["add this to TaskFlow", "add to my tasks", "add a task"],
     "taskflow_trailing_trigger_phrases": ["add that to TaskFlow", "add that to my tasks",
@@ -593,7 +593,7 @@ def main() -> None:
     atexit.register(transcribe.shutdown)
 
     def _load_reformat() -> None:
-        reformat.load(model=_cfg.get("lmstudio_model", "qwen/qwen2.5-1.5b-instruct"))
+        reformat.load(model=_cfg.get("lmstudio_model", "qwen2.5-1.5b-instruct"))
 
     if _cfg.get("agent_command_mode_enabled", False):
         threading.Thread(target=_load_reformat, daemon=True).start()
