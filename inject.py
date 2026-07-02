@@ -247,7 +247,13 @@ def _send_keystroke(vks_to_hold: list[int], main_vk: int) -> int:
     inputs.append(_make_key_input(main_vk, key_up=True))
     for vk in reversed(vks_to_hold):
         inputs.append(_make_key_input(vk, key_up=True))
-    return _send_inputs(inputs)
+    n = _send_inputs(inputs)
+    if 0 < n < len(inputs):
+        # Partial insert can land a modifier-down without its matching up,
+        # leaving Ctrl/Shift logically stuck system-wide. Re-send the ups.
+        warn("inject", f"SendInput inserted {n}/{len(inputs)} events; re-releasing modifiers")
+        _send_inputs([_make_key_input(vk, key_up=True) for vk in reversed(vks_to_hold)])
+    return n
 
 
 def _flush_modifier(vk: int) -> None:
@@ -256,7 +262,42 @@ def _flush_modifier(vk: int) -> None:
     _send_inputs([inp])
 
 
-def _flush_all_modifiers() -> None:
+# (scan code, extended flag) for both physical variants of each modifier.
+# Used by the forced flush — an RDP session can hold a modifier the local
+# key state knows nothing about, so we can't derive which side to release.
+_MOD_RELEASE_SCANCODES = (
+    (0x1D, False),  # left ctrl
+    (0x1D, True),   # right ctrl
+    (0x38, False),  # left alt
+    (0x38, True),   # right alt
+    (0x2A, False),  # left shift
+    (0x36, False),  # right shift
+    (0x5B, True),   # left win
+    (0x5C, True),   # right win
+)
+
+
+def _make_scan_up(scan: int, extended: bool) -> _INPUT:
+    flags = _KEYEVENTF_SCANCODE | _KEYEVENTF_KEYUP
+    if extended:
+        flags |= _KEYEVENTF_EXTENDED
+    inp = _INPUT()
+    inp.type = _INPUT_KEYBOARD
+    inp.ki = _KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=0)
+    return inp
+
+
+def _flush_all_modifiers(force: bool = False) -> None:
+    if force:
+        # RDP targets: mstsc forwards key events to the remote session, and it
+        # drops key-ups when focus changes mid-hold (recording hotkey) or when
+        # our synthetic Ctrl-up gets lost in forwarding. The remote then has
+        # Ctrl/Alt logically stuck — clicks become ctrl-clicks, right-click
+        # misbehaves — and the local physical key state can't see it. While the
+        # RDP window has focus, send unconditional key-ups for every modifier
+        # variant; unmatched key-ups are no-ops for apps that aren't stuck.
+        _send_inputs([_make_scan_up(s, e) for s, e in _MOD_RELEASE_SCANCODES])
+        return
     # Only flush keys that are still physically held — don't send spurious
     # synthetic key-ups for already-released keys (confuses Electron/VS Code).
     held = _modifiers_physically_down()
@@ -291,6 +332,12 @@ def _wait_modifiers_released(timeout_ms: int = 400) -> bool:
             return True
         time.sleep(0.01)
     return False
+
+
+def wait_modifiers_released(timeout_ms: int = 400) -> bool:
+    """Public wrapper — preview.py waits on this before stealing focus so an
+    RDP window in the foreground still receives the physical hotkey key-ups."""
+    return _wait_modifiers_released(timeout_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +568,10 @@ def _needs_slow_settle(hwnd: int) -> bool:
 
 def _is_rdp(hwnd: int) -> bool:
     cls = _get_class(hwnd)
-    return "TscShellContainer" in cls or "RAIL_WINDOW" in cls
+    if "TscShellContainer" in cls or "RAIL_WINDOW" in cls:
+        return True
+    # msrdc (new Remote Desktop / AVD client) doesn't use the mstsc class names
+    return _get_exe_name(hwnd) in ("mstsc.exe", "msrdc.exe")
 
 
 def prime_foreground(hwnd: int) -> None:
@@ -780,9 +830,12 @@ def undo_last() -> bool:
     _force_foreground(hwnd)
     time.sleep(0.15)
     _wait_modifiers_released(timeout_ms=400)
-    _flush_all_modifiers()
+    _flush_all_modifiers(force=_is_rdp(hwnd))
     time.sleep(0.03)
     _send_keystroke([_VK_CONTROL], _VK_Z)
+    if _is_rdp(hwnd):
+        time.sleep(0.05)
+        _flush_all_modifiers(force=True)
     log("inject", f"undo_last: sent Ctrl+Z to hwnd={hwnd}")
     _last_insert = None
     return True
@@ -795,7 +848,7 @@ def inject_text_and_submit(text: str, hwnd: int) -> None:
         return
     time.sleep(0.15)  # let the target app process the paste before Enter lands
     _wait_modifiers_released(timeout_ms=600)
-    _flush_all_modifiers()
+    _flush_all_modifiers(force=_is_rdp(hwnd))
     time.sleep(0.03)
     _send_inputs([_make_vk_input(_VK_RETURN, key_up=False),
                   _make_vk_input(_VK_RETURN, key_up=True)])
@@ -859,7 +912,9 @@ def inject_text(text: str, hwnd: int) -> None:
     # the Ctrl+V keystroke.
     if not _wait_modifiers_released(timeout_ms=400):
         log("inject", f"modifiers still held after 400ms: {_modifiers_physically_down()}")
-    _flush_all_modifiers()
+    # Force-flush for RDP: clears modifiers stuck in the remote session (mstsc
+    # has focus here, so the key-ups get forwarded) before we send Ctrl+V.
+    _flush_all_modifiers(force=_is_rdp(hwnd))
     time.sleep(0.03)
 
     # Verify foreground is still our target before injecting input.
@@ -914,6 +969,12 @@ def inject_text(text: str, hwnd: int) -> None:
         return
 
     _last_insert = {"hwnd": hwnd, "chars": len(text)}
+
+    if _is_rdp(hwnd):
+        # mstsc can drop the synthetic Ctrl-up in forwarding, leaving Ctrl held
+        # in the remote session. Flush again while the RDP window still has focus.
+        time.sleep(0.05)
+        _flush_all_modifiers(force=True)
 
     def _restore():
         # Poll until clipboard no longer holds our injected text (paste consumed),

@@ -1330,6 +1330,12 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     # mode or whatever) instead of triggering on_insert().
     # activate_window uses AttachThreadInput to steal foreground even when our
     # process is not the current foreground process.
+    # Don't steal focus while the recording hotkey is still physically held.
+    # Recording stops on the FIRST modifier release; if an RDP window has focus
+    # and we grab it before the second key comes up, mstsc never forwards that
+    # key-up and the modifier stays stuck in the remote session (ctrl-clicks,
+    # broken right-click) until the user presses it again inside the remote.
+    inject.wait_modifiers_released(timeout_ms=500)
     inject.activate_window(win.winfo_id())
     win.lift()
     win.focus_force()
