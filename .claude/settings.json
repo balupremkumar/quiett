@@ -1,5 +1,18 @@
 {
   "permissions": {
     "defaultMode": "bypassPermissions"
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/Users/User/.claude/hooks/state_check.py\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
   }
 }
