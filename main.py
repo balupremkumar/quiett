@@ -971,10 +971,10 @@ def main() -> None:
         threading.Thread(target=_worker, daemon=True).start()
 
     tray.configure(
-        on_view_history=lambda: dashboard.open("history"),
+        on_view_history=lambda: dashboard.open_window("history"),
         on_toggle_pause=hotkey.set_paused,
-        on_view_profile=lambda: dashboard.open("home"),
-        on_open_settings=lambda: dashboard.open("settings"),
+        on_view_profile=lambda: dashboard.open_window("home"),
+        on_open_settings=lambda: dashboard.open_window("settings"),
         on_relaunch_taskflow=lambda: threading.Thread(target=taskflow.ensure_running, daemon=True).start(),
         on_toggle_clipboard_only=_on_toggle_clipboard_only,
         clipboard_only=_cfg.get("paste_mode", "auto") == "clipboard_only",

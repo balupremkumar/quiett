@@ -36,8 +36,11 @@ _THIS_FILE = os.path.abspath(__file__)
 _PROJECT_DIR = os.path.dirname(_THIS_FILE)
 
 
-def open(page: str = "home") -> None:
-    """Launch the dashboard subprocess, or ignore if already running."""
+def open_window(page: str = "home") -> None:
+    """Launch the dashboard subprocess, or ignore if already running.
+
+    Must not be named `open`: a module-level `open` shadows the builtin for
+    every function here and silently broke all config reads/writes."""
     global _proc
     with _proc_lock:
         if _proc is not None and _proc.poll() is None:
@@ -222,12 +225,12 @@ _HTML = """<!DOCTYPE html>
   --font-d:"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
 }
 [data-theme=light]{
-  --bg:#f3f3f3; --bg-sb:#ebebeb; --surf:#fff; --surf2:#f5f5f5;
+  --bg:#ececef; --bg-sb:#e4e4e8; --surf:#f8f8fa; --surf2:#efeff2;
   --hov:#0000000d; --act:#00000016; --brd:#00000026; --brd2:#00000044;
-  --txt:#1c1c1c; --txt2:rgba(0,0,0,.78); --txt3:rgba(0,0,0,.5);
+  --txt:#1c1c1c; --txt2:rgba(0,0,0,.78); --txt3:rgba(0,0,0,.55);
   --acc:#0067c0; --acc-bg:rgba(0,103,192,.08); --acc-hov:rgba(0,103,192,.14);
   --danger:#cf222e; --success:#2da44e;
-  --shad:0 2px 10px rgba(0,0,0,.1);
+  --shad:0 2px 10px rgba(0,0,0,.07);
 }
 
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1014,15 +1017,20 @@ window.addEventListener('pywebviewready', async function () {
 # ── Subprocess entrypoint ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     _page = sys.argv[1] if len(sys.argv) > 1 else "home"
+    _theme = _read_cfg().get("theme", "dark")
     # Inject the initial page before pywebviewready fires — avoids the race
     # between window.shown (too early) and the JS api being available.
     _html = _HTML.replace("let _INIT_PAGE = 'home';", f"let _INIT_PAGE = '{_page}';")
+    # Same trick for the theme — without it light users get a dark first paint
+    # and a dark window background behind every resize.
+    _html = _html.replace("let _theme = 'dark';", f"let _theme = '{_theme}';")
+    _html = _html.replace('<html lang="en">', f'<html lang="en" data-theme="{_theme}">')
     _w = webview.create_window(
         title="VoiceDictate",
         html=_html,
         js_api=DashboardAPI(),
         width=980, height=660,
         min_size=(700, 500),
-        background_color="#202020",
+        background_color="#ececef" if _theme == "light" else "#202020",
     )
     webview.start(debug=False, gui="edgechromium")

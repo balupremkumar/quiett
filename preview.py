@@ -71,13 +71,15 @@ _THEMES = {
         "BLUE": "#3b82f6", "BLUE_HV": "#60a5fa",
         "BORDER": "#3a3a40", "BORDER2": "#4a4a52",
         "TASK": "#22c55e", "TASK_HV": "#4ade80",
+        "MATCH_BG": "#3b5274", "MATCH_FG": "#f3f4f6",
     },
     "light": {
-        "BG": "#fafafa", "BG2": "#f1f1f4", "BG3": "#e4e4e9",
-        "FG": "#18181b", "FG2": "#52525b", "FG3": "#a1a1aa",
+        "BG": "#f4f4f6", "BG2": "#eaeaee", "BG3": "#dedee4",
+        "FG": "#18181b", "FG2": "#52525b", "FG3": "#8e8e99",
         "BLUE": "#2563eb", "BLUE_HV": "#3b82f6",
-        "BORDER": "#d4d4d8", "BORDER2": "#c4c4ca",
+        "BORDER": "#cbcbd2", "BORDER2": "#b9b9c2",
         "TASK": "#16a34a", "TASK_HV": "#22c55e",
+        "MATCH_BG": "#bfdbfe", "MATCH_FG": "#1e3a8a",
     },
 }
 
@@ -105,6 +107,8 @@ _BORDER  = _T["BORDER"]
 _BORDER2 = _T["BORDER2"]
 _TASK    = _T["TASK"]
 _TASK_HV = _T["TASK_HV"]
+_MATCH_BG = _T["MATCH_BG"]
+_MATCH_FG = _T["MATCH_FG"]
 
 # Typography ladder — Segoe UI Variable with weight cascade
 # (falls back automatically to Segoe UI if Variable isn't installed)
@@ -882,7 +886,7 @@ def _calc_position(cx: int, cy: int, w: int, h: int,
 
 def _border_colour(confidence: float | None) -> str:
     if confidence is None:
-        return "#3d3d3d"
+        return _BORDER
     if confidence >= 0.6:
         return _BLUE       # confident — blue
     if confidence >= 0.3:
@@ -1148,7 +1152,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         font=_FONT_BTN, padx=8, pady=6, cursor="hand2",
     )
     if empty:
-        insert_btn.config(state="disabled", bg="#404040", fg="#666666", cursor="")
+        insert_btn.config(state="disabled", bg=_BG3, fg=_FG3, cursor="")
     else:
         insert_btn.bind("<Enter>", lambda e: insert_btn.config(bg=accent_hv))
         insert_btn.bind("<Leave>", lambda e: insert_btn.config(bg=accent))
@@ -1506,7 +1510,7 @@ def _open_history() -> None:
     txt.tag_configure("body",   foreground=_FG,  font=_FONT_BODY, spacing3=6)
     txt.tag_configure("sep",    foreground=_BORDER)
     txt.tag_configure("hover",  background=_BG3)
-    txt.tag_configure("match",  background="#3b5274", foreground="#f3f4f6")
+    txt.tag_configure("match",  background=_MATCH_BG, foreground=_MATCH_FG)
     txt.tag_configure("flash",  background=_BLUE)  # brief click-to-copy confirmation, eased off in _flash_row
 
     def _flash_row(start: str, end: str) -> None:
@@ -1659,7 +1663,7 @@ def _open_profile() -> None:
         win,
         text=f"Corrections are auto-applied after {profile.MIN_OCCURRENCES} occurrences.  "
              f"Pending rules are shown in grey.",
-        bg=_BG, fg="#888888", font=("Segoe UI", 8),
+        bg=_BG, fg=_FG2, font=("Segoe UI", 8),
     ).pack(anchor="w", padx=16, pady=(0, 8))
 
     list_frame = tk.Frame(win, bg=_BG)
@@ -1678,11 +1682,11 @@ def _open_profile() -> None:
     sb.config(command=txt.yview)
 
     txt.tag_configure("active",  foreground=_FG,       font=("Segoe UI", 10))
-    txt.tag_configure("pending", foreground="#666666",  font=("Segoe UI", 10))
-    txt.tag_configure("count",   foreground="#888888",  font=("Segoe UI", 9))
+    txt.tag_configure("pending", foreground=_FG3,      font=("Segoe UI", 10))
+    txt.tag_configure("count",   foreground=_FG3,      font=("Segoe UI", 9))
     txt.tag_configure("del",     foreground="#cc4444",  font=("Segoe UI", 8), underline=True)
-    txt.tag_configure("sep",     foreground="#383838")
-    txt.tag_configure("empty",   foreground="#888888",  font=("Segoe UI", 10))
+    txt.tag_configure("sep",     foreground=_BORDER)
+    txt.tag_configure("empty",   foreground=_FG2,      font=("Segoe UI", 10))
 
     def _populate(data: list) -> None:
         txt.config(state="normal")
