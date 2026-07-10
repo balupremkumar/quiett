@@ -8,7 +8,15 @@ $proj = Split-Path -Parent $PSScriptRoot   # project root (scripts/ parent)
 Write-Host "== Killing stale processes for $proj"
 $killed = @()
 Get-CimInstance Win32_Process | Where-Object {
-    ($_.Name -match '^pythonw?\.exe$' -and $_.CommandLine -match [regex]::Escape("$proj")) -or
+    ($_.Name -match '^pythonw?[\d.]*\.exe$' -and (
+        $_.CommandLine -match [regex]::Escape("$proj") -or
+        $_.ExecutablePath -like "$proj*" -or
+        # Instances launched from a shell cd'd into the project have a fully
+        # relative command line (".venv\Scripts\pythonw.exe" main.py) that no
+        # path match can see — they hold the single-instance mutex and make
+        # every restart a silent no-op. Slight cross-project risk accepted.
+        $_.CommandLine -match '(^|[\s"])\.venv\\Scripts\\pythonw?\.exe.*(main|dashboard)\.py'
+    )) -or
     ($_.Name -eq 'whisper-server.exe' -and $_.ExecutablePath -like "$proj*")
 } | ForEach-Object {
     $killed += "$($_.ProcessId) $($_.Name)"
@@ -25,7 +33,7 @@ Start-Process -FilePath 'wscript.exe' -ArgumentList "`"$proj\launch.vbs`"" -Work
 Start-Sleep -Seconds 4
 
 $new = Get-CimInstance Win32_Process | Where-Object {
-    $_.Name -match '^pythonw?\.exe$' -and $_.CommandLine -match [regex]::Escape("$proj")
+    $_.Name -match '^pythonw?[\d.]*\.exe$' -and $_.CommandLine -match [regex]::Escape("$proj")
 }
 if (-not $new) {
     Write-Host "FAIL: no new process found. Last 30 log lines:"
@@ -33,8 +41,8 @@ if (-not $new) {
     exit 1
 }
 $new | ForEach-Object {
-    $started = ([Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate))
-    Write-Host ("OK: PID {0} ({1}) started {2:HH:mm:ss}" -f $_.ProcessId, $_.Name, $started)
+    # Get-CimInstance already deserialises CreationDate to DateTime (unlike Get-WmiObject)
+    Write-Host ("OK: PID {0} ({1}) started {2:HH:mm:ss}" -f $_.ProcessId, $_.Name, $_.CreationDate)
 }
 
 Write-Host "== Last 15 log lines:"
