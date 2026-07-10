@@ -88,6 +88,17 @@ def _merge_cfg(updates: dict) -> bool:
         return False
 
 
+def _format_history_export(entries: list) -> str:
+    lines = ["# VoiceDictate history export", ""]
+    for e in entries:
+        src = e.get("source") or "dictation"
+        lines.append(f"## {e.get('timestamp', '')} — {src}")
+        lines.append("")
+        lines.append(e.get("text", ""))
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _day_group_label(d: "date", today: "date") -> str:
     """Today / Yesterday / weekday name (this calendar week) / '3 July 2026'."""
     diff = (today - d).days
@@ -212,7 +223,7 @@ class DashboardAPI:
                 "index": i, "text": text,
                 "words": len(text.split()),
                 "label": label, "ts_date": ts_date, "source": source,
-                "day_label": day_label,
+                "day_label": day_label, "pinned": bool(e.get("pinned")),
             })
         return result
 
@@ -226,6 +237,60 @@ class DashboardAPI:
         except Exception:
             pass
         return False
+
+    def delete_history_entries(self, indices: list) -> int:
+        try:
+            entries = hist._load()
+            drop = {int(i) for i in indices}
+            keep = [e for i, e in enumerate(entries) if i not in drop]
+            removed = len(entries) - len(keep)
+            hist._write(keep)
+            return removed
+        except Exception:
+            return 0
+
+    def export_history_entries(self, indices: list) -> dict:
+        try:
+            entries = hist.load()
+            chosen = [entries[i] for i in indices if 0 <= i < len(entries)]
+            if not chosen:
+                return {"ok": False, "error": "No entries to export."}
+            chosen.sort(key=lambda e: e.get("timestamp", ""))
+            content = _format_history_export(chosen)
+            default_name = f"voicedictate-history-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+
+            dialog_ok = True
+            result = None
+            try:
+                win = webview.windows[0] if webview.windows else None
+                if win is None:
+                    raise RuntimeError("no window")
+                result = win.create_file_dialog(
+                    webview.FileDialog.SAVE, save_filename=default_name,
+                    file_types=("Markdown (*.md)", "Text file (*.txt)"))
+            except Exception:
+                dialog_ok = False
+
+            if not dialog_ok:
+                downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+                os.makedirs(downloads, exist_ok=True)
+                path = os.path.join(downloads, default_name)
+            elif not result:
+                return {"ok": False, "cancelled": True}
+            else:
+                path = result if isinstance(result, str) else result[0]
+
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {"ok": True, "path": path, "fallback": not dialog_ok}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def set_pinned(self, index: int, pinned: bool) -> bool:
+        try:
+            return hist.set_pinned(int(index), bool(pinned))
+        except Exception:
+            return False
 
     def clear_history(self) -> bool:
         try:
@@ -316,7 +381,13 @@ class DashboardAPI:
             return False
 
     def save_settings(self, data: dict) -> bool:
-        return _merge_cfg(data)
+        ok = _merge_cfg(data)
+        if ok and ("history_max_entries" in data or "recording_retention_days" in data):
+            try:
+                hist.purge()
+            except Exception:
+                pass
+        return ok
 
     def get_audio_devices(self) -> list:
         try:
@@ -448,7 +519,12 @@ body{font-family:var(--font);background:var(--bg);color:var(--txt);-webkit-font-
 .ia:hover{background:var(--hov);color:var(--txt)}
 .ia.del:hover{background:rgba(248,81,73,.15);color:var(--danger);border-color:var(--danger)}
 .ia svg{width:12px;height:12px}
+.ia.pin.on{color:var(--acc)}
 .empty{text-align:center;padding:48px 32px;color:var(--txt3);font-size:13px}
+.list-item.pinned{background:var(--acc-bg)}
+.pin-badge{display:inline-flex;color:var(--acc)}
+.pin-badge svg{width:10px;height:10px}
+mark{background:var(--acc-bg);color:inherit;border-radius:2px;padding:0 1px}
 
 /* ── Search ── */
 .search-wrap{padding:14px 30px 10px;flex-shrink:0;position:relative}
@@ -459,6 +535,34 @@ body{font-family:var(--font);background:var(--bg);color:var(--txt);-webkit-font-
   font-family:var(--font);font-size:12.5px;outline:none}
 .search-in:focus{border-color:var(--acc)}
 .search-in::placeholder{color:var(--txt3)}
+
+/* ── Filter chips ── */
+.chip-row{display:flex;gap:6px;padding:0 30px 12px;flex-shrink:0;flex-wrap:wrap}
+.chip{padding:5px 12px;border-radius:14px;border:1px solid var(--brd);background:var(--surf);
+  color:var(--txt2);font-size:11.5px;font-weight:500;cursor:pointer;transition:all .12s;
+  font-family:var(--font)}
+.chip:hover{background:var(--hov);color:var(--txt)}
+.chip.active{background:var(--acc-bg);border-color:var(--acc);color:var(--acc)}
+
+/* ── Bulk select ── */
+.bulk-bar{display:flex;align-items:center;gap:14px;padding:8px 30px;flex-shrink:0;
+  background:var(--surf2);border-bottom:1px solid var(--brd);font-size:12px;color:var(--txt2)}
+.bulk-all{display:flex;align-items:center;gap:6px;cursor:pointer}
+.bulk-all input{accent-color:var(--acc);cursor:pointer}
+.bulk-count{color:var(--txt3)}
+.bulk-acts{margin-left:auto;display:flex;gap:8px}
+.li-check{display:none;position:absolute;left:10px;top:50%;transform:translateY(-50%);
+  accent-color:var(--acc);cursor:pointer}
+.list-wrap.select-mode .li-check{display:block}
+.list-wrap.select-mode .list-item{padding-left:34px}
+.list-wrap.select-mode .li-acts{display:none !important}
+
+/* ── Toast ── */
+.dash-toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%) translateY(8px);
+  background:var(--surf2);border:1px solid var(--brd);border-radius:var(--r-sm);
+  padding:8px 16px;font-size:12px;color:var(--txt);box-shadow:var(--shad);opacity:0;
+  pointer-events:none;transition:opacity .2s,transform .2s;z-index:50}
+.dash-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
 /* ── Dictionary page ── */
 .dict-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;
@@ -661,12 +765,27 @@ select option{background:var(--surf2);color:var(--txt)}
   <div class="ph">
     <div><h1>History</h1><div class="sub">Your recent dictations.</div></div>
     <div class="ph-actions">
+      <button class="btn btn-s" id="selectModeBtn" onclick="toggleSelectMode()">Select</button>
       <button class="btn btn-danger" onclick="confirmClear()">Clear All</button>
     </div>
   </div>
   <div class="search-wrap">
     <svg class="search-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"/></svg>
     <input class="search-in" id="histSearch" placeholder="Search dictations or app…" oninput="onHistSearchInput(this.value)">
+  </div>
+  <div class="chip-row" id="sourceChips">
+    <button class="chip active" data-src="all" onclick="setSourceFilter('all')">All</button>
+    <button class="chip" data-src="" onclick="setSourceFilter('')">Dictation</button>
+    <button class="chip" data-src="taskflow" onclick="setSourceFilter('taskflow')">TaskFlow</button>
+    <button class="chip" data-src="agent" onclick="setSourceFilter('agent')">Agent</button>
+  </div>
+  <div class="bulk-bar" id="bulkBar" style="display:none">
+    <label class="bulk-all"><input type="checkbox" id="selectAllChk" onchange="selectAllToggle(this.checked)"> Select all</label>
+    <span class="bulk-count" id="bulkCount">0 selected</span>
+    <div class="bulk-acts">
+      <button class="btn btn-s" onclick="exportSelected()">Export</button>
+      <button class="btn btn-danger" onclick="deleteSelected()">Delete</button>
+    </div>
   </div>
   <div class="list-wrap" id="historyList"><div class="empty">Loading…</div></div>
 </div>
@@ -797,6 +916,28 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
+      <div class="s-sec-ttl">History</div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Keep history</div><div class="s-lbl-s">Older entries are trimmed past this count. Pinned entries are never trimmed.</div></div>
+        <select class="sel-in" data-key="history_max_entries">
+          <option value="50">50 entries</option>
+          <option value="100" selected>100 entries</option>
+          <option value="250">250 entries</option>
+          <option value="500">500 entries</option>
+        </select>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Auto-delete recordings</div><div class="s-lbl-s">Deletes saved audio older than this. Transcripts stay either way; pinned entries are exempt.</div></div>
+        <select class="sel-in" data-key="recording_retention_days">
+          <option value="0" selected>Never</option>
+          <option value="7">After 7 days</option>
+          <option value="30">After 30 days</option>
+          <option value="90">After 90 days</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="s-sec">
       <div class="s-sec-ttl">Agent Command Mode</div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">LM Studio model</div><div class="s-lbl-s">Model identifier as shown in lms ls (e.g. qwen/qwen2.5-1.5b-instruct)</div></div>
@@ -878,6 +1019,9 @@ let _homeTexts = [];
 let _currentPage = 'home';
 let _theme = 'dark';
 let _INIT_PAGE = 'home';
+let _histSourceFilter = 'all';
+let _selectMode = false;
+let _selectedIdx = new Set();
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fmt(n) {
@@ -901,6 +1045,42 @@ function trashIcon() {
 
 function xIcon() {
   return '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>';
+}
+
+function starIcon(filled) {
+  return filled
+    ? '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.286 3.958a1 1 0 00.95.69h4.162c.969 0 1.371 1.24.588 1.81l-3.368 2.446a1 1 0 00-.363 1.118l1.287 3.957c.3.922-.755 1.688-1.539 1.118l-3.367-2.446a1 1 0 00-1.176 0l-3.367 2.446c-.784.57-1.838-.196-1.539-1.118l1.286-3.957a1 1 0 00-.363-1.118L2.062 9.385c-.783-.57-.38-1.81.588-1.81h4.163a1 1 0 00.95-.69l1.286-3.958z"/></svg>'
+    : '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.286 3.958a1 1 0 00.95.69h4.162c.969 0 1.371 1.24.588 1.81l-3.368 2.446a1 1 0 00-.363 1.118l1.287 3.957c.3.922-.755 1.688-1.539 1.118l-3.367-2.446a1 1 0 00-1.176 0l-3.367 2.446c-.784.57-1.838-.196-1.539-1.118l1.286-3.957a1 1 0 00-.363-1.118L2.062 9.385c-.783-.57-.38-1.81.588-1.81h4.163a1 1 0 00.95-.69l1.286-3.958z"/></svg>';
+}
+
+function highlightText(text, q) {
+  if (!q) return esc(text);
+  const lower = text.toLowerCase();
+  const needle = q.toLowerCase();
+  let out = '';
+  let i = 0;
+  while (true) {
+    const pos = lower.indexOf(needle, i);
+    if (pos === -1) { out += esc(text.slice(i)); break; }
+    out += esc(text.slice(i, pos));
+    out += '<mark>' + esc(text.slice(pos, pos + needle.length)) + '</mark>';
+    i = pos + needle.length;
+  }
+  return out;
+}
+
+function showToast(msg) {
+  let t = document.getElementById('dashToast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'dashToast';
+    t.className = 'dash-toast';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(window._toastT);
+  window._toastT = setTimeout(() => t.classList.remove('show'), 3200);
 }
 
 // ── Navigation ─────────────────────────────────────────────────────────────
@@ -988,49 +1168,72 @@ let _histQuery = '';
 async function loadHistory() {
   const el = document.getElementById('historyList');
   el.innerHTML = '<div class="empty">Loading…</div>';
-  _histAll = await window.pywebview.api.get_history(200);
-  renderHistory(filterEntries(_histAll, _histQuery));
+  _histAll = await window.pywebview.api.get_history(500);
+  renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
 }
 
-function filterEntries(items, q) {
-  if (!q) return items;
-  const needle = q.toLowerCase();
-  return items.filter(e =>
-    e.text.toLowerCase().includes(needle) ||
-    (e.source || '').toLowerCase().includes(needle));
-}
-
-function renderHistory(items) {
-  _histTexts = items.map(e => e.text);
-  const el = document.getElementById('historyList');
-  if (!items.length) {
-    el.innerHTML = _histQuery
-      ? `<div class="empty">No dictations match “${esc(_histQuery)}”.</div>`
-      : '<div class="empty">No dictations yet.</div>';
-    return;
+function filterEntries(items, q, srcFilter) {
+  let out = items;
+  if (srcFilter && srcFilter !== 'all') {
+    out = out.filter(e => (e.source || '') === srcFilter);
   }
-  let lastDay = null;
-  let html = '';
-  items.forEach((e, i) => {
-    if (e.day_label && e.day_label !== lastDay) {
-      lastDay = e.day_label;
-      html += `<div class="day-hdr">${esc(e.day_label)}</div>`;
-    }
-    html += `
-    <div class="list-item" id="hi-${e.index}">
-      <div class="li-text">${esc(e.text)}</div>
+  if (q) {
+    const needle = q.toLowerCase();
+    out = out.filter(e =>
+      e.text.toLowerCase().includes(needle) ||
+      (e.source || '').toLowerCase().includes(needle));
+  }
+  return out;
+}
+
+function renderHistItem(e, i) {
+  return `
+    <div class="list-item${e.pinned ? ' pinned' : ''}" id="hi-${e.index}">
+      <input type="checkbox" class="li-check" ${_selectedIdx.has(e.index) ? 'checked' : ''}
+        onclick="toggleSelect(${e.index}, this.checked)">
+      <div class="li-text">${highlightText(e.text, _histQuery)}</div>
       <div class="li-meta">
         <span>${esc(e.label)}</span>
         <span>·</span><span>${e.words} words</span>
         ${e.source ? '<span class="src-badge">'+esc(e.source)+'</span>' : ''}
+        ${e.pinned ? '<span class="pin-badge" title="Pinned">'+starIcon(true)+'</span>' : ''}
       </div>
       <div class="li-acts">
+        <button class="ia pin${e.pinned ? ' on' : ''}" title="${e.pinned ? 'Unpin' : 'Pin'}"
+          onclick="togglePin(${e.index}, ${e.pinned ? 'false' : 'true'})">${starIcon(e.pinned)}</button>
         <button class="ia" title="Copy" onclick="copyText(_histTexts[${i}])">${copyIcon()}</button>
         <button class="ia del" title="Delete" onclick="deleteHistory(${e.index})">${trashIcon()}</button>
       </div>
     </div>`;
+}
+
+function renderHistory(items) {
+  const el = document.getElementById('historyList');
+  el.classList.toggle('select-mode', _selectMode);
+  if (!items.length) {
+    _histTexts = [];
+    el.innerHTML = (_histQuery || (_histSourceFilter && _histSourceFilter !== 'all'))
+      ? '<div class="empty">No dictations match your filters.</div>'
+      : '<div class="empty">No dictations yet.</div>';
+    updateBulkCount();
+    return;
+  }
+  const pinned = items.filter(e => e.pinned);
+  const rest = items.filter(e => !e.pinned);
+  const ordered = pinned.concat(rest);
+  _histTexts = ordered.map(e => e.text);
+  let html = '';
+  if (pinned.length) html += '<div class="day-hdr">Pinned</div>';
+  let lastDay = null;
+  ordered.forEach((e, i) => {
+    if (!e.pinned && e.day_label && e.day_label !== lastDay) {
+      lastDay = e.day_label;
+      html += `<div class="day-hdr">${esc(e.day_label)}</div>`;
+    }
+    html += renderHistItem(e, i);
   });
   el.innerHTML = html;
+  updateBulkCount();
 }
 
 let _histSearchT = null;
@@ -1038,21 +1241,94 @@ function onHistSearchInput(q) {
   clearTimeout(_histSearchT);
   _histSearchT = setTimeout(() => {
     _histQuery = q;
-    renderHistory(filterEntries(_histAll, _histQuery));
+    renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
   }, 150);
+}
+
+function setSourceFilter(src) {
+  _histSourceFilter = src;
+  document.querySelectorAll('#sourceChips .chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.src === src);
+  });
+  renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
+}
+
+async function togglePin(idx, newVal) {
+  const ok = await window.pywebview.api.set_pinned(idx, newVal);
+  if (!ok) return;
+  const e = _histAll.find(x => x.index === idx);
+  if (e) e.pinned = newVal;
+  renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
 }
 
 async function deleteHistory(idx) {
   await window.pywebview.api.delete_history_entry(idx);
   _histAll = _histAll.filter(e => e.index !== idx);
-  renderHistory(filterEntries(_histAll, _histQuery));
+  _selectedIdx.delete(idx);
+  renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
 }
 
 async function confirmClear() {
   if (!confirm('Clear all history? This cannot be undone.')) return;
   await window.pywebview.api.clear_history();
   _histAll = [];
+  _selectedIdx.clear();
   renderHistory([]);
+}
+
+// ── Bulk select ──────────────────────────────────────────────────────────
+function toggleSelectMode() {
+  _selectMode = !_selectMode;
+  document.getElementById('selectModeBtn').textContent = _selectMode ? 'Cancel' : 'Select';
+  document.getElementById('bulkBar').style.display = _selectMode ? 'flex' : 'none';
+  if (!_selectMode) _selectedIdx.clear();
+  renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
+}
+
+function toggleSelect(idx, checked) {
+  if (checked) _selectedIdx.add(idx); else _selectedIdx.delete(idx);
+  updateBulkCount();
+}
+
+function updateBulkCount() {
+  const el = document.getElementById('bulkCount');
+  if (el) el.textContent = _selectedIdx.size + ' selected';
+}
+
+function selectAllToggle(checked) {
+  const visible = filterEntries(_histAll, _histQuery, _histSourceFilter);
+  visible.forEach(e => { if (checked) _selectedIdx.add(e.index); else _selectedIdx.delete(e.index); });
+  renderHistory(visible);
+}
+
+async function deleteSelected() {
+  if (!_selectedIdx.size) return;
+  const items = _histAll.filter(e => _selectedIdx.has(e.index));
+  const pinnedCount = items.filter(e => e.pinned).length;
+  let msg = `Delete ${_selectedIdx.size} selected ${_selectedIdx.size === 1 ? 'entry' : 'entries'}? This cannot be undone.`;
+  if (pinnedCount) msg = `${pinnedCount} of the selected entries are pinned. ` + msg;
+  if (!confirm(msg)) return;
+  const idxList = Array.from(_selectedIdx);
+  await window.pywebview.api.delete_history_entries(idxList);
+  _selectedIdx.clear();
+  await loadHistory();
+}
+
+async function exportSelected() {
+  if (!_selectedIdx.size) return;
+  const idxList = Array.from(_selectedIdx);
+  try {
+    const res = await window.pywebview.api.export_history_entries(idxList);
+    if (res && res.ok) {
+      showToast(res.fallback ? 'Exported to ' + res.path : 'Exported to ' + res.path);
+    } else if (res && res.cancelled) {
+      // user cancelled the save dialog — no toast
+    } else {
+      showToast('Export failed' + (res && res.error ? ': ' + res.error : ''));
+    }
+  } catch (e) {
+    showToast('Export failed: ' + e);
+  }
 }
 
 function copyText(text) {
@@ -1287,6 +1563,10 @@ if __name__ == "__main__":
     try:
         import ctypes as _ct
         _ct.windll.user32.SetProcessDpiAwarenessContext(_ct.c_ssize_t(-4))
+    except Exception:
+        pass
+    try:
+        hist.purge()
     except Exception:
         pass
     _page = sys.argv[1] if len(sys.argv) > 1 else "home"

@@ -26,14 +26,14 @@ Impact H/M/L, Effort S/M/L.
 7. [ ] Live smooth waveform in the pill while recording; current badge bars are flat un-antialiased Canvas rectangles (preview.py:754-761). (H/M) — superwhisper, VoiceInk.
 8. [ ] Hover-to-reveal stop/cancel controls on the compact pill; idle state stays minimal. (M/S) — superwhisper.
 9. [ ] Raw-vs-cleaned transcript toggle in the preview panel before accepting. (M/M) — superwhisper Voice/AI toggle.
-10. [ ] Confirmation prompt before processing very long recordings (>30s) to catch accidental holds. (L-M/S) — superwhisper.
+10. [x] (2026-07-11) Confirm gate before transcribing recordings >30s (`_LONG_RECORDING_CONFIRM_SECONDS`, main.py; modal in preview.py, Enter transcribes / Esc discards); gate sits before whisper so no wasted inference.
 11. [x] (2026-07-11) Dedicated status row in the wave badge ("Recording…", "Processing…", "Cleaning up…") between waveform and partial transcript; panel header already carried the status dot. No "Done" state invented (would touch main.py flow).
 12. [ ] Selectable listening-state animations (pulse, ink-flow, etc.) as a personalisation touch. (L/M) — VoiceInk's nine animations.
 13. [ ] Context-capture badge confirming clipboard/selection was grabbed as context. (L/S) — superwhisper Super Mode.
 14. [ ] Acrylic backdrop on the popup via `DWMWA_SYSTEMBACKDROP_TYPE` = `DWMSBT_TRANSIENTWINDOW` (documented Win11 route, not the fragile Win10 accent API). (M/M) — MS Learn system backdrops.
 15. [x] (2026-07-11) DWM drop shadow via `DwmExtendFrameIntoClientArea` 1px bottom margin (winfx.py), Win11 corner-preference path only; Win10 region fallback untouched.
 16. [x] (2026-07-10) `DWMWA_WINDOW_CORNER_PREFERENCE` in winfx.apply_rounded_region, region mask kept as Win10 fallback (with DPI-scaled radius). Turned out to be the full fix, not just interim — see item 1.
-17. [ ] True gradient in the badge; today it is six stacked colour bands simulating one (preview.py:676). (L/S) — audit.
+17. [x] (2026-07-11) Real vertical gradient via cached PIL column, single PhotoImage per frame (replaces six bands + per-bar rectangles); wave bar width/gap now DPI-scaled too.
 18. [ ] Slide+fade entrance 150-250ms; today it is alpha-fade only, no positional motion (winfx.py:84-92). (M/M) — motion guides.
 19. [ ] Adjustable pause-tolerance / wait-time slider so slow speakers aren't cut off. (M/M) — Windows 11 Voice Typing 2026.
 20. [ ] Evaluate popup stack migration: raw Win32 layered window (full control, L effort) vs PySide6/QML (GPU-composited 60fps, M) vs pywebview frameless (Chromium AA free, but cold-start latency + no native rounded corners bug #834). (H/L) — rendering agent 8-10.
@@ -80,7 +80,7 @@ Impact H/M/L, Effort S/M/L.
 ### Cross-cutting polish
 
 45. [ ] Sound design pass: consistent start/stop/success/error cues with a volume setting (chime.py exists but is ad hoc). (M/S) — voice-app teardown + audit.
-46. [ ] Rework or retire the screen-edge flash (preview.py:176) once the popup entrance animation carries the "hotkey registered" signal. (L/S) — audit.
+46. [x] (2026-07-11) Edge flash was double-firing alongside the badge every recording; now fires only as fallback when badge or preview construction fails.
 47. [ ] Global motion policy: 100-400ms caps, state-confirming only, honour Windows reduce-motion. (M/S) — microinteraction guides.
 48. [ ] Designed error states on every surface: mic missing, whisper server down, too-short recording, LM Studio absent. (H/M) — ui-states discipline.
 49. [ ] Designed empty states for History and Dictionary pages (first-run look matters for a sellable product). (M/S) — ui-states discipline.
@@ -94,11 +94,11 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 
 51. [ ] Streaming partial transcript in the recording pill — words appear while you speak (whisper.cpp streaming mode), the single biggest "it's alive" premium signal. (H/L)
 52. [ ] Pre-warmed hidden popup window reused across dictations (create once, show/hide) so the panel appears <100ms after release. (H/M)
-53. [ ] Auto-dismiss countdown as a subtle progress ring on the panel instead of an invisible timer. (M/S)
+53. [x] (2026-07-11) Auto-dismiss countdown as a thin depleting accent bar along the panel's bottom edge; restarts on typing/focus/hover. (Bar, not ring — Canvas arcs jank in Tk.) Also fixed a pre-existing stale-after()-callback bug on close.
 54. [ ] Drag-to-reposition the panel, position remembered per monitor. (M/M)
-55. [ ] Pin button on the panel to suspend auto-dismiss for long edits. (M/S)
+55. [x] (2026-07-11) 📌 pin in the panel header suspends auto-dismiss preserving remaining time; unpin resumes; pinned state visibly distinct.
 56. [ ] Compact-to-expanded panel modes (one-line pill vs multi-line editor) with animated resize. (M/M)
-57. [ ] Word/char count and speaking-pace metadata in the panel footer. (L/S)
+57. [x] (2026-07-11) Word/char count existed already; added WPM from utterance duration (plumbed duration through preview.show), fixed at panel open, counts stay live.
 58. [x] (2026-07-10) Target app shown in the panel header ("→ VS Code", "→ TaskFlow" in task mode) via inject._get_exe_name; app icon (not just name) still open.
 59. [ ] Per-word confidence heatmap toggle using the word confidences we already have (subtle underline shades, not colour-only). (M/M)
 60. [x] (2026-07-11) Already implemented (preview.py:1296-1316 `_chip()`, theme-aware, ↵/Ctrl+↵/Esc/Ctrl+R/Shift+↵); ticked on audit, no change needed.
@@ -135,12 +135,12 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 ### History, beyond items 35-40
 
 81. [x] (2026-07-11) Day-grouping headers (Today / Yesterday / weekday / date), derived from the filtered list so they collapse with search. Verified by screenshot.
-82. [ ] Pin/favourite entries that survive the 100-entry cap. (M/S)
-83. [ ] Source filter chips: dictation / TaskFlow / agent. (M/S)
-84. [ ] Bulk select for delete/export. (M/S)
-85. [ ] Search-term highlighting in history results. (L/S)
+82. [x] (2026-07-11) Star toggle per entry, `pinned` field in history.py, cap eviction skips pinned, "Pinned" group above day groups; backwards-compatible.
+83. [x] (2026-07-11) All/Dictation/TaskFlow/Agent chips, AND-combined with text search, verified by screenshot. main.py now tags agent-session saves source="agent" (was untagged, chip would've been empty forever).
+84. [x] (2026-07-11) Select mode with per-entry checkboxes, select all, delete (single confirm, warns on pinned), export via file dialog with Downloads fallback.
+85. [x] (2026-07-11) Theme-aware `<mark>` highlight on matches; HTML-escaped per segment, no raw-text innerHTML injection.
 86. [ ] Privacy mode: incognito dictation (no history/audio), optional pattern redaction (emails, numbers). (M/M)
-87. [ ] Retention policy: keep N days/entries, auto-purge recordings. (M/S)
+87. [x] (2026-07-11) Settings → History: keep 50/100/250/500 entries + auto-delete recordings never/7/30/90 days, instant-apply; history.py enforces on save and purge-on-startup, pinned exempt, defaults match old behaviour. Smoke-tested in isolation.
 88. [ ] Mini waveform thumbnail per entry with inline play for the stored audio. (L/M)
 
 ### Stats and delight

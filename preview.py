@@ -19,7 +19,7 @@ import math
 import pyperclip
 import keyboard as _keyboard
 import win32api
-from PIL import ImageEnhance, ImageTk
+from PIL import Image, ImageEnhance, ImageTk
 
 import audio
 import chime
@@ -61,6 +61,7 @@ _badge_q:        queue.Queue = queue.Queue()
 _toast_q:        queue.Queue = queue.Queue()
 _flash_q:        queue.Queue = queue.Queue()
 _agent_q:        queue.Queue = queue.Queue()
+_long_confirm_q: queue.Queue = queue.Queue()
 _root:        tk.Tk | None = None
 _ready = threading.Event()
 
@@ -178,7 +179,8 @@ def show(text: str, hwnd: int, empty: bool = False,
          auto_dismiss: float = 0.0,
          raw: str | None = None,
          reformat_backend: str | None = None,
-         task_mode: bool = False) -> None:
+         task_mode: bool = False,
+         duration: float = 0.0) -> None:
     """Queue a dictation preview window. raw= is the pre-vibe-mode Whisper text.
 
     reformat_backend: 'lmstudio' | 'api' | 'rules' | None — which backend
@@ -188,12 +190,15 @@ def show(text: str, hwnd: int, empty: bool = False,
     task_mode: when True, this is a TaskFlow trigger-phrase capture — the
     panel relabels to "Add Task" and confirming creates a TaskFlow task
     instead of pasting.
+
+    duration: seconds of recorded audio, when known — powers the speaking-pace
+    (WPM) footer metric. 0.0 when unavailable.
     """
     _preview_q.put({"text": text, "hwnd": hwnd, "empty": empty,
                     "confidence": confidence, "words": words,
                     "auto_dismiss": auto_dismiss, "raw": raw,
                     "reformat_backend": reformat_backend,
-                    "task_mode": task_mode})
+                    "task_mode": task_mode, "duration": duration})
 
 
 def show_history() -> None:
@@ -252,6 +257,12 @@ def show_agent_confirm(desc: str, confirm_cb) -> None:
     _agent_q.put({"desc": desc, "cb": confirm_cb})
 
 
+def show_long_recording_confirm(duration: float, confirm_cb, cancel_cb=None) -> None:
+    """Confirm gate before transcribing a very long recording (BACKLOG item 10).
+    Safe to call from any thread. confirm_cb/cancel_cb take no arguments."""
+    _long_confirm_q.put({"duration": duration, "confirm_cb": confirm_cb, "cancel_cb": cancel_cb})
+
+
 _partial_q: queue.Queue = queue.Queue()
 
 
@@ -282,6 +293,8 @@ _badge_win:    tk.Toplevel | None = None
 _badge_label:  tk.Label | None = None     # used for non-recording transient states (too_short / not_ready)
 _badge_dot:    tk.Label | None = None
 _badge_canvas: tk.Canvas | None = None    # waveform + logo canvas for recording/processing
+_badge_gradient_img: "ImageTk.PhotoImage | None" = None  # composite wave frame — kept alive against GC
+_badge_gradient_id:  int | None = None    # canvas image item id, reused across frames
 _badge_time:   tk.Label | None = None
 _badge_logo_lbl: tk.Label | None = None
 _badge_logo_variants: list = []           # PhotoImage list indexed by brightness level
@@ -339,10 +352,13 @@ def _tick() -> None:
                     latest_preview.get("raw"),
                     latest_preview.get("reformat_backend"),
                     latest_preview.get("task_mode", False),
+                    latest_preview.get("duration", 0.0),
                 )
             except Exception as e:
-                print(f"preview window error: {e}")
+                log_error("preview", f"preview window failed to open, falling back to edge flash: {e}")
                 _preview_open = False
+                _current_preview_win = None
+                _show_edge_flash(_BLUE)
 
     # Live-update waveform badge
     if _badge_state in ("recording", "recording_task", "processing") and _badge_alive():
@@ -438,6 +454,17 @@ def _tick() -> None:
                 _open_agent_confirm(a["desc"], a["cb"])
             except Exception as exc:
                 log_error("preview", f"agent confirm error: {exc}")
+        except queue.Empty:
+            break
+
+    # Drain long-recording confirm queue (item 10)
+    while True:
+        try:
+            c = _long_confirm_q.get_nowait()
+            try:
+                _open_long_confirm(c["duration"], c["confirm_cb"], c.get("cancel_cb"))
+            except Exception as exc:
+                log_error("preview", f"long recording confirm error: {exc}")
         except queue.Empty:
             break
 
@@ -568,8 +595,8 @@ _BADGE_W       = _px(320)
 _BADGE_H       = _px(64)
 _LOGO_SIZE     = _px(44)
 _WAVE_BAR_N    = 28
-_WAVE_BAR_W    = 4
-_WAVE_BAR_GAP  = 2
+_WAVE_BAR_W    = _px(4)
+_WAVE_BAR_GAP  = _px(2)
 
 
 def _badge_alive() -> bool:
@@ -577,6 +604,7 @@ def _badge_alive() -> bool:
     global _badge_win, _badge_label, _badge_dot, _badge_canvas
     global _badge_time, _badge_logo_lbl, _badge_logo_variants
     global _badge_partial_lbl, _badge_status_lbl
+    global _badge_gradient_img, _badge_gradient_id
     if _badge_win is None:
         return False
     try:
@@ -592,6 +620,8 @@ def _badge_alive() -> bool:
         _badge_logo_variants = []
         _badge_partial_lbl = None
         _badge_status_lbl = None
+        _badge_gradient_img = None
+        _badge_gradient_id = None
         return False
 
 
@@ -618,6 +648,7 @@ def _build_recording_badge(cfg: dict) -> None:
     global _badge_label, _badge_dot, _badge_logo_lbl
     global _badge_logo_variants, _badge_logo_idx, _badge_smoothed
     global _badge_partial_lbl, _badge_status_lbl
+    global _badge_gradient_img, _badge_gradient_id
 
     _badge_win = tk.Toplevel(_root)
     _badge_win.overrideredirect(True)
@@ -672,6 +703,8 @@ def _build_recording_badge(cfg: dict) -> None:
     _badge_label = None
     _badge_dot = None
     _badge_smoothed = [0.0] * _WAVE_BAR_N
+    _badge_gradient_img = None
+    _badge_gradient_id = None
 
     _badge_win.update_idletasks()
     w = _badge_win.winfo_reqwidth()
@@ -737,25 +770,36 @@ def _hex_blend(hex_a: str, hex_b: str, t: float) -> str:
     return f"#{r:02x}{g:02x}{bl:02x}"
 
 
-# Cache gradient swatches per accent to avoid re-blending every frame
-_GRADIENT_STOPS = 6
-_gradient_cache: dict[str, list[str]] = {}
+# Real vertical gradient (item 17) — a single column is rendered once into a
+# PIL image per (accent, theme background, height) and reused every frame via
+# crop + paste, instead of re-blending stacked colour bands on the fly.
+_gradient_col_cache: dict[tuple, "Image.Image"] = {}
 
 
-def _gradient_for(accent: str) -> list[str]:
-    """Return GRADIENT_STOPS colours from `accent` (center, bright) → tip (faded toward _BG)."""
-    cached = _gradient_cache.get(accent)
+def _gradient_column(accent: str, height: int, width: int) -> "Image.Image":
+    """One smooth vertical gradient column, row 0 = brightest (nearest the
+    waveform's centreline) fading toward the panel background at the far row.
+    Cropped from the top for shorter bars, so nearby bars always agree on
+    colour regardless of how tall any one of them currently is."""
+    height = max(1, height)
+    width = max(1, width)
+    key = (accent, _BG, height, width)
+    cached = _gradient_col_cache.get(key)
     if cached is not None:
         return cached
     bright = _hex_blend(accent, "#ffffff", 0.18)
-    stops = [_hex_blend(bright, accent, i / (_GRADIENT_STOPS - 1)) for i in range(_GRADIENT_STOPS)]
-    _gradient_cache[accent] = stops
-    return stops
+    faded  = _hex_blend(accent, _BG, 0.55)
+    img = Image.new("RGB", (width, height))
+    for y in range(height):
+        t = y / max(1, height - 1)
+        img.paste(_hex_blend(bright, faded, t), (0, y, width, y + 1))
+    _gradient_col_cache[key] = img
+    return img
 
 
 def _draw_badge_frame() -> None:
     """Render one frame of the mirrored gradient equalizer + update the timer + pulse logo."""
-    global _badge_anim_phase, _badge_logo_idx
+    global _badge_anim_phase, _badge_logo_idx, _badge_gradient_img, _badge_gradient_id
     if _badge_canvas is None:
         return
 
@@ -804,26 +848,26 @@ def _draw_badge_frame() -> None:
                 else:
                     _badge_smoothed[i] = cur * 0.78 + t * 0.22     # slow release
 
-        # Render mirrored gradient bars
-        _badge_canvas.delete("all")
-        stops = _gradient_for(accent)
-        seg = max_half / _GRADIENT_STOPS
+        # Render mirrored gradient bars — one composite PIL image per frame,
+        # each bar a crop of a gradient column pre-rendered once and cached
+        # (item 17), shown via a single Canvas PhotoImage instead of the old
+        # six stacked flat-colour bands simulating a gradient.
+        canvas_w = _WAVE_BAR_N * (_WAVE_BAR_W + _WAVE_BAR_GAP)
+        col = _gradient_column(accent, int(math.ceil(max_half)) + 1, _WAVE_BAR_W)
+        col_h = col.height
+        mid_i = int(round(mid))
+        frame_img = Image.new("RGB", (canvas_w, int(canvas_h)), _BG)
         for i, h in enumerate(_badge_smoothed):
             x = i * (_WAVE_BAR_W + _WAVE_BAR_GAP)
-            bar_h = max(2.0, h * max_half)
-            visible_segs = int(math.ceil(bar_h / seg))
-            for s in range(min(visible_segs, _GRADIENT_STOPS)):
-                seg_top    = s * seg
-                seg_bottom = min((s + 1) * seg, bar_h)
-                colour = stops[s]
-                _badge_canvas.create_rectangle(
-                    x, mid - seg_bottom, x + _WAVE_BAR_W, mid - seg_top,
-                    fill=colour, outline="",
-                )
-                _badge_canvas.create_rectangle(
-                    x, mid + seg_top, x + _WAVE_BAR_W, mid + seg_bottom,
-                    fill=colour, outline="",
-                )
+            bar_h = min(col_h, max(2, int(round(h * max_half))))
+            top_slice = col.crop((0, 0, _WAVE_BAR_W, bar_h))
+            frame_img.paste(top_slice, (x, mid_i - bar_h))
+            frame_img.paste(top_slice.transpose(Image.FLIP_TOP_BOTTOM), (x, mid_i))
+        _badge_gradient_img = ImageTk.PhotoImage(frame_img)
+        if _badge_gradient_id is None:
+            _badge_gradient_id = _badge_canvas.create_image(0, 0, anchor="nw", image=_badge_gradient_img)
+        else:
+            _badge_canvas.itemconfig(_badge_gradient_id, image=_badge_gradient_img)
 
         # Logo brightness pulse based on overall energy
         if _badge_logo_lbl is not None and _badge_logo_variants:
@@ -901,11 +945,20 @@ def _handle_badge(cmd: str | None) -> None:
         _badge_win = None
 
     if not _badge_alive():
-        if needs_wave:
-            _build_recording_badge(cfg)
-            _draw_badge_frame()
-        else:
-            _build_text_badge(cfg)
+        # Screen-edge flash is the fallback signal for this state change —
+        # only fired if the badge itself fails to build (item 46). In the
+        # normal flow the badge's own entrance animation is the signal, so
+        # main.py no longer flashes unconditionally on recording start.
+        try:
+            if needs_wave:
+                _build_recording_badge(cfg)
+                _draw_badge_frame()
+            else:
+                _build_text_badge(cfg)
+        except Exception as exc:
+            log_error("preview", f"badge build failed, falling back to edge flash: {exc}")
+            _badge_win = None
+            _show_edge_flash(cfg.get("accent", _BLUE))
         return
 
     # Live update existing badge
@@ -989,7 +1042,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                  words: list | None = None,
                  raw: str | None = None,
                  reformat_backend: str | None = None,
-                 task_mode: bool = False) -> None:
+                 task_mode: bool = False,
+                 duration: float = 0.0) -> None:
     global _current_preview_win
 
     refresh_theme()  # catch theme flips before drawing a fresh panel
@@ -1018,6 +1072,17 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     # Premium accent bar — 3px coloured strip at the very top
     tk.Frame(ring, bg=accent, height=3).pack(fill=tk.X, side=tk.TOP)
 
+    # Auto-dismiss countdown — a thin depleting bar along the bottom edge
+    # (item 53). Packed before `frame` below so it reserves its strip first;
+    # `frame`'s expand=True then fills whatever space is left. Only exists
+    # when there's actually a timer to visualise.
+    progress_fill = None
+    if auto_dismiss > 0:
+        progress_track = tk.Frame(ring, bg=_BG2, height=_px(3))
+        progress_track.pack(fill=tk.X, side=tk.BOTTOM)
+        progress_fill = tk.Frame(progress_track, bg=accent, height=_px(3))
+        progress_fill.place(relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
+
     frame = tk.Frame(ring, bg=_BG, padx=20, pady=16)
     frame.pack(fill=tk.BOTH, expand=True)
 
@@ -1034,6 +1099,14 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     # A text glyph, not a Canvas oval — ClearType antialiases it for free.
     tk.Label(header_row, text="●", bg=_BG, fg=(_FG3 if empty else _TASK),
              font=(_FONT_FAM_TEXT, 7, "normal")).pack(side=tk.LEFT, padx=(6, 0))
+    # Pin — suspends the auto-dismiss countdown for long edits (item 55).
+    # Only meaningful when there's a countdown running at all.
+    pin_btn = None
+    if auto_dismiss > 0:
+        pin_btn = tk.Label(header_row, text="📌", bg=_BG, fg=_FG3,
+                           font=(_FONT_FAM_TEXT, 10, "normal"), cursor="hand2")
+        pin_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
     # Paste destination — so it's obvious where Enter sends the text
     dest = "TaskFlow" if task_mode else _target_app_label(hwnd)
     if dest:
@@ -1099,7 +1172,14 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                 font=_FONT_HINT, anchor="w",
             ).pack(fill=tk.X, pady=(0, 2))
 
-    # ── Word + char count ──────────────────────────────────────────────────
+    # ── Word + char count + speaking pace ───────────────────────────────────
+    # Word/char counts live-update as the user edits; WPM is fixed at open
+    # time from the original transcription and recording duration (item 57)
+    # — editing the text afterwards doesn't change how fast it was spoken.
+    orig_word_count = len(text.split()) if not empty and text else 0
+    wpm = (round(orig_word_count / (duration / 60.0))
+           if duration > 0 and orig_word_count > 0 else None)
+
     count_var = tk.StringVar()
     tk.Label(
         frame, textvariable=count_var,
@@ -1110,7 +1190,10 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         content = entry.get("1.0", "end-1c")
         wc = len(content.split()) if content.strip() else 0
         cc = len(content)
-        count_var.set(f"{wc} word{'s' if wc != 1 else ''}  ·  {cc} char{'s' if cc != 1 else ''}")
+        parts = [f"{wc} word{'s' if wc != 1 else ''}", f"{cc} char{'s' if cc != 1 else ''}"]
+        if wpm is not None:
+            parts.append(f"{wpm} wpm")
+        count_var.set("  ·  ".join(parts))
         entry.edit_modified(False)
 
     entry.bind("<<Modified>>", _update_count)
@@ -1131,9 +1214,11 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     btns.pack(anchor=tk.W)
 
     _hooks: list = []  # WH_KEYBOARD_LL hooks active while this preview is open
+    _dismiss_cancel_ref = [lambda: None]  # set below when the countdown exists (item 53)
 
     def _close() -> None:
         global _preview_open, _current_preview_win
+        _dismiss_cancel_ref[0]()
         for _h in list(_hooks):
             try:
                 _keyboard.remove_hotkey(_h)
@@ -1450,9 +1535,89 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         winfx.ease_color(entry, "highlightbackground", _BORDER, target_border,
                          duration_ms=260, steps=10)
 
-    # ── Auto-dismiss ───────────────────────────────────────────────────────
+    # ── Auto-dismiss countdown (items 53, 55) ───────────────────────────────
+    # progress_fill / pin_btn were created earlier (header + bottom-edge
+    # strip) only when auto_dismiss > 0. State machine:
+    #  - typing / focus / hover restart the countdown from full (still counts
+    #    as "the user is engaged, give them a fresh window")
+    #  - the pin button suspends it outright, preserving the remaining time,
+    #    and resumes from there on unpin — distinct from an interaction reset
     if auto_dismiss > 0:
-        win.after(int(auto_dismiss * 1000), _close)
+        _dismiss = {"total": auto_dismiss, "remaining": auto_dismiss,
+                    "deadline": None, "job": None, "tick_job": None, "pinned": False}
+
+        def _dismiss_cancel() -> None:
+            if _dismiss["job"] is not None:
+                try:
+                    win.after_cancel(_dismiss["job"])
+                except Exception:
+                    pass
+                _dismiss["job"] = None
+            if _dismiss["tick_job"] is not None:
+                try:
+                    win.after_cancel(_dismiss["tick_job"])
+                except Exception:
+                    pass
+                _dismiss["tick_job"] = None
+            _dismiss["deadline"] = None
+
+        def _dismiss_tick() -> None:
+            if _dismiss["deadline"] is None or progress_fill is None:
+                return
+            remaining = _dismiss["deadline"] - time.time()
+            try:
+                progress_fill.place(relwidth=max(0.0, min(1.0, remaining / _dismiss["total"])))
+            except Exception:
+                return
+            if remaining <= 0:
+                return
+            _dismiss["tick_job"] = win.after(33, _dismiss_tick)
+
+        def _dismiss_start(seconds: float | None = None) -> None:
+            if _dismiss["pinned"]:
+                return
+            secs = _dismiss["total"] if seconds is None else seconds
+            if secs <= 0:
+                return
+            _dismiss["deadline"] = time.time() + secs
+            _dismiss["job"] = win.after(int(secs * 1000), _close)
+            _dismiss_tick()
+
+        def _dismiss_reset(*_args) -> None:
+            """User interaction (typing / focus / hover) restarts the countdown."""
+            if _dismiss["pinned"]:
+                return
+            _dismiss_cancel()
+            if progress_fill is not None:
+                try:
+                    progress_fill.place(relwidth=1.0)
+                except Exception:
+                    pass
+            _dismiss_start()
+
+        def _toggle_pin() -> None:
+            if pin_btn is None:
+                return
+            if not _dismiss["pinned"]:
+                remaining = (_dismiss["deadline"] - time.time()) if _dismiss["deadline"] else _dismiss["total"]
+                _dismiss["remaining"] = max(0.0, remaining)
+                _dismiss_cancel()
+                _dismiss["pinned"] = True
+                pin_btn.config(fg=accent, bg=_BG2)
+            else:
+                _dismiss["pinned"] = False
+                pin_btn.config(fg=_FG3, bg=_BG)
+                _dismiss_start(_dismiss["remaining"])
+
+        if pin_btn is not None:
+            pin_btn.bind("<Button-1>", lambda e: _toggle_pin())
+        entry.bind("<Key>", _dismiss_reset, add="+")
+        entry.bind("<FocusIn>", _dismiss_reset, add="+")
+        for _hover_widget in (win, ring, frame, entry):
+            _hover_widget.bind("<Enter>", _dismiss_reset, add="+")
+
+        _dismiss_cancel_ref[0] = _dismiss_cancel
+        _dismiss_start()
 
 
 # ---------------------------------------------------------------------------
@@ -1534,6 +1699,75 @@ def _open_agent_confirm(desc: str, confirm_cb) -> None:
     win.focus_force()
 
 
+def _open_long_confirm(duration: float, confirm_cb, cancel_cb=None) -> None:
+    """Confirm gate before transcribing a very long recording (BACKLOG item
+    10). Runs on the tkinter thread; confirm_cb/cancel_cb take no arguments."""
+    refresh_theme()  # catch theme flips before drawing
+
+    win = tk.Toplevel(_root)
+    win.title("VoiceDictate")
+    win.configure(bg=_BG)
+    win.resizable(False, False)
+    win.attributes("-topmost", True)
+    win.attributes("-alpha", 0.0)
+    winfx.apply_rounded_region(win, radius=12)
+
+    accent_bar = tk.Frame(win, bg=_BLUE, height=3)
+    accent_bar.pack(fill=tk.X, side=tk.TOP)
+
+    body = tk.Frame(win, bg=_BG)
+    body.pack(fill=tk.BOTH, expand=True, padx=24, pady=(18, 14))
+
+    secs = max(0, int(round(duration)))
+    mins, rem = divmod(secs, 60)
+    dur_label = f"{mins}m {rem:02d}s" if mins else f"{secs}s"
+
+    tk.Label(body, text=f"Long recording ({dur_label}) — transcribe?", bg=_BG, fg=_FG,
+             font=(_FONT_FAM_DISPLAY, 13, "bold"), wraplength=340, justify="left").pack(anchor="w")
+
+    tk.Label(body, text="That's a lot of audio — make sure the hotkey wasn't held by accident.",
+             bg=_BG2, fg=_FG2, font=_FONT_BODY, wraplength=340, justify="left",
+             padx=12, pady=8).pack(fill=tk.X, pady=(10, 0))
+
+    hint = tk.Label(body, text="Enter to transcribe  ·  Esc to discard",
+                    bg=_BG, fg=_FG3, font=_FONT_HINT)
+    hint.pack(anchor="w", pady=(8, 0))
+
+    btns = tk.Frame(body, bg=_BG)
+    btns.pack(fill=tk.X, pady=(14, 0))
+
+    def do_confirm():
+        win.destroy()
+        if confirm_cb:
+            confirm_cb()
+
+    def do_cancel():
+        win.destroy()
+        if cancel_cb:
+            cancel_cb()
+
+    tk.Button(btns, text="Discard", command=do_cancel,
+              bg=_BG2, fg=_FG2, activebackground=_BG3, activeforeground=_FG,
+              relief="flat", bd=0, font=_FONT_BTN, padx=12, pady=6,
+              cursor="hand2").pack(side=tk.RIGHT, padx=(6, 0))
+    tk.Button(btns, text="Transcribe", command=do_confirm,
+              bg=_BLUE, fg="#ffffff", activebackground=_BLUE_HV,
+              activeforeground="#ffffff", relief="flat", bd=0,
+              font=_FONT_BTN, padx=16, pady=6, cursor="hand2").pack(side=tk.RIGHT)
+
+    win.bind("<Return>", lambda _: do_confirm())
+    win.bind("<Escape>", lambda _: do_cancel())
+    win.protocol("WM_DELETE_WINDOW", do_cancel)
+
+    win.update_idletasks()
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    w  = win.winfo_reqwidth()
+    h  = win.winfo_reqheight()
+    win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    winfx.fade_in(win, target=0.97, duration_ms=150)
+    win.focus_force()
 
 
 def _open_history() -> None:

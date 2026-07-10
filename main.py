@@ -71,6 +71,7 @@ _agent_session: bool = False  # True when Ctrl+Shift+C triggered this recording
 _last_dictation_text: str = ""  # newest final transcription — used by the repaste hotkey
 
 _UNDO_PHRASES = {"scratch that", "undo that", "undo last insert"}
+_LONG_RECORDING_CONFIRM_SECONDS = 30.0  # BACKLOG item 10 — gate before transcribing accidental long holds
 
 _HOT_RELOAD_INTERVAL = 30  # seconds
 
@@ -413,7 +414,7 @@ def main() -> None:
     # ------------------------------------------------------------------
 
     def _run_transcription(chunks: list, hwnd: int, task_session: bool = False,
-                           agent_session: bool = False) -> None:
+                           agent_session: bool = False, duration: float = 0.0) -> None:
         cfg = _get_cfg()
 
         # QW-5: per-app vocabulary/prompt override based on foreground exe
@@ -460,7 +461,8 @@ def main() -> None:
 
         audio_file = _save_recording(chunks, cfg) if text.strip() else None
         if text.strip() and not cfg.get("history_paused", False):
-            history.save(text.strip(), audio=audio_file)
+            history.save(text.strip(), source="agent" if agent_session else None,
+                         audio=audio_file)
 
         # Ctrl+Alt+C agent mode: classify + confirm gate via preview
         if agent_session and text.strip():
@@ -522,6 +524,7 @@ def main() -> None:
                 words=words,
                 auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
                 task_mode=True,
+                duration=duration,
             )
             return
 
@@ -570,6 +573,7 @@ def main() -> None:
                         words=None,
                         auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
                         task_mode=True,
+                        duration=duration,
                     )
                     return
                 # Embedded mid-utterance: auto-create immediately (no
@@ -602,6 +606,7 @@ def main() -> None:
             confidence=confidence,
             words=None if task_extracted else words,
             auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
+            duration=duration,
         )
 
     def _on_audio_stop(chunks: list) -> None:
@@ -609,13 +614,28 @@ def main() -> None:
         hwnd = inject.capture_foreground()
         task_mode  = _task_session
         agent_mode = _agent_session
-        tray.set_state("processing")
-        preview.show_badge("processing")
-        threading.Thread(
-            target=_run_transcription,
-            args=(chunks, hwnd, task_mode, agent_mode),
-            daemon=True,
-        ).start()
+        duration = (sum(len(c) for c in chunks) / audio.SAMPLE_RATE) if chunks else 0.0
+
+        def _proceed() -> None:
+            tray.set_state("processing")
+            preview.show_badge("processing")
+            threading.Thread(
+                target=_run_transcription,
+                args=(chunks, hwnd, task_mode, agent_mode, duration),
+                daemon=True,
+            ).start()
+
+        # BACKLOG item 10 — very long holds are usually an accidental hotkey
+        # stick; confirm before burning a whisper-server pass on them instead
+        # of silently processing.
+        if duration > _LONG_RECORDING_CONFIRM_SECONDS:
+            tray.set_state("idle")
+            preview.hide_badge()
+            preview.show_long_recording_confirm(
+                duration, _proceed, lambda: tray.set_state("idle"))
+            return
+
+        _proceed()
 
     def _partial_worker() -> None:
         """Live partial transcription while recording — feeds the badge.
@@ -649,8 +669,10 @@ def main() -> None:
         if agent:
             hotkey.set_external_recording(True)
         preview.close_current_preview()
-        edge = "#f97316" if agent else ("#22c55e" if _task_session else "#3b82f6")
-        preview.flash_screen_edge(edge)
+        # No unconditional edge flash here — the badge's own entrance animation
+        # is the "hotkey registered" signal; flash_screen_edge is now only a
+        # fallback fired from preview.py if the badge itself fails to build
+        # (item 46 — previously this double-fired alongside the badge).
         tray.set_state("recording")
         badge = "recording_task" if _task_session else "recording"
         preview.show_badge(badge)
