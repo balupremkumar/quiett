@@ -993,6 +993,7 @@ def main() -> None:
         on_toggle_pause=hotkey.set_paused,
         on_view_profile=lambda: dashboard.open_window("home"),
         on_open_settings=lambda: dashboard.open_window("settings"),
+        on_open_dashboard=lambda: dashboard.open_window("home"),
         on_relaunch_taskflow=lambda: threading.Thread(target=taskflow.ensure_running, daemon=True).start(),
         on_toggle_clipboard_only=_on_toggle_clipboard_only,
         clipboard_only=_cfg.get("paste_mode", "auto") == "clipboard_only",

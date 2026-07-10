@@ -290,6 +290,7 @@ _badge_state:  str | None = None
 _badge_anim_phase: float = 0.0            # drives the processing sweep
 _badge_smoothed: list[float] = []         # interpolated bar heights for ease-out decay
 _badge_partial_lbl: tk.Label | None = None  # live partial transcription line
+_badge_status_lbl:  tk.Label | None = None  # dedicated status line — never shares space with transcript text
 
 
 def _tick() -> None:
@@ -554,10 +555,10 @@ def _show_edge_flash(colour: str) -> None:
 # ---------------------------------------------------------------------------
 
 _BADGE_CFG = {
-    "recording":      {"accent": "#e03030", "logo_bg": (210,  30,  30)},
-    "recording_task": {"accent": "#22c55e", "logo_bg": ( 34, 197,  94)},  # green — Ctrl+Shift+Alt task capture
-    "processing":     {"accent": "#c8a000", "logo_bg": (200, 160,   0)},
-    "reformatting":   {"accent": "#7b5ea7", "logo_bg": (123,  94, 167)},
+    "recording":      {"accent": "#e03030", "logo_bg": (210,  30,  30), "status": "Recording…"},
+    "recording_task": {"accent": "#22c55e", "logo_bg": ( 34, 197,  94), "status": "Recording task…"},  # green — Ctrl+Shift+Alt task capture
+    "processing":     {"accent": "#c8a000", "logo_bg": (200, 160,   0), "status": "Processing…"},
+    "reformatting":   {"accent": "#7b5ea7", "logo_bg": (123,  94, 167), "status": "Cleaning up…"},
     "too_short":      {"accent": "#888888", "text": "Hold longer to record"},
     "not_ready":      {"accent": "#888888", "text": "Model loading — please wait"},
 }
@@ -575,7 +576,7 @@ def _badge_alive() -> bool:
     """Return True only if _badge_win is a live Tkinter window."""
     global _badge_win, _badge_label, _badge_dot, _badge_canvas
     global _badge_time, _badge_logo_lbl, _badge_logo_variants
-    global _badge_partial_lbl
+    global _badge_partial_lbl, _badge_status_lbl
     if _badge_win is None:
         return False
     try:
@@ -590,6 +591,7 @@ def _badge_alive() -> bool:
         _badge_logo_lbl = None
         _badge_logo_variants = []
         _badge_partial_lbl = None
+        _badge_status_lbl = None
         return False
 
 
@@ -615,7 +617,7 @@ def _build_recording_badge(cfg: dict) -> None:
     global _badge_win, _badge_canvas, _badge_time
     global _badge_label, _badge_dot, _badge_logo_lbl
     global _badge_logo_variants, _badge_logo_idx, _badge_smoothed
-    global _badge_partial_lbl
+    global _badge_partial_lbl, _badge_status_lbl
 
     _badge_win = tk.Toplevel(_root)
     _badge_win.overrideredirect(True)
@@ -651,6 +653,15 @@ def _build_recording_badge(cfg: dict) -> None:
     )
     _badge_time.pack(side=tk.LEFT, padx=(12, 0))
 
+    # Dedicated status line — own zone below the waveform row, distinct from
+    # the partial-transcript line below it so state text and dictated text
+    # never occupy or overwrite the same space.
+    _badge_status_lbl = tk.Label(
+        inner, text=cfg.get("status", ""), bg=_BG, fg=_FG3,
+        font=(_FONT_FAM_TEXT, 8), anchor="w",
+    )
+    _badge_status_lbl.pack(fill=tk.X, pady=(6, 0))
+
     # Live partial transcription line — packed lazily when text first arrives
     _badge_partial_lbl = tk.Label(
         inner, text="", bg=_BG, fg=_FG2,
@@ -677,8 +688,9 @@ def _build_text_badge(cfg: dict) -> None:
     """Lightweight text badge for too_short / not_ready toasts."""
     global _badge_win, _badge_label, _badge_dot
     global _badge_canvas, _badge_time, _badge_logo_lbl, _badge_logo_variants
-    global _badge_partial_lbl
+    global _badge_partial_lbl, _badge_status_lbl
     _badge_partial_lbl = None
+    _badge_status_lbl = None
 
     _badge_win = tk.Toplevel(_root)
     _badge_win.overrideredirect(True)
@@ -904,6 +916,11 @@ def _handle_badge(cmd: str | None) -> None:
             if _badge_logo_lbl is not None:
                 try:
                     _badge_logo_lbl.config(image=_badge_logo_variants[0])
+                except Exception:
+                    pass
+            if _badge_status_lbl is not None:
+                try:
+                    _badge_status_lbl.config(text=cfg.get("status", ""))
                 except Exception:
                     pass
         _draw_badge_frame()

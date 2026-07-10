@@ -25,6 +25,16 @@ except ImportError:
 
 _CONFIG_FILE = "config.json"
 
+# Bumped by hand alongside CHANGELOG entries below (no CHANGELOG.md yet —
+# app is pre-productisation per PRODUCTION_PLAN.md, hardcode until it exists).
+VERSION = "0.1.0"
+_CHANGELOG = [
+    {"version": "0.1.0", "date": "2026-07-11", "notes": [
+        "History search, day-grouping, and window-position memory added to dashboard.",
+        "About page added.",
+    ]},
+]
+
 # ── Subprocess launcher ────────────────────────────────────────────────────────
 # pywebview requires the main thread, but pystray already owns it in main.py.
 # Solution: launch the dashboard as a separate pythonw.exe subprocess so
@@ -76,6 +86,57 @@ def _merge_cfg(updates: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+def _day_group_label(d: "date", today: "date") -> str:
+    """Today / Yesterday / weekday name (this calendar week) / '3 July 2026'."""
+    diff = (today - d).days
+    if diff == 0:
+        return "Today"
+    if diff == 1:
+        return "Yesterday"
+    if diff > 1 and d.isocalendar()[:2] == today.isocalendar()[:2]:
+        return d.strftime("%A")
+    return d.strftime("%d %B %Y").lstrip("0")
+
+
+# ── Window geometry persistence ──────────────────────────────────────────────
+
+_MIN_W, _MIN_H = 700, 500
+
+
+def _load_window_geom() -> "dict | None":
+    geom = _read_cfg().get("dashboard_window")
+    if not isinstance(geom, dict):
+        return None
+    try:
+        x, y = int(geom["x"]), int(geom["y"])
+        w, h = max(_MIN_W, int(geom["w"])), max(_MIN_H, int(geom["h"]))
+    except Exception:
+        return None
+    try:
+        screens = webview.screens
+        if screens:
+            min_x = min(s.x for s in screens)
+            min_y = min(s.y for s in screens)
+            max_x = max(s.x + s.width for s in screens)
+            max_y = max(s.y + s.height for s in screens)
+            # Clamp so the title bar always stays reachable even if the
+            # monitor that used to hold the window is now unplugged.
+            x = min(max(x, min_x), max_x - 120)
+            y = min(max(y, min_y), max_y - 80)
+    except Exception:
+        pass
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
+def _save_window_geom(win) -> None:
+    try:
+        _merge_cfg({"dashboard_window": {
+            "x": win.x, "y": win.y, "w": win.width, "h": win.height,
+        }})
+    except Exception:
+        pass
 
 
 def _apply_titlebar_theme(dark: bool) -> None:
@@ -130,7 +191,8 @@ class DashboardAPI:
 
     def get_history(self, limit: int = 200) -> list:
         entries = hist.load()
-        today = date.today().isoformat()
+        today = date.today()
+        today_str = today.isoformat()
         result = []
         for i, e in enumerate(entries[:limit]):
             text = e.get("text", "")
@@ -139,15 +201,18 @@ class DashboardAPI:
             try:
                 dt = datetime.fromisoformat(ts)
                 ts_date = dt.date().isoformat()
-                fmt = "%I:%M %p" if ts_date == today else "%d %b, %I:%M %p"
+                fmt = "%I:%M %p" if ts_date == today_str else "%d %b, %I:%M %p"
                 label = dt.strftime(fmt).lstrip("0")
+                day_label = _day_group_label(dt.date(), today)
             except Exception:
                 label = ts
                 ts_date = ""
+                day_label = ""
             result.append({
                 "index": i, "text": text,
                 "words": len(text.split()),
                 "label": label, "ts_date": ts_date, "source": source,
+                "day_label": day_label,
             })
         return result
 
@@ -261,6 +326,9 @@ class DashboardAPI:
         except Exception:
             return []
 
+    def get_about(self) -> dict:
+        return {"version": VERSION, "changelog": _CHANGELOG}
+
 
 
 
@@ -358,6 +426,9 @@ body{font-family:var(--font);background:var(--bg);color:var(--txt);-webkit-font-
 
 /* ── Activity / History list ── */
 .list-wrap{padding:0 30px;flex:1;overflow-y:auto}
+.day-hdr{font-size:10.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;
+  color:var(--txt3);padding:14px 12px 6px}
+.day-hdr:first-child{padding-top:4px}
 .list-item{padding:9px 12px;border-radius:var(--r-sm);cursor:default;
   transition:background .1s;position:relative;display:flex;flex-direction:column;
   gap:2px;border-bottom:1px solid var(--brd)}
@@ -519,6 +590,10 @@ select option{background:var(--surf2);color:var(--txt)}
       <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
       Settings
     </button>
+    <button class="nav-item" data-page="about" onclick="navigateTo('about')">
+      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+      About
+    </button>
   </nav>
   <div class="sb-footer">
     <div class="sb-status">
@@ -591,7 +666,7 @@ select option{background:var(--surf2);color:var(--txt)}
   </div>
   <div class="search-wrap">
     <svg class="search-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"/></svg>
-    <input class="search-in" id="histSearch" placeholder="Search dictations…" oninput="filterHistory(this.value)">
+    <input class="search-in" id="histSearch" placeholder="Search dictations or app…" oninput="onHistSearchInput(this.value)">
   </div>
   <div class="list-wrap" id="historyList"><div class="empty">Loading…</div></div>
 </div>
@@ -760,6 +835,38 @@ select option{background:var(--surf2);color:var(--txt)}
   </div>
 </div>
 
+<!-- About -->
+<div class="page" id="page-about">
+  <div class="ph"><div><h1>About</h1><div class="sub">Version, licence, and credits.</div></div></div>
+  <div class="dict-grid" style="grid-template-columns:1fr">
+    <div class="dict-sec">
+      <div class="dict-sec-ttl">VoiceDictate</div>
+      <div class="s-lbl-s" id="aboutVersion" style="font-size:12.5px">Version —</div>
+      <div class="s-lbl-s" style="font-size:12.5px;line-height:1.5">
+        Offline, hold-to-talk voice dictation for Windows. Records while you hold a hotkey,
+        transcribes locally, and lets you review before it lands in whatever app has focus.
+      </div>
+      <div class="s-lbl-s" style="font-size:11.5px;margin-top:2px">
+        Licence: private build, not for redistribution.
+      </div>
+    </div>
+    <div class="dict-sec">
+      <div class="dict-sec-ttl">Credits</div>
+      <div class="s-lbl-s" style="font-size:12.5px;line-height:1.7">
+        Speech recognition by <strong style="color:var(--txt2)">whisper.cpp</strong>
+        (large-v3-turbo, Vulkan build) — ggml-org/whisper.cpp, MIT licence.<br>
+        Agent command mode via <strong style="color:var(--txt2)">LM Studio</strong> +
+        Qwen2.5-1.5B-Instruct.
+      </div>
+    </div>
+    <div class="dict-sec">
+      <div class="dict-sec-ttl">Changelog</div>
+      <div id="changelogList" class="s-lbl-s" style="font-size:12.5px">Loading…</div>
+      <button class="btn btn-s" disabled title="Offline app — no update check" style="opacity:.5;cursor:not-allowed;align-self:flex-start">Check for updates</button>
+    </div>
+  </div>
+</div>
+
 </main>
 </div>
 
@@ -811,6 +918,7 @@ function navigateTo(page) {
   else if (page === 'history') loadHistory();
   else if (page === 'dictionary') loadDictionary();
   else if (page === 'settings') loadSettings();
+  else if (page === 'about') loadAbout();
 }
 
 // ── Theme ──────────────────────────────────────────────────────────────────
@@ -875,18 +983,40 @@ async function loadHome() {
 }
 
 // ── History page ──────────────────────────────────────────────────────────
+let _histQuery = '';
+
 async function loadHistory() {
   const el = document.getElementById('historyList');
   el.innerHTML = '<div class="empty">Loading…</div>';
   _histAll = await window.pywebview.api.get_history(200);
-  renderHistory(_histAll);
+  renderHistory(filterEntries(_histAll, _histQuery));
+}
+
+function filterEntries(items, q) {
+  if (!q) return items;
+  const needle = q.toLowerCase();
+  return items.filter(e =>
+    e.text.toLowerCase().includes(needle) ||
+    (e.source || '').toLowerCase().includes(needle));
 }
 
 function renderHistory(items) {
   _histTexts = items.map(e => e.text);
   const el = document.getElementById('historyList');
-  if (!items.length) { el.innerHTML = '<div class="empty">No dictations found.</div>'; return; }
-  el.innerHTML = items.map((e, i) => `
+  if (!items.length) {
+    el.innerHTML = _histQuery
+      ? `<div class="empty">No dictations match “${esc(_histQuery)}”.</div>`
+      : '<div class="empty">No dictations yet.</div>';
+    return;
+  }
+  let lastDay = null;
+  let html = '';
+  items.forEach((e, i) => {
+    if (e.day_label && e.day_label !== lastDay) {
+      lastDay = e.day_label;
+      html += `<div class="day-hdr">${esc(e.day_label)}</div>`;
+    }
+    html += `
     <div class="list-item" id="hi-${e.index}">
       <div class="li-text">${esc(e.text)}</div>
       <div class="li-meta">
@@ -898,18 +1028,24 @@ function renderHistory(items) {
         <button class="ia" title="Copy" onclick="copyText(_histTexts[${i}])">${copyIcon()}</button>
         <button class="ia del" title="Delete" onclick="deleteHistory(${e.index})">${trashIcon()}</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  });
+  el.innerHTML = html;
 }
 
-function filterHistory(q) {
-  const filtered = q ? _histAll.filter(e => e.text.toLowerCase().includes(q.toLowerCase())) : _histAll;
-  renderHistory(filtered);
+let _histSearchT = null;
+function onHistSearchInput(q) {
+  clearTimeout(_histSearchT);
+  _histSearchT = setTimeout(() => {
+    _histQuery = q;
+    renderHistory(filterEntries(_histAll, _histQuery));
+  }, 150);
 }
 
 async function deleteHistory(idx) {
   await window.pywebview.api.delete_history_entry(idx);
   _histAll = _histAll.filter(e => e.index !== idx);
-  renderHistory(_histAll);
+  renderHistory(filterEntries(_histAll, _histQuery));
 }
 
 async function confirmClear() {
@@ -1038,6 +1174,24 @@ async function loadSettings() {
 
 async function reloadSettings() { await loadSettings(); }
 
+// ── About page ─────────────────────────────────────────────────────────────
+async function loadAbout() {
+  const about = await window.pywebview.api.get_about();
+  document.getElementById('aboutVersion').textContent = 'Version ' + about.version;
+  const el = document.getElementById('changelogList');
+  if (!about.changelog || !about.changelog.length) {
+    el.innerHTML = '<div class="empty" style="padding:8px 0">No changelog entries yet.</div>';
+    return;
+  }
+  el.innerHTML = about.changelog.map(c => `
+    <div style="margin-bottom:10px">
+      <div style="color:var(--txt);font-weight:600">v${esc(c.version)} <span style="color:var(--txt3);font-weight:400">— ${esc(c.date)}</span></div>
+      <ul style="margin:4px 0 0 16px;padding:0">
+        ${c.notes.map(n => `<li style="margin-bottom:2px">${esc(n)}</li>`).join('')}
+      </ul>
+    </div>`).join('');
+}
+
 function togClick(el) { el.classList.toggle('on'); autoSave(); }
 
 // ── Instant apply — settings persist on change, no Save button ─────────────
@@ -1155,13 +1309,34 @@ if __name__ == "__main__":
     # and a dark window background behind every resize.
     _html = _html.replace("let _theme = 'dark';", f"let _theme = '{_theme}';")
     _html = _html.replace('<html lang="en">', f'<html lang="en" data-theme="{_theme}">')
-    _w = webview.create_window(
+    _geom = _load_window_geom()
+    _win_kwargs = dict(
         title="VoiceDictate",
         html=_html,
         js_api=DashboardAPI(),
-        width=980, height=660,
-        min_size=(700, 500),
+        min_size=(_MIN_W, _MIN_H),
         background_color="#ececef" if _theme == "light" else "#202020",
     )
+    if _geom:
+        _win_kwargs.update(x=_geom["x"], y=_geom["y"], width=_geom["w"], height=_geom["h"])
+    else:
+        _win_kwargs.update(width=980, height=660)
+    _w = webview.create_window(**_win_kwargs)
     _w.events.shown += lambda: _apply_titlebar_theme(_theme != "light")
+    # Debounced geometry save on move/resize — avoids hammering config.json
+    # while the user is mid-drag.
+    _geom_timer: "threading.Timer | None" = None
+    _geom_timer_lock = threading.Lock()
+
+    def _schedule_geom_save(*_args):
+        global _geom_timer
+        with _geom_timer_lock:
+            if _geom_timer is not None:
+                _geom_timer.cancel()
+            _geom_timer = threading.Timer(0.6, _save_window_geom, args=(_w,))
+            _geom_timer.daemon = True
+            _geom_timer.start()
+
+    _w.events.moved += _schedule_geom_save
+    _w.events.resized += _schedule_geom_save
     webview.start(debug=False, gui="edgechromium")

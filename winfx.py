@@ -18,6 +18,11 @@ _DWMWA_WINDOW_CORNER_PREFERENCE = 33
 _DWMWCP_ROUND = 2
 
 
+class _MARGINS(ctypes.Structure):
+    _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
+                ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
+
+
 def _toplevel_hwnd(win) -> int:
     # winfo_id on Tk returns the inner widget HWND; walk up to the actual top-level
     hwnd = int(win.winfo_id())
@@ -48,6 +53,7 @@ def apply_rounded_region(win, radius: int = 12) -> None:
                 wintypes.HWND(hwnd), _DWMWA_WINDOW_CORNER_PREFERENCE,
                 ctypes.byref(pref), ctypes.sizeof(pref))
             if hr == 0:
+                _apply_drop_shadow(hwnd)
                 return
         except Exception:
             pass
@@ -57,6 +63,21 @@ def apply_rounded_region(win, radius: int = 12) -> None:
             pass
         rgn = win32gui.CreateRoundRectRgn(0, 0, w + 1, h + 1, radius * 2, radius * 2)
         win32gui.SetWindowRgn(hwnd, rgn, True)
+    except Exception:
+        pass
+
+
+def _apply_drop_shadow(hwnd: int) -> None:
+    """Extend a 1px DWM frame margin into the client area — the documented
+    minimal-margins trick that makes the compositor draw its native drop
+    shadow around a borderless window, without a real "sheet of glass"
+    effect. Only called after DWMWA_WINDOW_CORNER_PREFERENCE succeeds, since
+    that's the Win11 compositor path; the Win10 region-mask fallback would
+    just clip the shadow away."""
+    try:
+        margins = _MARGINS(0, 0, 0, 1)
+        ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(
+            wintypes.HWND(hwnd), ctypes.byref(margins))
     except Exception:
         pass
 

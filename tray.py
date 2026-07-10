@@ -12,6 +12,7 @@ processing yellow — transcribing audio
 import math
 import os
 import threading
+import time
 
 import pystray
 from PIL import Image, ImageDraw
@@ -21,7 +22,10 @@ _icon: pystray.Icon | None = None
 _on_view_history  = None
 _on_toggle_pause  = None
 _on_view_profile  = None
+_on_open_dashboard = None
 _paused = False
+_pause_until: float | None = None   # epoch seconds; None = paused-until-restart (or not paused)
+_pause_timer: threading.Timer | None = None
 _lock = threading.Lock()
 
 _LABELS = {
@@ -341,11 +345,11 @@ def configure(on_view_history, on_toggle_pause=None,
               on_toggle_clipboard_only=None, clipboard_only: bool = False,
               on_relaunch_taskflow=None,
               on_toggle_agent_command_mode=None, agent_command_mode: bool = False,
-              on_rebuild_voice_profile=None) -> None:
+              on_rebuild_voice_profile=None, on_open_dashboard=None) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
     global _on_toggle_clipboard_only, _clipboard_only, _on_relaunch_taskflow
     global _on_toggle_agent_command_mode, _agent_command_mode
-    global _on_rebuild_voice_profile
+    global _on_rebuild_voice_profile, _on_open_dashboard
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
@@ -356,6 +360,7 @@ def configure(on_view_history, on_toggle_pause=None,
     _on_toggle_agent_command_mode = on_toggle_agent_command_mode
     _agent_command_mode = agent_command_mode
     _on_rebuild_voice_profile = on_rebuild_voice_profile
+    _on_open_dashboard = on_open_dashboard if on_open_dashboard else on_view_profile
 
 
 def increment_task_count() -> None:
@@ -410,8 +415,43 @@ def set_state(state: str) -> None:
                 _start_pulse()
             else:
                 _icon.icon = _ICONS.get(state, _ICONS["idle"])
-            _icon.title = _TOOLTIPS.get(state, f"VoiceDictate — {state}")
+            _icon.title = _pause_tooltip() if _paused else _TOOLTIPS.get(state, f"VoiceDictate — {state}")
             _icon.update_menu()
+
+
+def _pause_tooltip() -> str:
+    if _pause_until is None:
+        return "VoiceDictate — Paused"
+    remaining = int(_pause_until - time.time())
+    if remaining <= 0:
+        return "VoiceDictate — Paused"
+    mins = max(1, round(remaining / 60))
+    return f"VoiceDictate — Paused ({mins} min left)"
+
+
+def _auto_resume() -> None:
+    _set_paused(False)
+
+
+def _set_paused(paused: bool, resume_at: float | None = None) -> None:
+    """Pause or resume dictation. resume_at (epoch seconds) schedules an
+    auto-resume via threading.Timer; None + paused=True means paused until
+    the app restarts."""
+    global _paused, _pause_until, _pause_timer
+    if _pause_timer is not None:
+        _pause_timer.cancel()
+        _pause_timer = None
+    _paused = paused
+    _pause_until = resume_at if paused else None
+    if _on_toggle_pause:
+        _on_toggle_pause(_paused)
+    if paused and resume_at is not None:
+        _pause_timer = threading.Timer(max(0.0, resume_at - time.time()), _auto_resume)
+        _pause_timer.daemon = True
+        _pause_timer.start()
+    if _icon is not None:
+        _icon.title = _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}")
+        _icon.update_menu()
 
 
 def notify(title: str, message: str) -> None:
@@ -429,12 +469,21 @@ def run() -> None:
         if _on_view_history:
             _on_view_history()
 
-    def _toggle_pause(icon, item):
-        global _paused
-        _paused = not _paused
-        if _on_toggle_pause:
-            _on_toggle_pause(_paused)
-        icon.update_menu()
+    def _pause_15(icon, item):
+        _set_paused(True, time.time() + 15 * 60)
+
+    def _pause_60(icon, item):
+        _set_paused(True, time.time() + 60 * 60)
+
+    def _pause_until_restart(icon, item):
+        _set_paused(True, None)
+
+    def _resume(icon, item):
+        _set_paused(False)
+
+    def _open_dashboard(icon, item):
+        if _on_open_dashboard:
+            _on_open_dashboard()
 
     def _open_config(icon, item):
         try:
@@ -480,21 +529,40 @@ def run() -> None:
     def _task_count_label(_item) -> str:
         return f"Tasks added this session: {_task_count}"
 
-    menu = pystray.Menu(
-        pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
+    # Timed-pause flyout: durations + Resume (only enabled while paused)
+    pause_menu = pystray.Menu(
+        pystray.MenuItem("Pause 15 min",         _pause_15),
+        pystray.MenuItem("Pause 1 hour",         _pause_60),
+        pystray.MenuItem("Pause until restart",  _pause_until_restart),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Resume", _resume, enabled=lambda item: _paused),
+    )
+
+    # Rare/utility actions tucked away so the top level stays short
+    more_menu = pystray.Menu(
         pystray.MenuItem("Agent Command Mode", _toggle_agent_command_mode, checked=lambda item: _agent_command_mode),
         pystray.MenuItem("Clipboard Only", _toggle_clipboard_only, checked=lambda item: _clipboard_only),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(_taskflow_label, _relaunch_taskflow),
         pystray.MenuItem(_task_count_label, lambda icon, item: None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("View History",    _view_history),
-        pystray.MenuItem("Speech Profile",  _view_profile),
+        pystray.MenuItem("Speech Profile", _view_profile),
         pystray.MenuItem("Rebuild Voice Profile", _rebuild_voice_profile),
-        pystray.MenuItem("Settings",        _open_settings),
-        pystray.MenuItem(lambda _: "Resume" if _paused else "Pause", _toggle_pause),
-        pystray.MenuItem("Open Config",     _open_config),
-        pystray.MenuItem("Quit",            lambda icon, item: icon.stop()),
+        pystray.MenuItem("Open Config", _open_config),
+    )
+
+    menu = pystray.Menu(
+        pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
+        # Hidden default item — fires on left-click, doesn't show up in the right-click menu
+        pystray.MenuItem("Open Dashboard", _open_dashboard, default=True, visible=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("View History", _view_history),
+        pystray.MenuItem("Settings",     _open_settings),
+        pystray.MenuItem(lambda _: "Paused" if _paused else "Pause", pause_menu),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("More", more_menu),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Quit", lambda icon, item: icon.stop()),
     )
     _icon = pystray.Icon(
         name="dictation",

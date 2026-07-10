@@ -27,11 +27,11 @@ Impact H/M/L, Effort S/M/L.
 8. [ ] Hover-to-reveal stop/cancel controls on the compact pill; idle state stays minimal. (M/S) — superwhisper.
 9. [ ] Raw-vs-cleaned transcript toggle in the preview panel before accepting. (M/M) — superwhisper Voice/AI toggle.
 10. [ ] Confirmation prompt before processing very long recordings (>30s) to catch accidental holds. (L-M/S) — superwhisper.
-11. [ ] Separate status zone in the recording bar ("processing…", "done") from the transcript text region. (M/S) — Windows Voice Access layout.
+11. [x] (2026-07-11) Dedicated status row in the wave badge ("Recording…", "Processing…", "Cleaning up…") between waveform and partial transcript; panel header already carried the status dot. No "Done" state invented (would touch main.py flow).
 12. [ ] Selectable listening-state animations (pulse, ink-flow, etc.) as a personalisation touch. (L/M) — VoiceInk's nine animations.
 13. [ ] Context-capture badge confirming clipboard/selection was grabbed as context. (L/S) — superwhisper Super Mode.
 14. [ ] Acrylic backdrop on the popup via `DWMWA_SYSTEMBACKDROP_TYPE` = `DWMSBT_TRANSIENTWINDOW` (documented Win11 route, not the fragile Win10 accent API). (M/M) — MS Learn system backdrops.
-15. [ ] Proper DWM drop shadow via `DwmExtendFrameIntoClientArea`, not legacy `CS_DROPSHADOW`. (M/S) — Cyotek/DWM docs.
+15. [x] (2026-07-11) DWM drop shadow via `DwmExtendFrameIntoClientArea` 1px bottom margin (winfx.py), Win11 corner-preference path only; Win10 region fallback untouched.
 16. [x] (2026-07-10) `DWMWA_WINDOW_CORNER_PREFERENCE` in winfx.apply_rounded_region, region mask kept as Win10 fallback (with DPI-scaled radius). Turned out to be the full fix, not just interim — see item 1.
 17. [ ] True gradient in the badge; today it is six stacked colour bands simulating one (preview.py:676). (L/S) — audit.
 18. [ ] Slide+fade entrance 150-250ms; today it is alpha-fade only, no positional motion (winfx.py:84-92). (M/M) — motion guides.
@@ -41,8 +41,8 @@ Impact H/M/L, Effort S/M/L.
 ### Tray + desktop icons
 
 21. [x] (2026-07-10) Monochrome theme-aware tray icon (SystemUsesLightTheme), state as colour dot, pulse moved to the dot; coloured badge kept for the desktop .ico.
-22. [ ] Left-click = single default action, right-click = full menu; don't overload one button. (M/S) — Win11 tray convention.
-23. [ ] Restructure the tray menu (currently ~13 items flat, tray.py:394-409) into grouped sections with the rare actions in a submenu. (M/S) — audit + tray conventions.
+22. [x] (2026-07-11) Left-click opens the dashboard (hidden default=True menu item), right-click keeps the full menu.
+23. [x] (2026-07-11) Tray menu grouped: state, common actions (History, Settings, Pause submenu), rare actions under "More", Quit; all prior actions reachable.
 24. [ ] Desktop/installer icon redesign around one bold mic-to-caret glyph with subtle depth at 256px (ties to PRODUCTION_PLAN P2). (H/M) — MS/Apple icon guidelines.
 25. [ ] Verify exported ICO bytes; Pillow has a known 255x255-clamp footgun on the 256px frame. (L/S) — Pillow #2264.
 26. [ ] Re-render the recording pulse frames against the new icon set (pulse machinery already exists, tray.py:113). (L/S) — audit.
@@ -61,7 +61,7 @@ Impact H/M/L, Effort S/M/L.
 ### History
 
 35. [ ] Consolidate the two history views (legacy Tk viewer in preview.py vs dashboard History page) into one. (M/M) — audit.
-36. [ ] Filter-as-you-type search over history, no separate search screen. (M/S) — superwhisper sidebar.
+36. [x] (2026-07-11) Filter-as-you-type history search (150ms debounce, matches text + target app, empty-result message), verified by screenshot.
 37. [ ] Re-transcribe from history (right-click "process again") for after model/dictionary upgrades. (M/S) — superwhisper, Wispr Flow.
 38. [ ] Replay audio from history entries; the audio files are already stored in recordings/ (history.py:12). (M/S) — MacWhisper + audit.
 39. [ ] Export entries as Markdown/DOCX/SRT/VTT. (L-M/M) — MacWhisper.
@@ -101,14 +101,14 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 57. [ ] Word/char count and speaking-pace metadata in the panel footer. (L/S)
 58. [x] (2026-07-10) Target app shown in the panel header ("→ VS Code", "→ TaskFlow" in task mode) via inject._get_exe_name; app icon (not just name) still open.
 59. [ ] Per-word confidence heatmap toggle using the word confidences we already have (subtle underline shades, not colour-only). (M/M)
-60. [ ] Keyboard shortcuts rendered as key chips on the panel buttons (Enter, Esc, Ctrl+R). (M/S)
+60. [x] (2026-07-11) Already implemented (preview.py:1296-1316 `_chip()`, theme-aware, ↵/Ctrl+↵/Esc/Ctrl+R/Shift+↵); ticked on audit, no change needed.
 61. [ ] N-best alternatives picker: arrow through whisper's alternative transcriptions for ambiguous utterances. (M/L)
 62. [ ] Ghost preview: translucent caret-anchored hint of the text about to paste. (L/M)
 
 ### Window chrome / Windows integration
 
 63. [x] (2026-07-10) Titlebar synced to app theme (DWMWA_USE_IMMERSIVE_DARK_MODE on shown + live on toggle), verified by screenshot.
-64. [ ] Remember dashboard size/position; play nice with Win11 snap layouts. (L/S)
+64. [x] (2026-07-11) Dashboard geometry persisted to config.json `dashboard_window` (600ms debounce, clamped to visible screens); save+restore verified E2E (moved to 150,120 → reopened at 150,120).
 65. [ ] Taskbar jump list: Recent dictations / Settings / Pause (pywin32). (L/M)
 66. [ ] Native Windows toasts for background events (task captured while in another app), quiet-hours aware. (M/M)
 67. [ ] Fullscreen/game detection: suppress the popup, confirm via edge flash + sound, park text on the clipboard. (H/M)
@@ -116,7 +116,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 ### Tray, beyond items 21-26
 
 68. [ ] Recent-dictations submenu in the tray, click to re-copy. (M/S)
-69. [ ] Timed pause: "15 min / 1 hr / until restart" instead of a bare toggle. (M/S)
+69. [x] (2026-07-11) Pause submenu: 15 min / 1 hour / until restart / Resume, threading.Timer auto-resume, remaining minutes in tray tooltip.
 70. [ ] Mic device quick-picker in the tray with a follow-Windows-default toggle. (M/M)
 71. [ ] Queued-items badge overlay on the tray icon (tasks captured while away). (L/M)
 
@@ -127,14 +127,14 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 74. [ ] Model picker (tiny to large-v3) with plain-language speed/accuracy tradeoffs and VRAM cost shown. (H/M)
 75. [ ] Per-app profiles: different formatting/paste behaviour per target app (code-friendly in VS Code, prose in Word). (H/L)
 76. [ ] Import/export settings + dictionary as one file for backup/migration. (M/S)
-77. [ ] About page: version, changelog, licences, update check — sellable-product must-have. (M/S)
+77. [x] (2026-07-11) About page: VERSION "0.1.0" (new constant — confirm scheme), description, licence line, whisper.cpp/LM Studio credits, hardcoded changelog, disabled update button (offline). Verified by screenshot.
 78. [x] (2026-07-10) Autostart toggle in Settings → System via schtasks ONLOGON /RL HIGHEST (plain-task fallback when not elevated).
 79. [ ] UI scale / font-size setting. (M/M)
 80. [ ] Full keyboard navigation with visible focus rings across the dashboard. (M/S)
 
 ### History, beyond items 35-40
 
-81. [ ] Day-grouping headers (Today / Yesterday / This week). (M/S)
+81. [x] (2026-07-11) Day-grouping headers (Today / Yesterday / weekday / date), derived from the filtered list so they collapse with search. Verified by screenshot.
 82. [ ] Pin/favourite entries that survive the 100-entry cap. (M/S)
 83. [ ] Source filter chips: dictation / TaskFlow / agent. (M/S)
 84. [ ] Bulk select for delete/export. (M/S)
