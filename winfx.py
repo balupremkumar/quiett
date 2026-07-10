@@ -17,6 +17,36 @@ import win32gui
 _DWMWA_WINDOW_CORNER_PREFERENCE = 33
 _DWMWCP_ROUND = 2
 
+# ---------------------------------------------------------------------------
+# Motion policy (BACKLOG item 47) — every animation in this module is capped
+# to a 100-400ms window (state-confirming, never a spectacle) and the whole
+# app treats Windows' own "Show animations" accessibility setting the same as
+# an explicit animations:false — reduce_motion() is the single check callers
+# (preview._animations_enabled) combine with the config kill-switch.
+# ---------------------------------------------------------------------------
+_MOTION_MIN_MS = 100
+_MOTION_MAX_MS = 400
+_SPI_GETCLIENTAREAANIMATION = 0x1042
+
+
+def _clamp_duration(duration_ms: int) -> int:
+    return max(_MOTION_MIN_MS, min(_MOTION_MAX_MS, int(duration_ms)))
+
+
+def reduce_motion() -> bool:
+    """True when Windows' Settings > Accessibility > Visual effects >
+    "Animation effects" is off. Checked via the legacy client-area-animation
+    SPI, which Windows still keeps in sync with that setting."""
+    try:
+        val = ctypes.c_int(1)
+        ok = ctypes.windll.user32.SystemParametersInfoW(
+            _SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(val), 0)
+        if ok:
+            return val.value == 0
+    except Exception:
+        pass
+    return False
+
 
 class _MARGINS(ctypes.Structure):
     _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
@@ -88,6 +118,7 @@ def fade_to(win, target: float, duration_ms: int = 180, steps: int = 9,
     Smoothly ramp the window's -alpha attribute to `target` over `duration_ms`.
     Cubic ease-in-out. Safely no-ops if the window is destroyed mid-fade.
     """
+    duration_ms = _clamp_duration(duration_ms)
     try:
         start = float(win.attributes("-alpha"))
     except Exception:
@@ -158,6 +189,7 @@ def ease_color(widget, option: str, start_hex: str, end_hex: str,
                 duration_ms: int = 150, steps: int = 8, on_done=None) -> None:
     """Animate a single colour option (e.g. 'bg', 'highlightbackground', 'fg')
     on `widget` from `start_hex` to `end_hex`. Safe to call if widget is destroyed mid-animation."""
+    duration_ms = _clamp_duration(duration_ms)
     step_ms = max(1, duration_ms // steps)
 
     def tick(i: int) -> None:
@@ -187,6 +219,7 @@ def ease_place_y(widget, start_y: int, end_y: int,
     """Animate a place()-managed widget's y coordinate (e.g. a sliding tab indicator)."""
     if start_y == end_y:
         return
+    duration_ms = _clamp_duration(duration_ms)
     step_ms = max(1, duration_ms // steps)
 
     def ease(t: float) -> float:
@@ -213,6 +246,7 @@ def ease_place_y(widget, start_y: int, end_y: int,
 def slide_in(win, dx: int = 0, dy: int = 10, duration_ms: int = 200,
              alpha_target: float = 1.0) -> None:
     """Move window from (x+dx, y+dy) to (x, y) while fading alpha in. Eased."""
+    duration_ms = _clamp_duration(duration_ms)
     try:
         win.update_idletasks()
         geo = win.geometry()  # "WxH+X+Y"

@@ -84,6 +84,10 @@ def is_recording() -> bool:
 
 
 def start() -> None:
+    """Raises on failure (e.g. no input device) — the recording_event is only
+    set once the stream actually starts, so a failed start leaves
+    is_recording() False and the caller (main.py) can show a designed error
+    instead of the badge hanging on a "recording" that never really began."""
     global _session_chunks, _stream, _timer, _had_voice, _last_voice_t, _silence_triggered, _start_time
     with _lock:
         if _recording_event.is_set():
@@ -95,16 +99,21 @@ def start() -> None:
         _silence_triggered = False
         _levels.clear()
         _levels.extend([0.0] * _LEVEL_HISTORY)
-        _recording_event.set()
 
-    _stream = sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype="float32",
-        device=_input_device,
-        callback=_callback,
-    )
-    _stream.start()
+    try:
+        _stream = sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            device=_input_device,
+            callback=_callback,
+        )
+        _stream.start()
+    except Exception:
+        _stream = None
+        raise
+
+    _recording_event.set()
 
     _timer = threading.Timer(_max_duration, stop)
     _timer.daemon = True

@@ -469,7 +469,10 @@ def main() -> None:
             tray.set_state("idle")
             preview.hide_badge()
             if not llm_client.is_available():
-                preview.show_toast("LM Studio not running — agent mode requires local LLM.", kind="warn")
+                # BACKLOG item 48d — plain next step, not just "it's not running".
+                preview.show_toast(
+                    "Agent mode needs LM Studio running. Start it, then dictate again.",
+                    kind="warn")
             else:
                 preview.show_badge("reformatting")
                 def _run_agent():
@@ -676,7 +679,17 @@ def main() -> None:
         tray.set_state("recording")
         badge = "recording_task" if _task_session else "recording"
         preview.show_badge(badge)
-        audio.start()
+        try:
+            audio.start()
+        except Exception as exc:
+            # Designed error state (BACKLOG item 48a) — most commonly no input
+            # device connected. Never leave the "recording" badge hanging.
+            log_error("main", f"audio.start failed — no microphone? {exc}")
+            hotkey.set_external_recording(False)
+            tray.set_state("idle")
+            preview.show_badge("mic_error")
+            threading.Timer(2.5, preview.hide_badge).start()
+            return
         if _get_cfg().get("live_preview_enabled", True):
             threading.Thread(target=_partial_worker, daemon=True).start()
 
@@ -700,8 +713,16 @@ def main() -> None:
         threading.Timer(1.5, preview.hide_badge).start()
 
     def _on_not_ready() -> None:
-        preview.show_badge("not_ready")
-        threading.Timer(2.0, preview.hide_badge).start()
+        # Distinguish "still loading" (benign, resolves itself) from a
+        # permanent load failure (BACKLOG item 48b) — the latter needs a red,
+        # actionable error state, not an indefinite "please wait" that never
+        # comes true.
+        if transcribe.load_error():
+            preview.show_badge("model_error")
+            threading.Timer(3.0, preview.hide_badge).start()
+        else:
+            preview.show_badge("not_ready")
+            threading.Timer(2.0, preview.hide_badge).start()
 
     def _safe_start_recording() -> None:
         if transcribe.is_ready() and not audio.is_recording():

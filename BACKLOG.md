@@ -79,11 +79,11 @@ Impact H/M/L, Effort S/M/L.
 
 ### Cross-cutting polish
 
-45. [ ] Sound design pass: consistent start/stop/success/error cues with a volume setting (chime.py exists but is ad hoc). (M/S) — voice-app teardown + audit.
+45. [x] (2026-07-11) Error chime added to the existing bell family (F4→D4), wired to error toasts + error badges only; `sound_volume` 0-100 setting (slider, instant-apply), 0 = mute, cached scaled WAVs, non-blocking; speak() follows the same knob.
 46. [x] (2026-07-11) Edge flash was double-firing alongside the badge every recording; now fires only as fallback when badge or preview construction fails.
-47. [ ] Global motion policy: 100-400ms caps, state-confirming only, honour Windows reduce-motion. (M/S) — microinteraction guides.
-48. [ ] Designed error states on every surface: mic missing, whisper server down, too-short recording, LM Studio absent. (H/M) — ui-states discipline.
-49. [ ] Designed empty states for History and Dictionary pages (first-run look matters for a sellable product). (M/S) — ui-states discipline.
+47. [x] (2026-07-11) winfx.reduce_motion() (SPI_GETCLIENTAREAANIMATION) + 100-400ms clamp inside all shared animation primitives; dashboard honours prefers-reduced-motion; Animations toggle in Settings; countdown bar drops to discrete steps when motion is off.
+48. [x] (2026-07-11) mic_error/model_error red badges with plain next-step copy (also fixed a real bug: failed InputStream start left is_recording() stuck True with a frozen badge); whisper-down + too-short already met the bar; LM Studio copy upgraded; sidebar status dot wired live (Ready / Whisper down / LM Studio down, 15s poll).
+49. [x] (2026-07-11) emptyState() helper + SVG glyphs: History never-used vs filter-empty kept distinct; Dictionary corrections + vocabulary each get icon, one-line what, one-line how-to. Home "Recent Activity" left plain (out of scope, flagged).
 50. [ ] One premium accent applied uniformly; today the dashboard hardcodes `--acc:#60cdff` while Tk surfaces have their own palette, and it should follow the brand decision in PRODUCTION_PLAN P1. (M/S) — audit.
 
 ## Premium UI/UX enhancements, second batch (2026-07-10)

@@ -159,12 +159,15 @@ _apply_palette(_resolve_theme())
 
 
 def _animations_enabled() -> bool:
-    """Kill-switch for motion (item 18). Defaults to on when the key is absent."""
+    """Kill-switch for motion (items 18, 47). Off when the config key is
+    false, or when Windows' own "Show animations" accessibility setting is
+    off — an OS-level opt-out is honoured the same as an explicit one."""
     try:
         with open(_CONFIG_FILE, encoding="utf-8") as f:
-            return bool(json.load(f).get("animations", True))
+            cfg_on = bool(json.load(f).get("animations", True))
     except Exception:
-        return True
+        cfg_on = True
+    return cfg_on and not winfx.reduce_motion()
 
 
 def _play_entrance(win, target_alpha: float, dy: int = 14, duration_ms: int = 200) -> None:
@@ -516,6 +519,11 @@ def _show_anchored_toast(t: dict) -> None:
 
     accent = {"info": _BLUE, "warn": "#f59e0b", "error": "#ef4444"}.get(kind, _BLUE)
 
+    if kind == "error":
+        # Audible cue only for genuine errors (item 45/48) — warn/info stay
+        # visual-only so routine notices (TaskFlow down, undo, etc.) don't add noise.
+        chime.play_error()
+
     win = tk.Toplevel(_root)
     win.overrideredirect(True)
     win.attributes("-topmost", True)
@@ -616,7 +624,14 @@ _BADGE_CFG = {
     "processing":     {"accent": "#c8a000", "logo_bg": (200, 160,   0), "status": "Processing…"},
     "reformatting":   {"accent": "#7b5ea7", "logo_bg": (123,  94, 167), "status": "Cleaning up…"},
     "too_short":      {"accent": "#888888", "text": "Hold longer to record"},
-    "not_ready":      {"accent": "#888888", "text": "Model loading — please wait"},
+    "not_ready":      {"accent": "#888888", "text": "Model loading, please wait"},
+    # Designed error states (BACKLOG item 48) — red accent + a plain-English
+    # next step, never a raw exception. "error": True marks these for the
+    # audible cue in _handle_badge, distinct from the benign grey hints above.
+    "mic_error":      {"accent": "#ef4444", "error": True,
+                        "text": "No microphone found. Check Settings → Microphone"},
+    "model_error":    {"accent": "#ef4444", "error": True,
+                        "text": "Whisper couldn't start. Check Settings or app.log"},
 }
 
 # Visual layout for the recording badge
@@ -1156,6 +1171,8 @@ def _handle_badge(cmd: str | None) -> None:
                 _draw_badge_frame()
             else:
                 _build_text_badge(cfg)
+                if cfg.get("error"):
+                    chime.play_error()
         except Exception as exc:
             log_error("preview", f"badge build failed, falling back to edge flash: {exc}")
             _badge_win = None
@@ -1831,6 +1848,11 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     #  - the pin button suspends it outright, preserving the remaining time,
     #    and resumes from there on unpin — distinct from an interaction reset
     if auto_dismiss > 0:
+        # Motion policy (item 47): a smooth 30fps sweep is motion, so when
+        # animations are off (config or Windows reduce-motion) the fill still
+        # depletes accurately, just in coarse discrete steps instead of a
+        # continuous glide — read once per window, not per tick.
+        _dismiss_tick_ms = 33 if _animations_enabled() else 500
         _dismiss = {"total": auto_dismiss, "remaining": auto_dismiss,
                     "deadline": None, "job": None, "tick_job": None, "pinned": False}
 
@@ -1859,7 +1881,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                 return
             if remaining <= 0:
                 return
-            _dismiss["tick_job"] = win.after(33, _dismiss_tick)
+            _dismiss["tick_job"] = win.after(_dismiss_tick_ms, _dismiss_tick)
 
         def _dismiss_start(seconds: float | None = None) -> None:
             if _dismiss["pinned"]:

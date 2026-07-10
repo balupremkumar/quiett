@@ -200,6 +200,26 @@ class DashboardAPI:
             "vocab_count": len(cfg.get("custom_vocabulary", [])),
         }
 
+    def get_backend_status(self) -> dict:
+        """Live health for the Home status strip (BACKLOG item 48b). Both
+        probes are plain HTTP GETs to localhost, safe to call from this
+        subprocess even though whisper-server/LM Studio live in main.py's
+        process — same checks health.py uses there."""
+        try:
+            import transcribe
+            whisper_ok = transcribe.server_alive()
+        except Exception:
+            whisper_ok = False
+        agent_enabled = bool(_read_cfg().get("agent_command_mode_enabled", False))
+        lmstudio_ok = None
+        if agent_enabled:
+            try:
+                import llm_client
+                lmstudio_ok = llm_client.is_available()
+            except Exception:
+                lmstudio_ok = False
+        return {"whisper_ok": whisper_ok, "agent_enabled": agent_enabled, "lmstudio_ok": lmstudio_ok}
+
     def get_history(self, limit: int = 200) -> list:
         entries = hist.load()
         today = date.today()
@@ -417,7 +437,7 @@ _HTML = """<!DOCTYPE html>
   --hov:#ffffff0d; --act:#ffffff18; --brd:#ffffff14; --brd2:#ffffff22;
   --txt:#ffffff; --txt2:rgba(255,255,255,.78); --txt3:rgba(255,255,255,.5);
   --acc:#60cdff; --acc-bg:rgba(96,205,255,.1); --acc-hov:rgba(96,205,255,.18);
-  --danger:#f85149; --success:#3fb950;
+  --danger:#f85149; --success:#3fb950; --warn:#d29922;
   --shad:0 2px 14px rgba(0,0,0,.45);
   --r:8px; --r-sm:5px; --sbw:200px;
   --font:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
@@ -428,12 +448,18 @@ _HTML = """<!DOCTYPE html>
   --hov:#0000000d; --act:#00000016; --brd:#00000026; --brd2:#00000044;
   --txt:#1c1c1c; --txt2:rgba(0,0,0,.78); --txt3:rgba(0,0,0,.55);
   --acc:#0067c0; --acc-bg:rgba(0,103,192,.08); --acc-hov:rgba(0,103,192,.14);
-  --danger:#cf222e; --success:#2da44e;
+  --danger:#cf222e; --success:#2da44e; --warn:#9a6700;
   --shad:0 2px 10px rgba(0,0,0,.07);
 }
 
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100vh;overflow:hidden}
+/* Motion policy (BACKLOG item 47) — WebView2/Edge maps Windows' own "Show
+   animations" accessibility setting straight to prefers-reduced-motion, so
+   this one rule honours it for every transition/keyframe in this file. */
+@media (prefers-reduced-motion: reduce) {
+  *{transition:none!important;animation:none!important}
+}
 body{font-family:var(--font);background:var(--bg);color:var(--txt);-webkit-font-smoothing:antialiased}
 
 /* ── Layout ── */
@@ -521,6 +547,15 @@ body{font-family:var(--font);background:var(--bg);color:var(--txt);-webkit-font-
 .ia svg{width:12px;height:12px}
 .ia.pin.on{color:var(--acc)}
 .empty{text-align:center;padding:48px 32px;color:var(--txt3);font-size:13px}
+/* Designed empty states — first-use onboarding, not just a blank message
+   (BACKLOG item 49). Distinct from the plain .empty above, which still
+   covers "Loading…" and the search/filter-empty case. */
+.empty-state{text-align:center;padding:40px 28px;color:var(--txt3)}
+.empty-state .es-icon{color:var(--txt3);opacity:.6;margin-bottom:10px;
+  display:flex;justify-content:center}
+.empty-state .es-icon svg{width:30px;height:30px}
+.empty-state .es-title{font-size:13px;font-weight:600;color:var(--txt2);margin-bottom:3px}
+.empty-state .es-sub{font-size:12px;color:var(--txt3)}
 .list-item.pinned{background:var(--acc-bg)}
 .pin-badge{display:inline-flex;color:var(--acc)}
 .pin-badge svg{width:10px;height:10px}
@@ -647,6 +682,9 @@ mark{background:var(--acc-bg);color:inherit;border-radius:2px;padding:0 1px}
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%23888'%3E%3Cpath fill-rule='evenodd' d='M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z' clip-rule='evenodd'/%3E%3C/svg%3E");
   background-repeat:no-repeat;background-position:right 7px center;background-size:13px}
 .n-in:focus,.t-in:focus,.sel-in:focus,.add-in:focus{border-color:var(--acc)}
+.range-row{display:flex;align-items:center;gap:8px}
+.range-in{width:140px;accent-color:var(--acc);cursor:pointer}
+.range-val{font-size:11px;color:var(--txt3);width:32px;text-align:right}
 .ta-in{width:100%;padding:7px 9px;background:var(--surf2);border:1px solid var(--brd);
   border-radius:var(--r-sm);color:var(--txt);font-family:var(--font);
   font-size:12px;outline:none;resize:vertical;min-height:56px}
@@ -848,6 +886,19 @@ select option{background:var(--surf2);color:var(--txt)}
         <div class="s-lbl"><div class="s-lbl-t">Auto-dismiss (seconds)</div><div class="s-lbl-s">0 = never auto-dismiss</div></div>
         <input class="n-in" type="number" data-key="preview_auto_dismiss_seconds" min="0" max="30" step="0.5">
       </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Animations</div><div class="s-lbl-s">Popup slide/fade motion. Also off automatically when Windows' own "Show animations" setting is off</div></div>
+        <div class="tog" data-key="animations" onclick="togClick(this)"><div class="tog-k"></div></div>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Sound volume</div><div class="s-lbl-s">Record/stop/success/error chimes. 0 = mute</div></div>
+        <div class="range-row">
+          <input class="range-in" type="range" id="soundVolumeRange" data-key="sound_volume" data-type="int"
+                 min="0" max="100" step="5"
+                 oninput="document.getElementById('soundVolumeLbl').textContent=this.value+'%'">
+          <span id="soundVolumeLbl" class="range-val">100%</span>
+        </div>
+      </div>
     </div>
 
     <div class="s-sec">
@@ -1003,7 +1054,7 @@ select option{background:var(--surf2);color:var(--txt)}
     <div class="dict-sec">
       <div class="dict-sec-ttl">Changelog</div>
       <div id="changelogList" class="s-lbl-s" style="font-size:12.5px">Loading…</div>
-      <button class="btn btn-s" disabled title="Offline app — no update check" style="opacity:.5;cursor:not-allowed;align-self:flex-start">Check for updates</button>
+      <button class="btn btn-s" disabled title="Offline app, no update check" style="opacity:.5;cursor:not-allowed;align-self:flex-start">Check for updates</button>
     </div>
   </div>
 </div>
@@ -1207,6 +1258,21 @@ function renderHistItem(e, i) {
     </div>`;
 }
 
+// Designed empty state (BACKLOG item 49): icon + what belongs here + how to
+// get the first one. `emptyState` is reused by History and Dictionary;
+// search/filter "no results" stays the plain, distinct .empty message above
+// it — that's not a first-run state, so it doesn't get the onboarding treatment.
+function emptyState(icon, title, sub) {
+  return `<div class="empty-state">
+    <div class="es-icon">${icon}</div>
+    <div class="es-title">${esc(title)}</div>
+    <div class="es-sub">${esc(sub)}</div>
+  </div>`;
+}
+const _ES_MIC_ICON = '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a3 3 0 00-3 3v5a3 3 0 006 0V5a3 3 0 00-3-3z"/><path d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5h-1.5a.75.75 0 000 1.5h4.5a.75.75 0 000-1.5h-1.5v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 01-9 0v-.357z"/></svg>';
+const _ES_PENCIL_ICON = '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.379-8.379-2.828-2.828z"/></svg>';
+const _ES_TAG_ICON = '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.5 3A2.5 2.5 0 003 5.5v2.879a2.5 2.5 0 00.732 1.767l6.5 6.5a2.5 2.5 0 003.536 0l2.878-2.878a2.5 2.5 0 000-3.536l-6.5-6.5A2.5 2.5 0 008.379 3H5.5zM6 7a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/></svg>';
+
 function renderHistory(items) {
   const el = document.getElementById('historyList');
   el.classList.toggle('select-mode', _selectMode);
@@ -1214,7 +1280,8 @@ function renderHistory(items) {
     _histTexts = [];
     el.innerHTML = (_histQuery || (_histSourceFilter && _histSourceFilter !== 'all'))
       ? '<div class="empty">No dictations match your filters.</div>'
-      : '<div class="empty">No dictations yet.</div>';
+      : emptyState(_ES_MIC_ICON, 'No dictations yet',
+                   'Hold Ctrl+Alt and speak. Your dictations land here.');
     updateBulkCount();
     return;
   }
@@ -1351,7 +1418,11 @@ async function loadDictionary() {
 function renderCorrections(corr) {
   const el = document.getElementById('corrList');
   const entries = Object.entries(corr || {});
-  if (!entries.length) { el.innerHTML = '<div class="empty" style="padding:10px 0;font-size:12px">No corrections yet.</div>'; return; }
+  if (!entries.length) {
+    el.innerHTML = emptyState(_ES_PENCIL_ICON, 'No corrections yet',
+                              'Add a "heard → replace" pair below to fix words Whisper keeps mishearing.');
+    return;
+  }
   el.innerHTML = entries.map(([from, to]) => `
     <div class="corr-item">
       <span class="corr-from">${esc(from)}</span>
@@ -1363,7 +1434,11 @@ function renderCorrections(corr) {
 
 function renderVocab(vocab) {
   const el = document.getElementById('vocabList');
-  if (!(vocab && vocab.length)) { el.innerHTML = '<div class="empty" style="font-size:12px;padding:4px 0">No vocabulary yet.</div>'; return; }
+  if (!(vocab && vocab.length)) {
+    el.innerHTML = emptyState(_ES_TAG_ICON, 'No custom vocabulary yet',
+                              'Add names, jargon, or acronyms below so Whisper recognises them.');
+    return;
+  }
   el.innerHTML = vocab.map(w => `
     <div class="vchip">${esc(w)}
       <button class="vdel" title="Remove" onclick="removeVocab(${JSON.stringify(w)})">${xIcon()}</button>
@@ -1441,6 +1516,10 @@ async function loadSettings() {
   const themeSel = document.querySelector('select[data-key="theme"]');
   if (themeSel) themeSel.value = cfg.theme || 'dark';
 
+  // Sound volume live label
+  const volRange = document.getElementById('soundVolumeRange');
+  if (volRange) document.getElementById('soundVolumeLbl').textContent = volRange.value + '%';
+
   // Autostart state lives in Task Scheduler, not config
   try {
     const on = await window.pywebview.api.get_autostart();
@@ -1469,6 +1548,31 @@ async function loadAbout() {
 }
 
 function togClick(el) { el.classList.toggle('on'); autoSave(); }
+
+// ── Backend status (BACKLOG item 48b) ───────────────────────────────────────
+// The sidebar footer dot/label already existed but was a hardcoded "Ready" —
+// wire it to a real, periodic health check instead of adding a second area.
+async function refreshBackendStatus() {
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusTxt');
+  if (!dot || !txt) return;
+  try {
+    const st = await window.pywebview.api.get_backend_status();
+    if (!st.whisper_ok) {
+      dot.style.background = 'var(--danger)';
+      txt.textContent = 'Whisper down';
+      dot.title = "Whisper server isn't responding. It restarts automatically.";
+    } else if (st.agent_enabled && st.lmstudio_ok === false) {
+      dot.style.background = 'var(--warn)';
+      txt.textContent = 'LM Studio down';
+      dot.title = 'Agent command mode needs LM Studio running locally.';
+    } else {
+      dot.style.background = 'var(--success)';
+      txt.textContent = 'Ready';
+      dot.title = '';
+    }
+  } catch (e) { /* leave last-known state on a transient IPC hiccup */ }
+}
 
 // ── Instant apply — settings persist on change, no Save button ─────────────
 let _autoSaveT = null;
@@ -1544,6 +1648,8 @@ window.addEventListener('pywebviewready', async function () {
     const sf = document.getElementById('settingsForm');
     sf.addEventListener('input', autoSave);
     sf.addEventListener('change', autoSave);
+    refreshBackendStatus();
+    setInterval(refreshBackendStatus, 15000);
     if (_INIT_PAGE === 'home') {
       await loadHome();
     } else {
