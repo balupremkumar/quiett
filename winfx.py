@@ -6,28 +6,55 @@ Provides rounded corners (via SetWindowRgn) and smooth fade in/out
 """
 from __future__ import annotations
 
+import ctypes
 import math
+from ctypes import wintypes
 
 import win32api
 import win32con
 import win32gui
 
+_DWMWA_WINDOW_CORNER_PREFERENCE = 33
+_DWMWCP_ROUND = 2
+
+
+def _toplevel_hwnd(win) -> int:
+    # winfo_id on Tk returns the inner widget HWND; walk up to the actual top-level
+    hwnd = int(win.winfo_id())
+    parent = win32gui.GetParent(hwnd)
+    while parent:
+        hwnd = parent
+        parent = win32gui.GetParent(hwnd)
+    return hwnd
+
 
 def apply_rounded_region(win, radius: int = 12) -> None:
-    """Clip the window to a rounded rectangle. Safe to call once after geometry is set."""
+    """Round the window's corners. Safe to call once after geometry is set.
+
+    Win11 path: DWMWA_WINDOW_CORNER_PREFERENCE — compositor-drawn, antialiased,
+    with a native shadow (the fixed system radius wins over `radius`).
+    Fallback (Win10 / DWM refusal): the old CreateRoundRectRgn hard mask."""
     try:
         win.update_idletasks()
-        hwnd = int(win.winfo_id())
-        # winfo_id on Tk returns the inner widget HWND; walk up to the actual top-level
-        parent = win32gui.GetParent(hwnd)
-        while parent:
-            hwnd = parent
-            parent = win32gui.GetParent(hwnd)
+        hwnd = _toplevel_hwnd(win)
 
         w = win.winfo_width()
         h = win.winfo_height()
         if w <= 0 or h <= 0:
             return
+        try:
+            pref = ctypes.c_int(_DWMWCP_ROUND)
+            hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd), _DWMWA_WINDOW_CORNER_PREFERENCE,
+                ctypes.byref(pref), ctypes.sizeof(pref))
+            if hr == 0:
+                return
+        except Exception:
+            pass
+        try:
+            radius = max(1, round(radius * ctypes.windll.user32.GetDpiForWindow(hwnd) / 96))
+        except Exception:
+            pass
         rgn = win32gui.CreateRoundRectRgn(0, 0, w + 1, h + 1, radius * 2, radius * 2)
         win32gui.SetWindowRgn(hwnd, rgn, True)
     except Exception:

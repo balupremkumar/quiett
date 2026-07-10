@@ -14,12 +14,11 @@ Impact H/M/L, Effort S/M/L.
 
 ### Convergent findings (two agents reached the same conclusion independently)
 
-1. [ ] **CONVERGENT** Fix the jagged speech-bubble edges: the corners are cut with `CreateRoundRectRgn`+`SetWindowRgn` (winfx.py:31-32), a hard pixel mask with no AA.
-   Replace with a per-pixel-alpha layered window: composite the whole panel as a Pillow RGBA image (rendered 4-8x, LANCZOS-downsampled) and push via `UpdateLayeredWindow` on a `WS_EX_LAYERED` HWND. (H/M) — rendering agent items 2-4+15, confirmed by codebase audit.
-2. [ ] **CONVERGENT** Per-monitor DPI awareness v2 (`SetProcessDpiAwarenessContext(-4)`) before the Tk root is created; audit found no DPI call anywhere, so fractional scaling blurs every surface. (H/S) — MS Learn DPI docs + audit.
-3. [ ] **CONVERGENT** Encode app state (idle/listening/recording/processing/error) directly in the surfaces: colour-coded status dot on the popup and state glyph on the tray icon, no balloon toasts. (H/M) — superwhisper status dot + PowerToys/OneDrive tray convention.
-4. [ ] **CONVERGENT** Sync light/dark to the Windows system theme live (registry `AppsUseLightTheme`), across tray icon, popup, and dashboard; audit shows theme is baked at import and needs a restart for Tk surfaces (preview.py:66,85). (H/M) — PowerToys PR #33321 + rendering agent + audit.
-5. [ ] **CONVERGENT** Single-master icon pipeline: one high-res RGBA master, Pillow ICO export at 16/20/24/32/48/256, detailed with depth at 256px, pure silhouette at 16-32px, ~80% canvas fill. (H/M) — MS icon-construction guide + Pillow ICO docs.
+1. [x] (2026-07-10) **CONVERGENT** Jagged speech-bubble edges fixed via DWM corner preference (compositor-AA'd, verified 3x zoom); full `UpdateLayeredWindow` rewrite deferred into item 20's stack decision — no visible Win11 gain. Win10 keeps the region-mask fallback.
+2. [x] (2026-07-10) **CONVERGENT** Per-monitor DPI awareness v2 in main.py + dashboard.py, tk font scaling, badge constants scaled via _px().
+3. [x] (2026-07-10) **CONVERGENT** State encoded in surfaces: status dot on the preview panel header; tray = monochrome glyph + state colour dot (idle bare, recording pulses).
+4. [x] (2026-07-10) **CONVERGENT** Live theme sync: refresh_theme() on window open + 30s config reload; `theme: system` follows AppsUseLightTheme (Tk + dashboard prefers-color-scheme); tray follows SystemUsesLightTheme.
+5. [x] (2026-07-10) **CONVERGENT** Icon pipeline: scripts/make_icons.py materialises assets/ (multi-res icon.ico, tray PNG set, logo) from the programmatic masters in tray.py.
 6. [ ] **CONVERGENT** Motion quality needs the surface off plain Tk: Tk `-alpha` fades tear well below 60fps; premium motion is 100-400ms, state-confirming only, honouring reduce-motion. (M/M) — microinteraction guides + Tk tearing reports.
 
 ### Recording pop-up / speech bubble
@@ -33,7 +32,7 @@ Impact H/M/L, Effort S/M/L.
 13. [ ] Context-capture badge confirming clipboard/selection was grabbed as context. (L/S) — superwhisper Super Mode.
 14. [ ] Acrylic backdrop on the popup via `DWMWA_SYSTEMBACKDROP_TYPE` = `DWMSBT_TRANSIENTWINDOW` (documented Win11 route, not the fragile Win10 accent API). (M/M) — MS Learn system backdrops.
 15. [ ] Proper DWM drop shadow via `DwmExtendFrameIntoClientArea`, not legacy `CS_DROPSHADOW`. (M/S) — Cyotek/DWM docs.
-16. [ ] Interim quick win while the layered-window rewrite lands: `DWMWA_WINDOW_CORNER_PREFERENCE` = `DWMWCP_ROUND` on the Toplevel HWND for native Win11 rounding. (H/S) — DWM docs.
+16. [x] (2026-07-10) `DWMWA_WINDOW_CORNER_PREFERENCE` in winfx.apply_rounded_region, region mask kept as Win10 fallback (with DPI-scaled radius). Turned out to be the full fix, not just interim — see item 1.
 17. [ ] True gradient in the badge; today it is six stacked colour bands simulating one (preview.py:676). (L/S) — audit.
 18. [ ] Slide+fade entrance 150-250ms; today it is alpha-fade only, no positional motion (winfx.py:84-92). (M/M) — motion guides.
 19. [ ] Adjustable pause-tolerance / wait-time slider so slow speakers aren't cut off. (M/M) — Windows 11 Voice Typing 2026.
@@ -41,7 +40,7 @@ Impact H/M/L, Effort S/M/L.
 
 ### Tray + desktop icons
 
-21. [ ] Monochrome outlined tray icon that reads at 16px and adapts to the Windows taskbar theme, matching Win11 native icon language. (H/M) — PowerToys redesign.
+21. [x] (2026-07-10) Monochrome theme-aware tray icon (SystemUsesLightTheme), state as colour dot, pulse moved to the dot; coloured badge kept for the desktop .ico.
 22. [ ] Left-click = single default action, right-click = full menu; don't overload one button. (M/S) — Win11 tray convention.
 23. [ ] Restructure the tray menu (currently ~13 items flat, tray.py:394-409) into grouped sections with the rare actions in a submenu. (M/S) — audit + tray conventions.
 24. [ ] Desktop/installer icon redesign around one bold mic-to-caret glyph with subtle depth at 256px (ties to PRODUCTION_PLAN P2). (H/M) — MS/Apple icon guidelines.
@@ -52,7 +51,7 @@ Impact H/M/L, Effort S/M/L.
 
 27. [ ] Settings search bar that filters and highlights matching controls across sections. (H/M) — Raycast Settings v2.
 28. [ ] Hotkey-recorder control ("press a key combination…") with live chord display, replacing any dropdown/text binding. (H/M) — PowerToys Keyboard Manager.
-29. [ ] Instant-apply everywhere with a subtle "Saved" flash; no Save/Apply buttons. (H/S) — NN/g toggle guidance.
+29. [x] (2026-07-10) Instant-apply settings (debounced 450ms, "Saved" flash), Save button removed.
 30. [ ] Per-section reset-to-defaults, scoped so users can undo just hotkeys or just model settings. (M/S) — Windows settings guidelines.
 31. [ ] Expose appearance settings (accent, popup size, position with visual picker, animation style); today every colour, font, and dimension is a hardcoded constant (preview.py:67-118). (M/M) — audit.
 32. [ ] One panel per concern, no nested menus (the ShareX failure mode vs CleanShot X). (H/M) — CleanShot comparisons.
@@ -100,7 +99,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 55. [ ] Pin button on the panel to suspend auto-dismiss for long edits. (M/S)
 56. [ ] Compact-to-expanded panel modes (one-line pill vs multi-line editor) with animated resize. (M/M)
 57. [ ] Word/char count and speaking-pace metadata in the panel footer. (L/S)
-58. [ ] Show the target app's icon and name in the panel ("→ VS Code") so it's obvious where Enter pastes; hwnd is already captured. (H/S)
+58. [x] (2026-07-10) Target app shown in the panel header ("→ VS Code", "→ TaskFlow" in task mode) via inject._get_exe_name; app icon (not just name) still open.
 59. [ ] Per-word confidence heatmap toggle using the word confidences we already have (subtle underline shades, not colour-only). (M/M)
 60. [ ] Keyboard shortcuts rendered as key chips on the panel buttons (Enter, Esc, Ctrl+R). (M/S)
 61. [ ] N-best alternatives picker: arrow through whisper's alternative transcriptions for ambiguous utterances. (M/L)
@@ -108,7 +107,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 
 ### Window chrome / Windows integration
 
-63. [ ] Sync titlebar to app theme via DWMWA_USE_IMMERSIVE_DARK_MODE (today: light app + dark OS = dark titlebar seam). (M/S)
+63. [x] (2026-07-10) Titlebar synced to app theme (DWMWA_USE_IMMERSIVE_DARK_MODE on shown + live on toggle), verified by screenshot.
 64. [ ] Remember dashboard size/position; play nice with Win11 snap layouts. (L/S)
 65. [ ] Taskbar jump list: Recent dictations / Settings / Pause (pywin32). (L/M)
 66. [ ] Native Windows toasts for background events (task captured while in another app), quiet-hours aware. (M/M)
@@ -129,7 +128,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 75. [ ] Per-app profiles: different formatting/paste behaviour per target app (code-friendly in VS Code, prose in Word). (H/L)
 76. [ ] Import/export settings + dictionary as one file for backup/migration. (M/S)
 77. [ ] About page: version, changelog, licences, update check — sellable-product must-have. (M/S)
-78. [ ] Autostart-with-Windows toggle via Task Scheduler (works for admin-elevated apps, unlike the startup folder). (H/S)
+78. [x] (2026-07-10) Autostart toggle in Settings → System via schtasks ONLOGON /RL HIGHEST (plain-task fallback when not elevated).
 79. [ ] UI scale / font-size setting. (M/M)
 80. [ ] Full keyboard navigation with visible focus rings across the dashboard. (M/S)
 

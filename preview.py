@@ -6,6 +6,7 @@ pystray owns the main thread, so we spin up a persistent hidden Tk root here.
 Queues are polled every 50 ms so all windows can coexist simultaneously.
 """
 
+import ctypes
 import json
 import queue
 import threading
@@ -32,6 +33,21 @@ import winfx
 from logger import log, warn, error as log_error
 
 _CONFIG_FILE = "config.json"
+
+
+def _dpi_scale() -> float:
+    try:
+        return ctypes.windll.user32.GetDpiForSystem() / 96.0
+    except Exception:
+        return 1.0
+
+
+_S = _dpi_scale()
+
+
+def _px(v: int) -> int:
+    """Scale a design-pixel value to physical pixels for the current DPI."""
+    return max(1, round(v * _S))
 
 # ---------------------------------------------------------------------------
 # Public API — safe to call from any thread
@@ -62,8 +78,8 @@ _preview_position = "cursor"
 # Re-record callback — set by main.py
 _on_rerecord = None
 
-# Themes — dark / light. Selected at module load from config.json `theme` field.
-# Theme change requires restart (palette is captured into module constants below).
+# Themes — dark / light / system. Palette lives in refreshable module globals:
+# refresh_theme() re-resolves them, new windows pick the change up on open.
 _THEMES = {
     "dark": {
         "BG": "#1a1a1d", "BG2": "#26262a", "BG3": "#2f2f34",
@@ -84,31 +100,59 @@ _THEMES = {
 }
 
 
-def _resolve_theme() -> str:
+def _system_theme() -> str:
+    """Windows personalisation setting: AppsUseLightTheme 1 = light, 0 = dark."""
     try:
-        with open(_CONFIG_FILE, encoding="utf-8") as f:
-            return json.load(f).get("theme", "dark")
+        import winreg
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return "light" if winreg.QueryValueEx(k, "AppsUseLightTheme")[0] else "dark"
     except Exception:
         return "dark"
 
 
-_THEME_NAME = _resolve_theme()
-_T = _THEMES.get(_THEME_NAME, _THEMES["dark"])
+def _resolve_theme() -> str:
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            name = json.load(f).get("theme", "dark")
+    except Exception:
+        name = "dark"
+    return _system_theme() if name == "system" else name
 
-_BG      = _T["BG"]
-_BG2     = _T["BG2"]
-_BG3     = _T["BG3"]
-_FG      = _T["FG"]
-_FG2     = _T["FG2"]
-_FG3     = _T["FG3"]
-_BLUE    = _T["BLUE"]
-_BLUE_HV = _T["BLUE_HV"]
-_BORDER  = _T["BORDER"]
-_BORDER2 = _T["BORDER2"]
-_TASK    = _T["TASK"]
-_TASK_HV = _T["TASK_HV"]
-_MATCH_BG = _T["MATCH_BG"]
-_MATCH_FG = _T["MATCH_FG"]
+
+def _apply_palette(name: str) -> None:
+    global _THEME_NAME, _T, _BG, _BG2, _BG3, _FG, _FG2, _FG3, _BLUE, _BLUE_HV
+    global _BORDER, _BORDER2, _TASK, _TASK_HV, _MATCH_BG, _MATCH_FG
+    _THEME_NAME = name
+    _T = _THEMES.get(name, _THEMES["dark"])
+    _BG      = _T["BG"]
+    _BG2     = _T["BG2"]
+    _BG3     = _T["BG3"]
+    _FG      = _T["FG"]
+    _FG2     = _T["FG2"]
+    _FG3     = _T["FG3"]
+    _BLUE    = _T["BLUE"]
+    _BLUE_HV = _T["BLUE_HV"]
+    _BORDER  = _T["BORDER"]
+    _BORDER2 = _T["BORDER2"]
+    _TASK    = _T["TASK"]
+    _TASK_HV = _T["TASK_HV"]
+    _MATCH_BG = _T["MATCH_BG"]
+    _MATCH_FG = _T["MATCH_FG"]
+
+
+def refresh_theme() -> bool:
+    """Re-resolve the palette from config + Windows theme. Returns True when it
+    changed; open windows keep their colours, new ones use the fresh palette."""
+    name = _resolve_theme()
+    if name == _THEME_NAME:
+        return False
+    _apply_palette(name)
+    return True
+
+
+_apply_palette(_resolve_theme())
 
 # Typography ladder — Segoe UI Variable with weight cascade
 # (falls back automatically to Segoe UI if Variable isn't installed)
@@ -223,6 +267,11 @@ def set_partial_text(text: str) -> None:
 def _tk_main() -> None:
     global _root
     _root = tk.Tk()
+    try:
+        # points-per-pixel ratio so point-sized fonts track the real DPI
+        _root.tk.call("tk", "scaling", ctypes.windll.user32.GetDpiForSystem() / 72.0)
+    except Exception:
+        pass
     _root.withdraw()
     _ready.set()
     _root.after(50, _tick)
@@ -514,9 +563,9 @@ _BADGE_CFG = {
 }
 
 # Visual layout for the recording badge
-_BADGE_W       = 320
-_BADGE_H       = 64
-_LOGO_SIZE     = 44
+_BADGE_W       = _px(320)
+_BADGE_H       = _px(64)
+_LOGO_SIZE     = _px(44)
 _WAVE_BAR_N    = 28
 _WAVE_BAR_W    = 4
 _WAVE_BAR_GAP  = 2
@@ -817,6 +866,8 @@ def _handle_badge(cmd: str | None) -> None:
     global _badge_win, _badge_state, _badge_logo_variants, _badge_logo_idx
     prev = _badge_state
     _badge_state = cmd
+    if cmd is not None and not _badge_alive():
+        refresh_theme()  # catch theme flips before drawing a fresh badge
 
     if cmd is None:
         if _badge_alive():
@@ -884,6 +935,27 @@ def _calc_position(cx: int, cy: int, w: int, h: int,
     return positions.get(mode, positions["cursor"])
 
 
+_APP_NAMES = {
+    "code.exe": "VS Code", "chrome.exe": "Chrome", "msedge.exe": "Edge",
+    "firefox.exe": "Firefox", "explorer.exe": "Explorer",
+    "windowsterminal.exe": "Terminal", "wt.exe": "Terminal",
+    "notepad.exe": "Notepad", "outlook.exe": "Outlook",
+    "winword.exe": "Word", "excel.exe": "Excel", "slack.exe": "Slack",
+    "discord.exe": "Discord", "mstsc.exe": "Remote Desktop",
+}
+
+
+def _target_app_label(hwnd: int) -> str:
+    """Friendly name of the app that will receive the paste, '' if unknown."""
+    try:
+        exe = inject._get_exe_name(hwnd)
+        if not exe:
+            return ""
+        return _APP_NAMES.get(exe, exe.rsplit(".", 1)[0].capitalize())
+    except Exception:
+        return ""
+
+
 def _border_colour(confidence: float | None) -> str:
     if confidence is None:
         return _BORDER
@@ -903,6 +975,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                  task_mode: bool = False) -> None:
     global _current_preview_win
 
+    refresh_theme()  # catch theme flips before drawing a fresh panel
     try:
         cx, cy = win32api.GetCursorPos()
     except Exception:
@@ -931,7 +1004,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     frame = tk.Frame(ring, bg=_BG, padx=20, pady=16)
     frame.pack(fill=tk.BOTH, expand=True)
 
-    # Header row: label (left) + branding mark (right)
+    # Header row: label + status dot (left), paste destination (right)
     header_row = tk.Frame(frame, bg=_BG)
     header_row.pack(fill=tk.X, pady=(0, 8))
     if task_mode:
@@ -940,8 +1013,15 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     else:
         tk.Label(header_row, text="VoiceDictate", bg=_BG, fg=_FG3,
                  font=(_FONT_FAM_DISPLAY, 9, "normal"), anchor="w").pack(side=tk.LEFT)
-    tk.Label(header_row, text=f"v2", bg=_BG, fg=_FG3,
-             font=(_FONT_FAM_TEXT, 8, "normal"), anchor="e").pack(side=tk.RIGHT)
+    # Status dot: green = ready to insert, grey = nothing usable.
+    # A text glyph, not a Canvas oval — ClearType antialiases it for free.
+    tk.Label(header_row, text="●", bg=_BG, fg=(_FG3 if empty else _TASK),
+             font=(_FONT_FAM_TEXT, 7, "normal")).pack(side=tk.LEFT, padx=(6, 0))
+    # Paste destination — so it's obvious where Enter sends the text
+    dest = "TaskFlow" if task_mode else _target_app_label(hwnd)
+    if dest:
+        tk.Label(header_row, text=f"→  {dest}", bg=_BG, fg=_FG2,
+                 font=(_FONT_FAM_TEXT, 8, "normal"), anchor="e").pack(side=tk.RIGHT)
 
     # ── Text entry ─────────────────────────────────────────────────────────
     if empty:

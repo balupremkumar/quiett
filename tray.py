@@ -14,7 +14,7 @@ import os
 import threading
 
 import pystray
-from PIL import Image, ImageDraw, ImageEnhance
+from PIL import Image, ImageDraw
 
 _state = "loading"
 _icon: pystray.Icon | None = None
@@ -49,8 +49,28 @@ _BG = {
 _PULSE_STEPS = 14
 
 
-def _make_icon(bg: tuple, target_size: int = 32) -> Image.Image:
-    """Render the tray icon. Drawn at 4x then downsampled with LANCZOS for clean edges."""
+def _system_light_taskbar() -> bool:
+    """Taskbar theme (SystemUsesLightTheme — distinct from the apps theme)."""
+    try:
+        import winreg
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return bool(winreg.QueryValueEx(k, "SystemUsesLightTheme")[0])
+    except Exception:
+        return False
+
+
+_DOT = {  # state → indicator dot colour; idle is the bare glyph
+    "loading":    (110, 110, 110),
+    "recording":  (220, 38, 38),
+    "processing": (217, 152, 10),
+}
+
+
+def _make_badge_icon(bg: tuple, target_size: int = 32) -> Image.Image:
+    """Coloured-disc badge icon — kept for the desktop/installer .ico, where a
+    bare monochrome glyph would vanish against the wallpaper."""
     scale = 4
     size  = target_size * scale
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -107,25 +127,94 @@ def _make_icon(bg: tuple, target_size: int = 32) -> Image.Image:
     return img.resize((target_size, target_size), Image.LANCZOS)
 
 
-_ICONS = {state: _make_icon(bg) for state, bg in _BG.items()}
+def _make_icon(state: str, target_size: int = 32, dot: tuple | None = None) -> Image.Image:
+    """Monochrome Win11-style tray glyph that follows the taskbar theme; the
+    app state is a small colour dot so the glyph itself stays theme-neutral.
+    Drawn at 4x then LANCZOS-downsampled."""
+    scale = 4
+    size  = target_size * scale
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+
+    fg = (28, 28, 28, 255) if _system_light_taskbar() else (255, 255, 255, 255)
+    stroke = max(2, int(2.5 * scale))
+
+    # ── Microphone (shifted left, centred vertically) ─────────────────────
+    cx_mic = int(size * 0.34)
+    body_top    = int(size * 0.20)
+    body_bottom = int(size * 0.55)
+    body_half_w = int(size * 0.11)
+    d.rounded_rectangle(
+        [cx_mic - body_half_w, body_top, cx_mic + body_half_w, body_bottom],
+        radius=body_half_w, fill=fg,
+    )
+    arc_half_w = int(size * 0.16)
+    d.arc([cx_mic - arc_half_w, int(size * 0.45), cx_mic + arc_half_w, int(size * 0.70)],
+          start=0, end=180, fill=fg, width=stroke)
+    d.line([cx_mic, int(size * 0.70), cx_mic, int(size * 0.82)], fill=fg, width=stroke)
+    foot_half_w = int(size * 0.11)
+    d.line([cx_mic - foot_half_w, int(size * 0.82), cx_mic + foot_half_w, int(size * 0.82)],
+           fill=fg, width=stroke)
+
+    # ── Waveform — 3 rounded vertical bars (short-tall-short) ─────────────
+    bar_width = max(2, int(2 * scale))
+    bar_centre_y = int(size * 0.50)
+    for bx, bh in zip([int(size * 0.66), int(size * 0.76), int(size * 0.86)],
+                      [int(size * 0.11), int(size * 0.20), int(size * 0.14)]):
+        d.rounded_rectangle(
+            [bx - bar_width, bar_centre_y - bh, bx + bar_width, bar_centre_y + bh],
+            radius=bar_width, fill=fg,
+        )
+
+    dot = dot if dot is not None else _DOT.get(state)
+    if dot:
+        r = int(size * 0.15)
+        d.ellipse([size - 2 * r, size - 2 * r, size, size], fill=dot)
+
+    return img.resize((target_size, target_size), Image.LANCZOS)
+
+
+def _blend_rgb(a: tuple, b: tuple, t: float) -> tuple:
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
 def _build_pulse_frames() -> list[Image.Image]:
-    """Pre-render N frames of the recording icon at varying brightness for sine-eased pulse."""
-    base = _make_icon(_BG["recording"])
+    """Sine-eased pulse on the recording dot — the glyph itself can't pulse
+    since a black glyph on a light taskbar has no brightness headroom."""
     frames = []
     for i in range(_PULSE_STEPS):
         t = i / _PULSE_STEPS  # 0..1
-        # cosine ease: 0.55 → 1.0 → 0.55 over the cycle
-        b = 0.55 + 0.45 * (0.5 - 0.5 * math.cos(2 * math.pi * t))
-        if abs(b - 1.0) < 0.01:
-            frames.append(base)
-        else:
-            frames.append(ImageEnhance.Brightness(base).enhance(b))
+        b = 0.5 - 0.5 * math.cos(2 * math.pi * t)  # 0 → 1 → 0
+        frames.append(_make_icon(
+            "recording", dot=_blend_rgb(_DOT["recording"], (255, 170, 170), b)))
     return frames
 
 
-_PULSE_FRAMES = _build_pulse_frames()
+_theme_light: bool | None = None
+_ICONS: dict = {}
+_PULSE_FRAMES: list = []
+
+
+def _rebuild_icons() -> None:
+    global _ICONS, _PULSE_FRAMES, _theme_light
+    _theme_light = _system_light_taskbar()
+    _ICONS = {s: _make_icon(s) for s in _TOOLTIPS}
+    _PULSE_FRAMES = _build_pulse_frames()
+
+
+_rebuild_icons()
+
+
+def refresh_theme() -> None:
+    """Rebuild the tray icons when the Windows taskbar theme flips; reapply state."""
+    if _system_light_taskbar() == _theme_light:
+        return
+    _rebuild_icons()
+    if _icon is not None:
+        try:
+            _icon.icon = _ICONS.get(_state, _ICONS["idle"])
+        except Exception:
+            pass
 
 
 def make_logo(target_size: int = 48,
@@ -200,7 +289,7 @@ def make_logo(target_size: int = 48,
 
 def export_ico(path: str) -> None:
     """Write a multi-resolution .ico file for use as a desktop shortcut icon."""
-    icon = _make_icon(_BG["idle"], target_size=256)
+    icon = _make_badge_icon(_BG["idle"], target_size=256)
     sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     icon.save(path, format="ICO", sizes=sizes)
 

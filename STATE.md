@@ -15,8 +15,10 @@ Voice profile / cloning work started 2026-07-02: recording samples feature added
 2026-07-10 (evening): light-mode rework, verified via dashboard screenshot. Fixed `def open` shadowing builtin in dashboard.py (broke ALL dashboard config reads/writes silently — renamed open_window, callers in main.py:974-977). Softened light palettes (dashboard CSS + preview.py _THEMES), fixed 6 hardcoded dark colours in preview.py, theme injected at dashboard launch (no dark flash). Hardened scripts/restart_app.ps1: relative-cmdline instances (stale 9:49am copy held mutex all day), pythonw3.13.exe children, CIM date crash.
 
 ## Next steps
-- [ ] RESUME HERE: decide popup rendering stack (BACKLOG item 20: patched Tk layered window vs PySide6 vs pywebview) — gates most pop-up revamp items; then execute the convergent cluster (per-pixel-alpha panel, DPI awareness v2, DWM corner quick win).
-- [ ] Execute PRODUCTION_PLAN.md P2 (icon set) — merge with BACKLOG items 5, 21, 24 (single-master ICO pipeline, theme-aware monochrome tray). P1 (product name) needs Balu's decision but doesn't block P2.
+- [ ] Balu: dictate once to see the new panel header (→ app, status dot) and badge corners; flip a setting to feel instant-apply; try the autostart toggle.
+- [ ] Commit the UI polish build (11 files incl. UI_POLISH_PLAN.md, scripts/make_icons.py, assets/) once Balu confirms.
+- [ ] BACKLOG item 20 (popup stack decision) now also owns the deferred ULW badge; only matters if product targets Win10 or wants soft shadows.
+- [ ] PRODUCTION_PLAN.md P2 (desktop icon design) — pipeline exists now (make_icons.py); P1 product name still needs Balu.
 - [ ] Verify the sticky modifier fix survives a real remote-desktop session.
 - [ ] Continue the voice profile / cloning build (multi-sample support, local TTS architecture).
 - [ ] Confirm the double-enter insert behaviour is intended or fix it.
@@ -25,7 +27,9 @@ Voice profile / cloning work started 2026-07-02: recording samples feature added
 Sticky Ctrl/Shift/Alt after paste when remote desktop + VS Code are involved (reported twice, 2026-07-02); fix unverified.
 Titlebar follows Windows theme, not app theme (light app + dark OS = dark titlebar); small DWM call if wanted.
 Theme switch still needs app restart for Tk surfaces (BACKLOG item 4).
-2026-07-10 changes committed (light-mode fixes, restart script, plan/backlog docs); push to origin not done, ask Balu.
+2026-07-10 changes committed in 4 commits, 3aa16a0..b033298 (light-mode fixes, restart script, config theme=dark via fixed save path, plan/backlog docs incl. items 51-100); push to origin not done, ask Balu.
+Top-25 ROI ranking given in chat 2026-07-10 evening: quick wins first = DPI awareness, DWM corner pref, target-app indicator (58), instant-apply, autostart, titlebar sync (63).
+2026-07-10 (night): built UI_POLISH_PLAN.md items (ROI rows 1-11, Balu-approved scope): DPI awareness v2, DWM rounded corners (fixed the jagged bubble — verified 3x zoom), titlebar theme sync, instant-apply settings (Save button gone), autostart toggle, target-app "→ VS Code" indicator + status dot on panel, live theme sync incl. theme:"system", monochrome theme-aware tray icon + scripts/make_icons.py → assets/. M5 ULW badge descoped (DWM already fixed edges; see plan + BACKLOG 1/20). App restarted + verified per milestone. UNCOMMITTED.
 
 ## Key files
 main.py (wiring), hotkey.py, inject.py, preview.py, agent.py, llm_client.py, taskflow.py, api_server.py, config.json.

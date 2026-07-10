@@ -32,6 +32,7 @@ _CONFIG_FILE = "config.json"
 
 _proc: "subprocess.Popen | None" = None
 _proc_lock = threading.Lock()
+_AUTOSTART_TASK = "VoiceDictate"
 _THIS_FILE = os.path.abspath(__file__)
 _PROJECT_DIR = os.path.dirname(_THIS_FILE)
 
@@ -75,6 +76,31 @@ def _merge_cfg(updates: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+def _apply_titlebar_theme(dark: bool) -> None:
+    """Match the Win11 titlebar to the app theme (DWMWA_USE_IMMERSIVE_DARK_MODE);
+    otherwise a light app under a dark Windows theme keeps a dark titlebar."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, dwmapi = ctypes.windll.user32, ctypes.windll.dwmapi
+        pid = os.getpid()
+        val = ctypes.c_int(1 if dark else 0)
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _enum(hwnd, _):
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == pid and user32.IsWindowVisible(hwnd):
+                dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(val),
+                                             ctypes.sizeof(val))
+            return True
+
+        user32.EnumWindows(_enum, 0)
+    except Exception:
+        pass
 
 
 # ── Python → JS API ───────────────────────────────────────────────────────────
@@ -189,6 +215,40 @@ class DashboardAPI:
 
     def get_config(self) -> dict:
         return _read_cfg()
+
+    def set_titlebar_dark(self, dark: bool) -> bool:
+        _apply_titlebar_theme(bool(dark))
+        return True
+
+    def get_autostart(self) -> bool:
+        try:
+            r = subprocess.run(
+                ["schtasks", "/Query", "/TN", _AUTOSTART_TASK],
+                capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def set_autostart(self, enabled: bool) -> bool:
+        try:
+            if not enabled:
+                r = subprocess.run(
+                    ["schtasks", "/Delete", "/F", "/TN", _AUTOSTART_TASK],
+                    capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                return True
+            vbs = os.path.join(_PROJECT_DIR, "launch.vbs")
+            base = ["schtasks", "/Create", "/F", "/TN", _AUTOSTART_TASK,
+                    "/SC", "ONLOGON", "/TR", f'wscript.exe "{vbs}"']
+            # /RL HIGHEST keeps global hotkeys working (app runs elevated);
+            # fall back to a normal task when we aren't elevated ourselves
+            r = subprocess.run(base + ["/RL", "HIGHEST"], capture_output=True,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode != 0:
+                r = subprocess.run(base, capture_output=True,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+            return r.returncode == 0
+        except Exception:
+            return False
 
     def save_settings(self, data: dict) -> bool:
         return _merge_cfg(data)
@@ -576,6 +636,7 @@ select option{background:var(--surf2);color:var(--txt)}
         <select class="sel-in" data-key="theme" onchange="applyThemeFromSelect(this.value)">
           <option value="dark">Dark</option>
           <option value="light">Light</option>
+          <option value="system">Follow Windows</option>
         </select>
       </div>
       <div class="s-row">
@@ -669,6 +730,14 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
+      <div class="s-sec-ttl">System</div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Start with Windows</div><div class="s-lbl-s">Launch hidden at logon via Task Scheduler</div></div>
+        <div class="tog" id="autostartTog" onclick="autostartClick(this)"><div class="tog-k"></div></div>
+      </div>
+    </div>
+
+    <div class="s-sec">
       <div class="s-sec-ttl">TaskFlow integration</div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Enable TaskFlow</div><div class="s-lbl-s">Voice triggers create tasks in TaskFlow</div></div>
@@ -688,7 +757,6 @@ select option{background:var(--surf2);color:var(--txt)}
   <div class="save-bar">
     <span class="save-ok" id="saveOk">✓ Saved</span>
     <button class="btn btn-s" onclick="reloadSettings()">Reload</button>
-    <button class="btn btn-p" onclick="saveSettings()">Save Settings</button>
   </div>
 </div>
 
@@ -746,9 +814,20 @@ function navigateTo(page) {
 }
 
 // ── Theme ──────────────────────────────────────────────────────────────────
+function resolveTheme(t) {
+  return t === 'system'
+    ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : t;
+}
+
+let _themePref = 'dark';
+
 function applyTheme(t) {
+  _themePref = t;
+  t = resolveTheme(t);
   _theme = t;
   document.documentElement.setAttribute('data-theme', t);
+  try { window.pywebview.api.set_titlebar_dark(t !== 'light'); } catch (e) {}
   const icon = document.getElementById('themeIcon');
   if (t === 'light') {
     icon.innerHTML = '<path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clip-rule="evenodd"/>';
@@ -949,11 +1028,46 @@ async function loadSettings() {
   // Theme select
   const themeSel = document.querySelector('select[data-key="theme"]');
   if (themeSel) themeSel.value = cfg.theme || 'dark';
+
+  // Autostart state lives in Task Scheduler, not config
+  try {
+    const on = await window.pywebview.api.get_autostart();
+    document.getElementById('autostartTog').classList.toggle('on', !!on);
+  } catch (e) {}
 }
 
 async function reloadSettings() { await loadSettings(); }
 
-function togClick(el) { el.classList.toggle('on'); }
+function togClick(el) { el.classList.toggle('on'); autoSave(); }
+
+// ── Instant apply — settings persist on change, no Save button ─────────────
+let _autoSaveT = null;
+function autoSave() {
+  clearTimeout(_autoSaveT);
+  _autoSaveT = setTimeout(async () => {
+    try {
+      await window.pywebview.api.save_settings(collectSettings());
+      flashSaved();
+    } catch (e) { console.error('autosave failed:', e); }
+  }, 450);
+}
+
+function flashSaved() {
+  const ok = document.getElementById('saveOk');
+  ok.classList.add('show');
+  clearTimeout(window._okT);
+  window._okT = setTimeout(() => ok.classList.remove('show'), 1600);
+}
+
+async function autostartClick(el) {
+  el.classList.toggle('on');
+  try {
+    await window.pywebview.api.set_autostart(el.classList.contains('on'));
+    flashSaved();
+  } catch (e) {
+    el.classList.toggle('on');  // revert on failure
+  }
+}
 
 function collectSettings() {
   const data = {};
@@ -987,19 +1101,19 @@ function collectSettings() {
   return data;
 }
 
-async function saveSettings() {
-  const data = collectSettings();
-  await window.pywebview.api.save_settings(data);
-  const ok = document.getElementById('saveOk');
-  ok.classList.add('show');
-  setTimeout(() => ok.classList.remove('show'), 2000);
-}
 
 // ── Init ───────────────────────────────────────────────────────────────────
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (_themePref === 'system') applyTheme('system');
+});
+
 window.addEventListener('pywebviewready', async function () {
   try {
     const cfg = await window.pywebview.api.get_config();
     applyTheme(cfg.theme || 'dark');
+    const sf = document.getElementById('settingsForm');
+    sf.addEventListener('input', autoSave);
+    sf.addEventListener('change', autoSave);
     if (_INIT_PAGE === 'home') {
       await loadHome();
     } else {
@@ -1016,8 +1130,24 @@ window.addEventListener('pywebviewready', async function () {
 
 # ── Subprocess entrypoint ──────────────────────────────────────────────────────
 if __name__ == "__main__":
+    try:
+        import ctypes as _ct
+        _ct.windll.user32.SetProcessDpiAwarenessContext(_ct.c_ssize_t(-4))
+    except Exception:
+        pass
     _page = sys.argv[1] if len(sys.argv) > 1 else "home"
-    _theme = _read_cfg().get("theme", "dark")
+    _theme_pref = _read_cfg().get("theme", "dark")
+    if _theme_pref == "system":
+        try:
+            import winreg
+            with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as _k:
+                _theme = "light" if winreg.QueryValueEx(_k, "AppsUseLightTheme")[0] else "dark"
+        except Exception:
+            _theme = "dark"
+    else:
+        _theme = _theme_pref
     # Inject the initial page before pywebviewready fires — avoids the race
     # between window.shown (too early) and the JS api being available.
     _html = _HTML.replace("let _INIT_PAGE = 'home';", f"let _INIT_PAGE = '{_page}';")
@@ -1033,4 +1163,5 @@ if __name__ == "__main__":
         min_size=(700, 500),
         background_color="#ececef" if _theme == "light" else "#202020",
     )
+    _w.events.shown += lambda: _apply_titlebar_theme(_theme != "light")
     webview.start(debug=False, gui="edgechromium")

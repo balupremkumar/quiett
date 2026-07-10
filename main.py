@@ -48,6 +48,22 @@ import transcribe
 import voiceprofile
 from logger import log, error as log_error
 
+
+def _enable_dpi_awareness() -> None:
+    """Per-monitor-v2 DPI awareness. Must run before any window (Tk, pystray)
+    exists; without it Windows bitmap-stretches every surface on scaled
+    displays, which blurs text and compounds edge aliasing."""
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_ssize_t(-4))
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor v1
+        except Exception:
+            pass
+
+
+_enable_dpi_awareness()
+
 _cfg: dict = {}
 _cfg_lock = threading.Lock()
 _task_session: bool = False   # True when Ctrl+Shift+Alt was held at recording start
@@ -874,6 +890,8 @@ def main() -> None:
                 paste_mode=validated.get("paste_mode", "auto"),
             )
             preview.configure_position(validated["preview_position"])
+            preview.refresh_theme()
+            tray.refresh_theme()
             audio.configure(
                 on_stop=_on_audio_stop,
                 max_duration_seconds=validated["max_record_seconds"],
