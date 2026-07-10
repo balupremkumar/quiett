@@ -112,7 +112,7 @@
   "taskflow_default_project": "",
   "taskflow_voice_confirm": false,
   "vad_silence_mode": false,
-  "theme": "light",
+  "theme": "dark",
   "snippets": {
     "insert my email": "you@example.com"
   },
