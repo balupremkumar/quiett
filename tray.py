@@ -9,13 +9,17 @@ recording  red    — mic is active (icon pulses with sine-eased brightness)
 processing yellow — transcribing audio
 """
 
+import json
 import math
 import os
 import threading
 import time
 
+import pyperclip
 import pystray
 from PIL import Image, ImageDraw
+
+_CONFIG_FILE = "config.json"
 
 _state = "loading"
 _icon: pystray.Icon | None = None
@@ -462,6 +466,91 @@ def notify(title: str, message: str) -> None:
             pass
 
 
+def _read_config() -> dict:
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_config(patch: dict) -> None:
+    """Read-modify-write config.json (same pattern as main.py's toggle handlers)."""
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        raw.update(patch)
+        with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(raw, f, indent=2)
+    except Exception:
+        pass
+
+
+_RECENT_HISTORY_MAX = 5
+_RECENT_HISTORY_TRUNCATE = 40
+
+
+def _copy_history_entry(text: str):
+    def _handler(icon, item):
+        try:
+            pyperclip.copy(text)
+        except Exception:
+            return
+        notify("VoiceDictate", "Copied to clipboard")
+    return _handler
+
+
+def _recent_history_items():
+    """Rebuilt every time the submenu opens — reads history.load() fresh so
+    it never shows stale entries."""
+    import history
+    try:
+        entries = history.load()
+    except Exception:
+        entries = []
+    if not entries:
+        yield pystray.MenuItem("No recent dictations", lambda icon, item: None, enabled=False)
+        return
+    for e in entries[:_RECENT_HISTORY_MAX]:
+        text = (e.get("text") or "").strip()
+        if not text:
+            continue
+        label = text if len(text) <= _RECENT_HISTORY_TRUNCATE else text[:_RECENT_HISTORY_TRUNCATE - 1] + "…"
+        yield pystray.MenuItem(label, _copy_history_entry(text))
+
+
+_MIC_NAME_TRUNCATE = 40
+
+
+def _select_input_device(device):
+    def _handler(icon, item):
+        _write_config({"input_device": device})
+    return _handler
+
+
+def _mic_menu_items():
+    """Rebuilt every time the submenu opens — re-reads config.json and the
+    live device list so the radio check always reflects reality."""
+    import audio
+    try:
+        devices = audio.list_input_devices()
+    except Exception:
+        devices = []
+    current = _read_config().get("input_device")
+    yield pystray.MenuItem(
+        "System default", _select_input_device(None),
+        checked=lambda item, c=current: c is None, radio=True,
+    )
+    for d in devices:
+        idx = d.get("index")
+        name = d.get("name") or f"Device {idx}"
+        label = name if len(name) <= _MIC_NAME_TRUNCATE else name[:_MIC_NAME_TRUNCATE - 1] + "…"
+        yield pystray.MenuItem(
+            label, _select_input_device(idx),
+            checked=lambda item, c=current, idx=idx: c == idx, radio=True,
+        )
+
+
 def run() -> None:
     global _icon
 
@@ -538,10 +627,15 @@ def run() -> None:
         pystray.MenuItem("Resume", _resume, enabled=lambda item: _paused),
     )
 
+    # Rebuilt on every open (callable menus) so they never show stale data
+    recent_menu = pystray.Menu(_recent_history_items)
+    mic_menu = pystray.Menu(_mic_menu_items)
+
     # Rare/utility actions tucked away so the top level stays short
     more_menu = pystray.Menu(
         pystray.MenuItem("Agent Command Mode", _toggle_agent_command_mode, checked=lambda item: _agent_command_mode),
         pystray.MenuItem("Clipboard Only", _toggle_clipboard_only, checked=lambda item: _clipboard_only),
+        pystray.MenuItem("Microphone", mic_menu),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(_taskflow_label, _relaunch_taskflow),
         pystray.MenuItem(_task_count_label, lambda icon, item: None, enabled=False),
@@ -557,6 +651,7 @@ def run() -> None:
         pystray.MenuItem("Open Dashboard", _open_dashboard, default=True, visible=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("View History", _view_history),
+        pystray.MenuItem("Recent Dictations", recent_menu),
         pystray.MenuItem("Settings",     _open_settings),
         pystray.MenuItem(lambda _: "Paused" if _paused else "Pause", pause_menu),
         pystray.Menu.SEPARATOR,

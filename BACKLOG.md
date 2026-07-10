@@ -23,8 +23,8 @@ Impact H/M/L, Effort S/M/L.
 
 ### Recording pop-up / speech bubble
 
-7. [ ] Live smooth waveform in the pill while recording; current badge bars are flat un-antialiased Canvas rectangles (preview.py:754-761). (H/M) — superwhisper, VoiceInk.
-8. [ ] Hover-to-reveal stop/cancel controls on the compact pill; idle state stays minimal. (M/S) — superwhisper.
+7. [x] (2026-07-11) True continuous waveform: 28-sample level history upsampled bicubic, mirrored filled polygon at 3x supersample, LANCZOS downscale, gradient composited via mask; same 50ms cadence. Needs Balu's eyes on a real dictation.
+8. [x] (2026-07-11) Hover fades in ⏹ stop / ✕ cancel on the badge (calls audio.stop/cancel directly, same path as hotkey release); zero layout shift, 120ms debounce, recording states only.
 9. [ ] Raw-vs-cleaned transcript toggle in the preview panel before accepting. (M/M) — superwhisper Voice/AI toggle.
 10. [x] (2026-07-11) Confirm gate before transcribing recordings >30s (`_LONG_RECORDING_CONFIRM_SECONDS`, main.py; modal in preview.py, Enter transcribes / Esc discards); gate sits before whisper so no wasted inference.
 11. [x] (2026-07-11) Dedicated status row in the wave badge ("Recording…", "Processing…", "Cleaning up…") between waveform and partial transcript; panel header already carried the status dot. No "Done" state invented (would touch main.py flow).
@@ -34,7 +34,7 @@ Impact H/M/L, Effort S/M/L.
 15. [x] (2026-07-11) DWM drop shadow via `DwmExtendFrameIntoClientArea` 1px bottom margin (winfx.py), Win11 corner-preference path only; Win10 region fallback untouched.
 16. [x] (2026-07-10) `DWMWA_WINDOW_CORNER_PREFERENCE` in winfx.apply_rounded_region, region mask kept as Win10 fallback (with DPI-scaled radius). Turned out to be the full fix, not just interim — see item 1.
 17. [x] (2026-07-11) Real vertical gradient via cached PIL column, single PhotoImage per frame (replaces six bands + per-bar rectangles); wave bar width/gap now DPI-scaled too.
-18. [ ] Slide+fade entrance 150-250ms; today it is alpha-fade only, no positional motion (winfx.py:84-92). (M/M) — motion guides.
+18. [x] (2026-07-11) Slide+fade entrance (14px drift, 200ms, ease-out) on panel and both badge variants via _play_entrance; `animations:false` in config.json disables.
 19. [ ] Adjustable pause-tolerance / wait-time slider so slow speakers aren't cut off. (M/M) — Windows 11 Voice Typing 2026.
 20. [ ] Evaluate popup stack migration: raw Win32 layered window (full control, L effort) vs PySide6/QML (GPU-composited 60fps, M) vs pywebview frameless (Chromium AA free, but cold-start latency + no native rounded corners bug #834). (H/L) — rendering agent 8-10.
 
@@ -44,8 +44,8 @@ Impact H/M/L, Effort S/M/L.
 22. [x] (2026-07-11) Left-click opens the dashboard (hidden default=True menu item), right-click keeps the full menu.
 23. [x] (2026-07-11) Tray menu grouped: state, common actions (History, Settings, Pause submenu), rare actions under "More", Quit; all prior actions reachable.
 24. [ ] Desktop/installer icon redesign around one bold mic-to-caret glyph with subtle depth at 256px (ties to PRODUCTION_PLAN P2). (H/M) — MS/Apple icon guidelines.
-25. [ ] Verify exported ICO bytes; Pillow has a known 255x255-clamp footgun on the 256px frame. (L/S) — Pillow #2264.
-26. [ ] Re-render the recording pulse frames against the new icon set (pulse machinery already exists, tray.py:113). (L/S) — audit.
+25. [x] (2026-07-11) Verified clean: all 7 frames (16-256) full size on Pillow 12.2.0, no clamp; `make_icons.py --verify` added for regression.
+26. [x] (2026-07-11) Verified already correct: pulse frames build from the current monochrome glyph via _rebuild_icons on theme refresh, in-memory only, nothing stale. No change.
 
 ### Settings / dashboard
 
@@ -95,7 +95,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 51. [ ] Streaming partial transcript in the recording pill — words appear while you speak (whisper.cpp streaming mode), the single biggest "it's alive" premium signal. (H/L)
 52. [ ] Pre-warmed hidden popup window reused across dictations (create once, show/hide) so the panel appears <100ms after release. (H/M)
 53. [x] (2026-07-11) Auto-dismiss countdown as a thin depleting accent bar along the panel's bottom edge; restarts on typing/focus/hover. (Bar, not ring — Canvas arcs jank in Tk.) Also fixed a pre-existing stale-after()-callback bug on close.
-54. [ ] Drag-to-reposition the panel, position remembered per monitor. (M/M)
+54. [x] (2026-07-11) Drag panel by header, saved per monitor device name to config.json `panel_position`, clamped to work area on restore. Note: a saved drag overrides `_preview_position` mode unconditionally — flag if fixed mode should win.
 55. [x] (2026-07-11) 📌 pin in the panel header suspends auto-dismiss preserving remaining time; unpin resumes; pinned state visibly distinct.
 56. [ ] Compact-to-expanded panel modes (one-line pill vs multi-line editor) with animated resize. (M/M)
 57. [x] (2026-07-11) Word/char count existed already; added WPM from utterance duration (plumbed duration through preview.show), fixed at panel open, counts stay live.
@@ -115,9 +115,9 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 
 ### Tray, beyond items 21-26
 
-68. [ ] Recent-dictations submenu in the tray, click to re-copy. (M/S)
+68. [x] (2026-07-11) Recent Dictations tray submenu: top 5, 40-char truncation, reads history fresh at menu build, click copies + tray notify, disabled empty state.
 69. [x] (2026-07-11) Pause submenu: 15 min / 1 hour / until restart / Resume, threading.Timer auto-resume, remaining minutes in tray tooltip.
-70. [ ] Mic device quick-picker in the tray with a follow-Windows-default toggle. (M/M)
+70. [x] (2026-07-11) More → Microphone submenu: radio-checked input devices + System default, writes `input_device`, existing hot-reload applies it from the next recording.
 71. [ ] Queued-items badge overlay on the tray icon (tasks captured while away). (L/M)
 
 ### Settings, beyond items 27-34

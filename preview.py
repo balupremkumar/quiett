@@ -19,11 +19,13 @@ import math
 import pyperclip
 import keyboard as _keyboard
 import win32api
-from PIL import Image, ImageEnhance, ImageTk
+import win32con
+from PIL import Image, ImageDraw, ImageEnhance, ImageTk
 
 import audio
 import chime
 import history as hist
+import hotkey
 import inject
 import profile
 import taskflow
@@ -154,6 +156,29 @@ def refresh_theme() -> bool:
 
 
 _apply_palette(_resolve_theme())
+
+
+def _animations_enabled() -> bool:
+    """Kill-switch for motion (item 18). Defaults to on when the key is absent."""
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            return bool(json.load(f).get("animations", True))
+    except Exception:
+        return True
+
+
+def _play_entrance(win, target_alpha: float, dy: int = 14, duration_ms: int = 200) -> None:
+    """Slide-up + fade-in entrance (item 18): small upward drift combined with
+    the existing alpha fade, eased out. Honours the `animations` config key —
+    falls back to an instant snap to the target alpha when motion is off."""
+    if _animations_enabled():
+        winfx.slide_in(win, dx=0, dy=dy, duration_ms=duration_ms, alpha_target=target_alpha)
+    else:
+        try:
+            win.attributes("-alpha", target_alpha)
+        except Exception:
+            pass
+
 
 # Typography ladder — Segoe UI Variable with weight cascade
 # (falls back automatically to Segoe UI if Variable isn't installed)
@@ -304,6 +329,10 @@ _badge_anim_phase: float = 0.0            # drives the processing sweep
 _badge_smoothed: list[float] = []         # interpolated bar heights for ease-out decay
 _badge_partial_lbl: tk.Label | None = None  # live partial transcription line
 _badge_status_lbl:  tk.Label | None = None  # dedicated status line — never shares space with transcript text
+_badge_stop_lbl:    tk.Label | None = None  # hover-reveal "finish now" control (item 8)
+_badge_cancel_lbl:  tk.Label | None = None  # hover-reveal "discard" control (item 8)
+_badge_hover_visible: bool = False           # are the hover controls currently faded in?
+_badge_hover_job = None                      # pending after() id for the leave-debounce
 
 
 def _tick() -> None:
@@ -605,6 +634,7 @@ def _badge_alive() -> bool:
     global _badge_time, _badge_logo_lbl, _badge_logo_variants
     global _badge_partial_lbl, _badge_status_lbl
     global _badge_gradient_img, _badge_gradient_id
+    global _badge_stop_lbl, _badge_cancel_lbl, _badge_hover_visible, _badge_hover_job
     if _badge_win is None:
         return False
     try:
@@ -622,6 +652,10 @@ def _badge_alive() -> bool:
         _badge_status_lbl = None
         _badge_gradient_img = None
         _badge_gradient_id = None
+        _badge_stop_lbl = None
+        _badge_cancel_lbl = None
+        _badge_hover_visible = False
+        _badge_hover_job = None
         return False
 
 
@@ -642,6 +676,102 @@ def _build_logo_variants(bg: tuple) -> list[ImageTk.PhotoImage]:
     return variants
 
 
+# ---------------------------------------------------------------------------
+# Hover-to-reveal stop/cancel controls on the recording badge (item 8)
+# ---------------------------------------------------------------------------
+
+def _badge_stop_clicked(_event=None) -> None:
+    """Finish the recording now — identical to releasing the hotkey.
+    Dispatched off the Tk thread since audio.stop() calls straight back into
+    main.py's transcription pipeline."""
+    if _badge_state not in ("recording", "recording_task"):
+        return
+    threading.Thread(target=audio.stop, daemon=True).start()
+
+
+def _badge_cancel_clicked(_event=None) -> None:
+    """Discard the recording — no transcription, mirrors a too-short release
+    without the "hold longer" toast, since this is a deliberate cancel."""
+    if _badge_state not in ("recording", "recording_task"):
+        return
+
+    def _do() -> None:
+        audio.cancel()
+        hotkey.set_external_recording(False)
+        try:
+            tray.set_state("idle")
+        except Exception:
+            pass
+        hide_badge()
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _badge_hover_set(visible: bool) -> None:
+    global _badge_hover_visible
+    if visible and _badge_state not in ("recording", "recording_task"):
+        return
+    if _badge_hover_visible == visible:
+        return
+    _badge_hover_visible = visible
+    stop_target = _FG2 if visible else _BG
+    cancel_target = "#ef4444" if visible else _BG
+    if _badge_stop_lbl is not None:
+        try:
+            winfx.ease_color(_badge_stop_lbl, "fg", _badge_stop_lbl.cget("fg"),
+                             stop_target, duration_ms=150, steps=6)
+        except Exception:
+            pass
+    if _badge_cancel_lbl is not None:
+        try:
+            winfx.ease_color(_badge_cancel_lbl, "fg", _badge_cancel_lbl.cget("fg"),
+                             cancel_target, duration_ms=150, steps=6)
+        except Exception:
+            pass
+
+
+def _badge_hover_force_hide() -> None:
+    """Snap the hover controls invisible with no animation — used when the
+    badge state moves away from recording (e.g. into processing) so a stale
+    hover doesn't carry over onto a badge that can no longer be stopped."""
+    global _badge_hover_visible, _badge_hover_job
+    _badge_hover_visible = False
+    if _badge_hover_job is not None:
+        try:
+            _badge_win.after_cancel(_badge_hover_job)
+        except Exception:
+            pass
+        _badge_hover_job = None
+    for lbl in (_badge_stop_lbl, _badge_cancel_lbl):
+        if lbl is not None:
+            try:
+                lbl.config(fg=_BG)
+            except Exception:
+                pass
+
+
+def _badge_on_enter(_event=None) -> None:
+    global _badge_hover_job
+    if _badge_hover_job is not None:
+        try:
+            _badge_win.after_cancel(_badge_hover_job)
+        except Exception:
+            pass
+        _badge_hover_job = None
+    _badge_hover_set(True)
+
+
+def _badge_on_leave(_event=None) -> None:
+    global _badge_hover_job
+
+    def _apply() -> None:
+        global _badge_hover_job
+        _badge_hover_job = None
+        _badge_hover_set(False)
+
+    _badge_hover_job = _badge_win.after(120, _apply)
+
+
 def _build_recording_badge(cfg: dict) -> None:
     """Create the large recording badge with logo + waveform canvas + elapsed timer."""
     global _badge_win, _badge_canvas, _badge_time
@@ -649,6 +779,7 @@ def _build_recording_badge(cfg: dict) -> None:
     global _badge_logo_variants, _badge_logo_idx, _badge_smoothed
     global _badge_partial_lbl, _badge_status_lbl
     global _badge_gradient_img, _badge_gradient_id
+    global _badge_stop_lbl, _badge_cancel_lbl, _badge_hover_visible, _badge_hover_job
 
     _badge_win = tk.Toplevel(_root)
     _badge_win.overrideredirect(True)
@@ -684,6 +815,29 @@ def _build_recording_badge(cfg: dict) -> None:
     )
     _badge_time.pack(side=tk.LEFT, padx=(12, 0))
 
+    # Hover-reveal controls (item 8) — reserved in the layout at all times
+    # (fg starts matching the background, i.e. invisible) so fading them in
+    # on hover never resizes or shifts the badge. Click actions call straight
+    # into audio.stop()/audio.cancel(), the same functions the hotkey release
+    # already uses (hotkey.configure(on_stop=audio.stop, on_cancel=audio.cancel)
+    # in main.py) — no new plumbing needed.
+    _badge_stop_lbl = tk.Label(
+        row, text="⏹", bg=_BG, fg=_BG, font=(_FONT_FAM_TEXT, 11), cursor="hand2",
+    )
+    _badge_stop_lbl.pack(side=tk.LEFT, padx=(14, 0))
+    _badge_stop_lbl.bind("<Button-1>", _badge_stop_clicked)
+
+    _badge_cancel_lbl = tk.Label(
+        row, text="✕", bg=_BG, fg=_BG, font=(_FONT_FAM_TEXT, 11), cursor="hand2",
+    )
+    _badge_cancel_lbl.pack(side=tk.LEFT, padx=(8, 0))
+    _badge_cancel_lbl.bind("<Button-1>", _badge_cancel_clicked)
+
+    _badge_hover_visible = False
+    _badge_hover_job = None
+    _badge_win.bind("<Enter>", _badge_on_enter)
+    _badge_win.bind("<Leave>", _badge_on_leave)
+
     # Dedicated status line — own zone below the waveform row, distinct from
     # the partial-transcript line below it so state text and dictated text
     # never occupy or overwrite the same space.
@@ -714,7 +868,7 @@ def _build_recording_badge(cfg: dict) -> None:
     _badge_win.geometry(f"{w}x{h}+{sw - w - 20}+{sh - h - 60}")
 
     winfx.apply_rounded_region(_badge_win, radius=14)
-    winfx.fade_in(_badge_win, target=0.96, duration_ms=180)
+    _play_entrance(_badge_win, 0.96, dy=_px(16), duration_ms=200)
 
 
 def _build_text_badge(cfg: dict) -> None:
@@ -722,6 +876,7 @@ def _build_text_badge(cfg: dict) -> None:
     global _badge_win, _badge_label, _badge_dot
     global _badge_canvas, _badge_time, _badge_logo_lbl, _badge_logo_variants
     global _badge_partial_lbl, _badge_status_lbl
+    global _badge_stop_lbl, _badge_cancel_lbl
     _badge_partial_lbl = None
     _badge_status_lbl = None
 
@@ -748,6 +903,8 @@ def _build_text_badge(cfg: dict) -> None:
     _badge_time = None
     _badge_logo_lbl = None
     _badge_logo_variants = []
+    _badge_stop_lbl = None
+    _badge_cancel_lbl = None
 
     _badge_win.update_idletasks()
     w = _badge_win.winfo_reqwidth()
@@ -757,7 +914,7 @@ def _build_text_badge(cfg: dict) -> None:
     _badge_win.geometry(f"{w}x{h}+{sw - w - 20}+{sh - h - 60}")
 
     winfx.apply_rounded_region(_badge_win, radius=10)
-    winfx.fade_in(_badge_win, target=0.94, duration_ms=160)
+    _play_entrance(_badge_win, 0.94, dy=_px(16), duration_ms=200)
 
 
 def _hex_blend(hex_a: str, hex_b: str, t: float) -> str:
@@ -797,6 +954,33 @@ def _gradient_column(accent: str, height: int, width: int) -> "Image.Image":
     return img
 
 
+# Full-width symmetric gradient (item 7) — bright at the waveform's
+# centreline, fading toward the panel background at the top and bottom
+# edges. Built from the same per-row blend as the bar gradient above, just
+# spanning the whole canvas so a continuous waveform shape can be cut out of
+# it with an alpha mask instead of cropping/pasting per discrete bar.
+_gradient_full_cache: dict[tuple, "Image.Image"] = {}
+
+
+def _gradient_full(accent: str, width: int, height: int) -> "Image.Image":
+    width = max(1, width)
+    height = max(1, height)
+    key = (accent, _BG, width, height)
+    cached = _gradient_full_cache.get(key)
+    if cached is not None:
+        return cached
+    mid_i = height // 2
+    half_h = max(mid_i, height - mid_i) + 1
+    col = _gradient_column(accent, half_h, width)
+    img = Image.new("RGB", (width, height), _BG)
+    top = col.crop((0, 0, width, min(half_h, mid_i))).transpose(Image.FLIP_TOP_BOTTOM)
+    img.paste(top, (0, mid_i - top.height))
+    bottom = col.crop((0, 0, width, min(half_h, height - mid_i)))
+    img.paste(bottom, (0, mid_i))
+    _gradient_full_cache[key] = img
+    return img
+
+
 def _draw_badge_frame() -> None:
     """Render one frame of the mirrored gradient equalizer + update the timer + pulse logo."""
     global _badge_anim_phase, _badge_logo_idx, _badge_gradient_img, _badge_gradient_id
@@ -808,7 +992,6 @@ def _draw_badge_frame() -> None:
 
     try:
         canvas_h = _LOGO_SIZE
-        mid = canvas_h / 2
         max_half = canvas_h * 0.44
 
         if _badge_state in ("recording", "recording_task"):
@@ -848,21 +1031,39 @@ def _draw_badge_frame() -> None:
                 else:
                     _badge_smoothed[i] = cur * 0.78 + t * 0.22     # slow release
 
-        # Render mirrored gradient bars — one composite PIL image per frame,
-        # each bar a crop of a gradient column pre-rendered once and cached
-        # (item 17), shown via a single Canvas PhotoImage instead of the old
-        # six stacked flat-colour bands simulating a gradient.
+        # Continuous smooth waveform (item 7): the 28-sample level history is
+        # upsampled via a PIL grayscale resize — BICUBIC interpolates between
+        # samples for a smooth curve instead of a stair-step — then
+        # rasterised as a filled mirrored band at 3x supersample and
+        # downscaled with LANCZOS for antialiasing. Same cached-composite
+        # PhotoImage-per-frame technique as the previous discrete bars
+        # (item 17), just cut from the gradient with a smooth alpha mask
+        # instead of cropping/pasting fixed-width columns.
         canvas_w = _WAVE_BAR_N * (_WAVE_BAR_W + _WAVE_BAR_GAP)
-        col = _gradient_column(accent, int(math.ceil(max_half)) + 1, _WAVE_BAR_W)
-        col_h = col.height
-        mid_i = int(round(mid))
-        frame_img = Image.new("RGB", (canvas_w, int(canvas_h)), _BG)
-        for i, h in enumerate(_badge_smoothed):
-            x = i * (_WAVE_BAR_W + _WAVE_BAR_GAP)
-            bar_h = min(col_h, max(2, int(round(h * max_half))))
-            top_slice = col.crop((0, 0, _WAVE_BAR_W, bar_h))
-            frame_img.paste(top_slice, (x, mid_i - bar_h))
-            frame_img.paste(top_slice.transpose(Image.FLIP_TOP_BOTTOM), (x, mid_i))
+        canvas_h_i = int(canvas_h)
+
+        SS = 3  # supersample factor
+        big_w, big_h = canvas_w * SS, canvas_h_i * SS
+        mid_big = big_h / 2.0
+        max_half_big = max_half * SS
+
+        small = Image.new("L", (_WAVE_BAR_N, 1))
+        small.putdata([int(max(0.0, min(1.0, v)) * 255) for v in _badge_smoothed])
+        curve_vals = small.resize((big_w, 1), Image.BICUBIC).getdata()
+
+        mask_big = Image.new("L", (big_w, big_h), 0)
+        top_pts, bottom_pts = [], []
+        for x in range(big_w):
+            amp = max(0.0, min(1.0, curve_vals[x] / 255.0))
+            h_big = max(SS, amp * max_half_big)
+            top_pts.append((x, mid_big - h_big))
+            bottom_pts.append((x, mid_big + h_big))
+        ImageDraw.Draw(mask_big).polygon(top_pts + bottom_pts[::-1], fill=255)
+        mask = mask_big.resize((canvas_w, canvas_h_i), Image.LANCZOS)
+
+        grad = _gradient_full(accent, canvas_w, canvas_h_i)
+        bg_layer = Image.new("RGB", (canvas_w, canvas_h_i), _BG)
+        frame_img = Image.composite(grad, bg_layer, mask)
         _badge_gradient_img = ImageTk.PhotoImage(frame_img)
         if _badge_gradient_id is None:
             _badge_gradient_id = _badge_canvas.create_image(0, 0, anchor="nw", image=_badge_gradient_img)
@@ -964,6 +1165,11 @@ def _handle_badge(cmd: str | None) -> None:
     # Live update existing badge
     if needs_wave:
         if prev != cmd:
+            if cmd not in ("recording", "recording_task"):
+                # e.g. recording -> processing: stale hover controls from the
+                # recording state shouldn't linger on a badge that can no
+                # longer be stopped/cancelled (item 8).
+                _badge_hover_force_hide()
             _badge_logo_variants = _build_logo_variants(cfg["logo_bg"])
             _badge_logo_idx = 0
             if _badge_logo_lbl is not None:
@@ -1003,6 +1209,58 @@ def _calc_position(cx: int, cy: int, w: int, h: int,
         "center":       ((sw - w) // 2,  (sh - h) // 2),
     }
     return positions.get(mode, positions["cursor"])
+
+
+# ---------------------------------------------------------------------------
+# Per-monitor drag position persistence (item 54)
+# ---------------------------------------------------------------------------
+
+def _monitor_key_and_workarea(x: int, y: int) -> tuple[str, tuple[int, int, int, int]]:
+    """Device name + work-area rect (left, top, right, bottom) of the monitor
+    containing point (x, y). Falls back to a generic key/rect on failure."""
+    try:
+        hmon = win32api.MonitorFromPoint((x, y), win32con.MONITOR_DEFAULTTONEAREST)
+        info = win32api.GetMonitorInfo(hmon)
+        return info.get("Device", "default"), info.get("Work", (0, 0, 1920, 1080))
+    except Exception:
+        return "default", (0, 0, 1920, 1080)
+
+
+def _clamp_to_workarea(x: int, y: int, w: int, h: int,
+                       work: tuple[int, int, int, int]) -> tuple[int, int]:
+    left, top, right, bottom = work
+    x = max(left, min(x, right - w))
+    y = max(top, min(y, bottom - h))
+    return x, y
+
+
+def _load_panel_position(monitor_key: str) -> tuple[int, int] | None:
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            saved = json.load(f).get("panel_position", {}).get(monitor_key)
+        if isinstance(saved, dict):
+            return int(saved["x"]), int(saved["y"])
+    except Exception:
+        pass
+    return None
+
+
+def _save_panel_position(monitor_key: str, x: int, y: int) -> None:
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    positions = cfg.get("panel_position")
+    if not isinstance(positions, dict):
+        positions = {}
+    positions[monitor_key] = {"x": x, "y": y}
+    cfg["panel_position"] = positions
+    try:
+        with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 _APP_NAMES = {
@@ -1086,19 +1344,23 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     frame = tk.Frame(ring, bg=_BG, padx=20, pady=16)
     frame.pack(fill=tk.BOTH, expand=True)
 
-    # Header row: label + status dot (left), paste destination (right)
-    header_row = tk.Frame(frame, bg=_BG)
+    # Header row: label + status dot (left), paste destination (right).
+    # Also the drag handle (item 54) — title/dot/destination are bound to
+    # drag below, the pin button is excluded so its own click still toggles.
+    header_row = tk.Frame(frame, bg=_BG, cursor="fleur")
     header_row.pack(fill=tk.X, pady=(0, 8))
     if task_mode:
-        tk.Label(header_row, text="Add to To-Do List", bg=_BG, fg=accent,
-                 font=(_FONT_FAM_DISPLAY, 11, "bold"), anchor="w").pack(side=tk.LEFT)
+        title_lbl = tk.Label(header_row, text="Add to To-Do List", bg=_BG, fg=accent,
+                             font=(_FONT_FAM_DISPLAY, 11, "bold"), anchor="w", cursor="fleur")
     else:
-        tk.Label(header_row, text="VoiceDictate", bg=_BG, fg=_FG3,
-                 font=(_FONT_FAM_DISPLAY, 9, "normal"), anchor="w").pack(side=tk.LEFT)
+        title_lbl = tk.Label(header_row, text="VoiceDictate", bg=_BG, fg=_FG3,
+                             font=(_FONT_FAM_DISPLAY, 9, "normal"), anchor="w", cursor="fleur")
+    title_lbl.pack(side=tk.LEFT)
     # Status dot: green = ready to insert, grey = nothing usable.
     # A text glyph, not a Canvas oval — ClearType antialiases it for free.
-    tk.Label(header_row, text="●", bg=_BG, fg=(_FG3 if empty else _TASK),
-             font=(_FONT_FAM_TEXT, 7, "normal")).pack(side=tk.LEFT, padx=(6, 0))
+    dot_lbl = tk.Label(header_row, text="●", bg=_BG, fg=(_FG3 if empty else _TASK),
+                       font=(_FONT_FAM_TEXT, 7, "normal"), cursor="fleur")
+    dot_lbl.pack(side=tk.LEFT, padx=(6, 0))
     # Pin — suspends the auto-dismiss countdown for long edits (item 55).
     # Only meaningful when there's a countdown running at all.
     pin_btn = None
@@ -1109,9 +1371,11 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
     # Paste destination — so it's obvious where Enter sends the text
     dest = "TaskFlow" if task_mode else _target_app_label(hwnd)
+    dest_lbl = None
     if dest:
-        tk.Label(header_row, text=f"→  {dest}", bg=_BG, fg=_FG2,
-                 font=(_FONT_FAM_TEXT, 8, "normal"), anchor="e").pack(side=tk.RIGHT)
+        dest_lbl = tk.Label(header_row, text=f"→  {dest}", bg=_BG, fg=_FG2,
+                            font=(_FONT_FAM_TEXT, 8, "normal"), anchor="e", cursor="fleur")
+        dest_lbl.pack(side=tk.RIGHT)
 
     # ── Text entry ─────────────────────────────────────────────────────────
     if empty:
@@ -1489,7 +1753,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         _hooks.clear()
     win.bind("<Destroy>", _remove_hooks_on_destroy)
 
-    # ── Drag ───────────────────────────────────────────────────────────────
+    # ── Drag (header only, item 54) ─────────────────────────────────────────
     def _drag_start(event):
         win._ox = event.x_root - win.winfo_x()
         win._oy = event.y_root - win.winfo_y()
@@ -1497,16 +1761,40 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     def _drag_motion(event):
         win.geometry(f"+{event.x_root - win._ox}+{event.y_root - win._oy}")
 
-    for widget in (win, frame):
+    def _drag_release(_event):
+        try:
+            wx, wy = win.winfo_x(), win.winfo_y()
+            ww, wh = win.winfo_width(), win.winfo_height()
+            cx2, cy2 = win32api.GetCursorPos()
+            mon_key, work = _monitor_key_and_workarea(cx2, cy2)
+            wx, wy = _clamp_to_workarea(wx, wy, ww, wh, work)
+            _save_panel_position(mon_key, wx, wy)
+        except Exception:
+            pass
+
+    for widget in (header_row, title_lbl, dot_lbl):
         widget.bind("<ButtonPress-1>", _drag_start)
         widget.bind("<B1-Motion>", _drag_motion)
+        widget.bind("<ButtonRelease-1>", _drag_release)
+    if dest_lbl is not None:
+        dest_lbl.bind("<ButtonPress-1>", _drag_start)
+        dest_lbl.bind("<B1-Motion>", _drag_motion)
+        dest_lbl.bind("<ButtonRelease-1>", _drag_release)
 
     # ── Size & position ────────────────────────────────────────────────────
     win.update_idletasks()
     w = max(420, win.winfo_reqwidth())
     h = win.winfo_reqheight()
     sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-    x, y = _calc_position(cx, cy, w, h, sw, sh, _preview_position)
+    # A prior drag on this monitor wins over cursor-relative / configured
+    # placement (item 54) — the user's manual placement is a deliberate
+    # override, honoured regardless of the preview_position setting.
+    mon_key, work = _monitor_key_and_workarea(cx, cy)
+    saved_pos = _load_panel_position(mon_key)
+    if saved_pos is not None:
+        x, y = _clamp_to_workarea(saved_pos[0], saved_pos[1], w, h, work)
+    else:
+        x, y = _calc_position(cx, cy, w, h, sw, sh, _preview_position)
     win.geometry(f"{w}x{h}+{x}+{y}")
 
     # Activate the preview so keyboard input (Enter/Insert) goes here, not to
@@ -1529,7 +1817,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
     # ── Rounded corners + slide-up entrance ────────────────────────────────
     winfx.apply_rounded_region(win, radius=12)
-    winfx.slide_in(win, dx=0, dy=8, duration_ms=200, alpha_target=1.0)
+    _play_entrance(win, 1.0, dy=_px(14), duration_ms=200)
     if not empty:
         target_border = accent if task_mode else _border_colour(confidence)
         winfx.ease_color(entry, "highlightbackground", _BORDER, target_border,
