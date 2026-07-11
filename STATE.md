@@ -19,7 +19,7 @@ Voice profile / cloning work started 2026-07-02: recording samples feature added
 - [ ] Balu hands-on checks, batches 2-4: dictate once (waveform, badge status row, hover stop/cancel, slide+fade, WPM footer, countdown bar + pin), drag the panel header and reopen, tray right-click (grouped menu, Recent Dictations, Pause submenu, More → Microphone), tray left-click opens dashboard, history chips/pin/bulk select, >30s recording confirm.
 - [x] Ruled 2026-07-11: drag wins over fixed position; VERSION stays 0.1.0; Win11-only; pin emoji stays; popup stack decision waits for Balu's real-use test.
 - [ ] Fix double-enter insert (Balu ruled it a bug 2026-07-11): reproduce E2E first, likely preview.py Enter binding.
-- [ ] Naming session running (growth agent → NAMING.md); Balu picks, then P2 icon design + BACKLOG 50 accent unblock.
+- [ ] Naming: NAMING.md shortlist delivered (PrivateType recommended); Balu reading before picking. Pick unblocks P2 icon + BACKLOG 50 accent. Don't re-run the sweep.
 - [ ] Newly in scope: BACKLOG 51 (streaming transcript, H/L) and 72 (diagnostics page, H/M).
 - [x] Pushed to origin 2026-07-11 (67b70d6..8233a70), main in sync.
 - [ ] BACKLOG item 20 (popup stack decision) now also owns the deferred ULW badge; only matters if product targets Win10 or wants soft shadows.
