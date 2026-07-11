@@ -124,6 +124,8 @@ _CONFIG_DEFAULTS = {
     "retain_audio_min_seconds":    3.0,
     "voice_profile_max_samples":   10,
     "badge_animation":             "waveform",
+    "incognito":                   False,
+    "redact_patterns":             [],
 }
 
 _RECORDINGS_DIR = "recordings"
@@ -255,6 +257,11 @@ def _validate_config(raw: dict) -> dict:
         cfg["voice_profile_max_samples"] = max(1, int(cfg.get("voice_profile_max_samples", 10)))
     except (TypeError, ValueError):
         cfg["voice_profile_max_samples"] = 10
+    cfg["incognito"] = bool(cfg.get("incognito", False))
+    if not isinstance(cfg.get("redact_patterns"), list):
+        cfg["redact_patterns"] = []
+    else:
+        cfg["redact_patterns"] = [p for p in cfg["redact_patterns"] if isinstance(p, str) and p.strip()]
     return cfg
 
 
@@ -362,7 +369,7 @@ def main() -> None:
         task_id = created.get("id")
         chime.play_task_added()
         tray.increment_task_count()
-        if not cfg.get("history_paused", False):
+        if not cfg.get("history_paused", False) and not cfg.get("incognito", False):
             history.save(title, source="taskflow")
         if cfg.get("taskflow_voice_confirm"):
             chime.speak(f"Added {title} to your to-do list")
@@ -462,8 +469,11 @@ def main() -> None:
                                kind="info")
             return
 
-        audio_file = _save_recording(chunks, cfg) if text.strip() else None
-        if text.strip() and not cfg.get("history_paused", False):
+        # Incognito (item 86): single gate for both the transcript and the
+        # raw audio — nothing from this dictation reaches disk.
+        incognito = cfg.get("incognito", False)
+        audio_file = _save_recording(chunks, cfg) if text.strip() and not incognito else None
+        if text.strip() and not cfg.get("history_paused", False) and not incognito:
             history.save(text.strip(), source="agent" if agent_session else None,
                          audio=audio_file)
 
@@ -531,6 +541,7 @@ def main() -> None:
                 auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
                 task_mode=True,
                 duration=duration,
+                incognito=incognito,
             )
             return
 
@@ -580,6 +591,7 @@ def main() -> None:
                         auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
                         task_mode=True,
                         duration=duration,
+                        incognito=incognito,
                     )
                     return
                 # Embedded mid-utterance: auto-create immediately (no
@@ -618,6 +630,7 @@ def main() -> None:
             auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
             duration=duration,
             raw=None if task_extracted else raw_text,
+            incognito=incognito,
         )
 
     def _on_audio_stop(chunks: list) -> None:
@@ -952,7 +965,7 @@ def main() -> None:
                             "taskflow_direct_capture_modifiers",
                             "snippets", "live_preview_enabled", "per_app_context",
                             "retain_audio", "retain_audio_max_files",
-                            "retain_audio_min_seconds"):
+                            "retain_audio_min_seconds", "redact_patterns"):
                     _cfg[key] = validated[key]
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],
@@ -994,6 +1007,13 @@ def main() -> None:
                 with _cfg_lock:
                     _cfg["paste_mode"] = new_paste_mode
                 tray.set_clipboard_only(new_paste_mode == "clipboard_only")
+            # Sync incognito state into tray menu (item 86 — toggleable from
+            # either Settings or the tray, so either side may change it)
+            new_incognito = validated.get("incognito", False)
+            if new_incognito != _cfg.get("incognito"):
+                with _cfg_lock:
+                    _cfg["incognito"] = new_incognito
+                tray.set_incognito(new_incognito)
         except Exception as exc:
             log_error("main", f"config hot-reload failed: {exc}")
         t = threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config)
@@ -1047,6 +1067,20 @@ def main() -> None:
         except Exception:
             pass
 
+    def _on_toggle_incognito(enabled: bool) -> None:
+        global _cfg
+        with _cfg_lock:
+            _cfg["incognito"] = enabled
+        try:
+            with open("config.json") as f:
+                raw = json.load(f)
+            raw["incognito"] = enabled
+            with open("config.json", "w") as f:
+                json.dump(raw, f, indent=2)
+        except Exception:
+            pass
+        tray.set_incognito(enabled)
+
     def _on_rebuild_voice_profile() -> None:
         def _worker() -> None:
             try:
@@ -1071,6 +1105,8 @@ def main() -> None:
         on_toggle_agent_command_mode=_on_toggle_agent_command_mode,
         agent_command_mode=_cfg.get("agent_command_mode_enabled", False),
         on_rebuild_voice_profile=_on_rebuild_voice_profile,
+        on_toggle_incognito=_on_toggle_incognito,
+        incognito=_cfg.get("incognito", False),
     )
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()

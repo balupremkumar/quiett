@@ -7,14 +7,21 @@ panel (preview.py) is unchanged — it still appears near the cursor.
 """
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
+import struct
 import subprocess
 import sys
 import threading
 import urllib.error
 import urllib.request
+import wave
+import winsound
 from datetime import date, datetime
+
+from PIL import Image, ImageDraw
 
 # webview and history are only needed when running as __main__ (subprocess),
 # but importing them at module level is harmless and keeps DashboardAPI clean.
@@ -109,7 +116,7 @@ _KNOWN_CONFIG_KEYS = frozenset({
     "taskflow_default_project", "taskflow_voice_confirm", "snippets",
     "repaste_hotkey", "live_preview_enabled", "retain_audio",
     "retain_audio_max_files", "retain_audio_min_seconds", "voice_profile_max_samples",
-    "badge_animation",
+    "badge_animation", "incognito", "redact_patterns",
     "theme", "animations", "sound_volume", "history_max_entries",
     "recording_retention_days", "dashboard_scale",
 })
@@ -149,11 +156,140 @@ def _format_history_export(entries: list) -> str:
     lines = ["# VoiceDictate history export", ""]
     for e in entries:
         src = e.get("source") or "dictation"
-        lines.append(f"## {e.get('timestamp', '')} — {src}")
+        lines.append(f"## {e.get('timestamp', '')} - {src}")
         lines.append("")
         lines.append(e.get("text", ""))
         lines.append("")
     return "\n".join(lines)
+
+
+def _format_history_export_txt(entries: list) -> str:
+    """Plain text export (item 39) — no Markdown syntax, just timestamp/source
+    header lines followed by the transcript."""
+    lines = []
+    for e in entries:
+        src = e.get("source") or "dictation"
+        lines.append(f"{e.get('timestamp', '')} ({src})")
+        lines.append(e.get("text", "").strip())
+        lines.append("")
+    return "\n".join(lines)
+
+
+# Fake per-entry cue length for the SRT/VTT exports below — dictations in
+# history have no per-word timing data, so this is a sequential placeholder
+# timeline, not real speech timing. Called out in both file headers.
+_FAKE_CUE_SECONDS = 2.0
+_TIMING_DISCLAIMER = (
+    "Cue timings are sequential placeholders (2 seconds per entry), not real "
+    "per-word timing - dictations stored in history have no per-word timing data."
+)
+
+
+def _fmt_srt_ts(total_seconds: float) -> str:
+    ms = int(round(total_seconds * 1000))
+    h, rem = divmod(ms, 3600000)
+    m, rem = divmod(rem, 60000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _fmt_vtt_ts(total_seconds: float) -> str:
+    ms = int(round(total_seconds * 1000))
+    h, rem = divmod(ms, 3600000)
+    m, rem = divmod(rem, 60000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def _format_history_export_srt(entries: list) -> str:
+    """SRT export (item 39). SRT has no official comment syntax, so the
+    timing disclaimer is written as plain text ahead of the first numbered
+    cue — most players simply ignore text that doesn't match a cue block."""
+    lines = [_TIMING_DISCLAIMER, ""]
+    for i, e in enumerate(entries):
+        start = i * _FAKE_CUE_SECONDS
+        end = start + _FAKE_CUE_SECONDS
+        lines.append(str(i + 1))
+        lines.append(f"{_fmt_srt_ts(start)} --> {_fmt_srt_ts(end)}")
+        lines.append(e.get("text", "").strip())
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _format_history_export_vtt(entries: list) -> str:
+    """VTT export (item 39). WebVTT has a real NOTE block, so the disclaimer
+    lives there instead of as loose text."""
+    lines = ["WEBVTT", "", "NOTE", _TIMING_DISCLAIMER, ""]
+    for i, e in enumerate(entries):
+        start = i * _FAKE_CUE_SECONDS
+        end = start + _FAKE_CUE_SECONDS
+        lines.append(f"{_fmt_vtt_ts(start)} --> {_fmt_vtt_ts(end)}")
+        lines.append(e.get("text", "").strip())
+        lines.append("")
+    return "\n".join(lines)
+
+
+# DOCX was considered for item 39 and dropped: no dependency is allowed for
+# this build (python-docx isn't installed), and the four formats above cover
+# plain text, formatted notes, and subtitle interchange without adding one.
+_EXPORT_FORMATS = {
+    "md":  {"ext": "md",  "label": "Markdown (*.md)", "fn": _format_history_export},
+    "txt": {"ext": "txt", "label": "Text file (*.txt)", "fn": _format_history_export_txt},
+    "srt": {"ext": "srt", "label": "SubRip subtitles (*.srt)", "fn": _format_history_export_srt},
+    "vtt": {"ext": "vtt", "label": "WebVTT subtitles (*.vtt)", "fn": _format_history_export_vtt},
+}
+
+
+def _render_waveform_png(path: str, buckets: int = 60,
+                          width: int = 120, height: int = 40) -> "str | None":
+    """Downsample a 16-bit PCM WAV's peak amplitude into ~60 buckets and
+    render a small bar-style waveform PNG (item 88), returned as a data URI.
+    None on anything unreadable/unsupported — caller treats that as "no
+    thumbnail", never a crash."""
+    try:
+        with wave.open(path, "rb") as wf:
+            n_frames = wf.getnframes()
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            raw = wf.readframes(n_frames)
+        if sampwidth != 2 or n_frames == 0:
+            return None  # recordings/ is always 16-bit PCM; bail rather than mis-decode
+        total_samples = len(raw) // 2
+        samples = struct.unpack(f"<{total_samples}h", raw)
+        if n_channels > 1:
+            samples = samples[::n_channels]  # first channel only
+        n = len(samples)
+        if n == 0:
+            return None
+        chunk = max(1, n // buckets)
+        peaks = []
+        for i in range(0, n, chunk):
+            block = samples[i:i + chunk]
+            if block:
+                peaks.append(max(abs(s) for s in block))
+        if not peaks:
+            return None
+        peak_max = max(peaks) or 1
+
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        bar_w = width / len(peaks)
+        for i, p in enumerate(peaks):
+            bar_h = max(1, int((p / peak_max) * (height - 2)))
+            x0 = int(i * bar_w)
+            x1 = max(x0 + 1, int((i + 1) * bar_w) - 1)
+            y0 = (height - bar_h) // 2
+            y1 = y0 + bar_h
+            draw.rounded_rectangle([x0, y0, x1, y1], radius=1, fill=(140, 140, 150, 220))
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
+
+
+_waveform_cache: dict = {}  # filename -> data URI, in-memory only (item 88)
 
 
 def _day_group_label(d: "date", today: "date") -> str:
@@ -301,6 +437,7 @@ class DashboardAPI:
                 "words": len(text.split()),
                 "label": label, "ts_date": ts_date, "source": source,
                 "day_label": day_label, "pinned": bool(e.get("pinned")),
+                "has_audio": bool(e.get("audio")),
             })
         return result
 
@@ -326,15 +463,19 @@ class DashboardAPI:
         except Exception:
             return 0
 
-    def export_history_entries(self, indices: list) -> dict:
+    def export_history_entries(self, indices: list, fmt: str = "md") -> dict:
+        """Item 39 — format is one of "md" / "txt" / "srt" / "vtt". Unknown
+        values fall back to Markdown rather than erroring."""
         try:
+            spec = _EXPORT_FORMATS.get(fmt, _EXPORT_FORMATS["md"])
             entries = hist.load()
             chosen = [entries[i] for i in indices if 0 <= i < len(entries)]
             if not chosen:
                 return {"ok": False, "error": "No entries to export."}
             chosen.sort(key=lambda e: e.get("timestamp", ""))
-            content = _format_history_export(chosen)
-            default_name = f"voicedictate-history-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+            content = spec["fn"](chosen)
+            default_name = (f"voicedictate-history-"
+                             f"{datetime.now().strftime('%Y%m%d-%H%M%S')}.{spec['ext']}")
 
             dialog_ok = True
             result = None
@@ -344,7 +485,7 @@ class DashboardAPI:
                     raise RuntimeError("no window")
                 result = win.create_file_dialog(
                     webview.FileDialog.SAVE, save_filename=default_name,
-                    file_types=("Markdown (*.md)", "Text file (*.txt)"))
+                    file_types=(spec["label"], "All files (*.*)"))
             except Exception:
                 dialog_ok = False
 
@@ -375,6 +516,57 @@ class DashboardAPI:
             return True
         except Exception:
             return False
+
+    def _audio_path_for_index(self, index: int) -> "str | None":
+        entries = hist.load()
+        if not (0 <= index < len(entries)):
+            return None
+        audio_name = entries[index].get("audio")
+        if not audio_name:
+            return None
+        return os.path.join("recordings", audio_name)
+
+    def play_history_audio(self, index: int) -> dict:
+        """Item 38. winsound.PlaySound with SND_ASYNC replaces whatever it
+        was already playing, so this naturally enforces "only one plays"."""
+        try:
+            path = self._audio_path_for_index(int(index))
+            if path is None:
+                return {"ok": False, "error": "No recording for this entry."}
+            if not os.path.exists(path):
+                return {"ok": False, "error": "Recording no longer on disk."}
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stop_audio(self) -> dict:
+        try:
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+        return {"ok": True}
+
+    def get_waveform(self, index: int) -> dict:
+        """Item 88 — cached in-memory by filename so re-opening a row (or
+        re-filtering History) doesn't re-decode the WAV every time."""
+        try:
+            path = self._audio_path_for_index(int(index))
+            if path is None:
+                return {"ok": False}
+            if not os.path.exists(path):
+                return {"ok": False, "error": "Recording no longer on disk."}
+            key = os.path.basename(path)
+            cached = _waveform_cache.get(key)
+            if cached is not None:
+                return {"ok": True, "data": cached}
+            data_uri = _render_waveform_png(path)
+            if data_uri is None:
+                return {"ok": False}
+            _waveform_cache[key] = data_uri
+            return {"ok": True, "data": data_uri}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def get_dictionary(self) -> dict:
         cfg = _read_cfg()
@@ -686,8 +878,10 @@ body{font-family:var(--font);background:var(--bg);color:var(--txt);-webkit-font-
 .list-item:last-child{border-bottom:none}
 .list-item:hover{background:var(--hov)}
 .li-text{font-size:12.5px;color:var(--txt);overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap;padding-right:70px;-webkit-user-select:text;user-select:text}
+  white-space:nowrap;padding-right:96px;-webkit-user-select:text;user-select:text}
 .li-meta{font-size:11px;color:var(--txt3);display:flex;align-items:center;gap:5px}
+.wave-thumb{width:60px;height:20px;background-color:var(--surf2);background-repeat:no-repeat;
+  background-position:center;background-size:contain;border-radius:3px;flex-shrink:0}
 .src-badge{font-size:9px;padding:1px 5px;border-radius:8px;background:var(--acc-bg);
   color:var(--acc);font-weight:700;text-transform:uppercase}
 .li-acts{position:absolute;right:10px;top:50%;transform:translateY(-50%);
@@ -700,6 +894,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--txt);-webkit-font-
 .ia.del:hover{background:rgba(248,81,73,.15);color:var(--danger);border-color:var(--danger)}
 .ia svg{width:12px;height:12px}
 .ia.pin.on{color:var(--acc)}
+.ia.play.on{color:var(--acc);border-color:var(--acc)}
 .empty{text-align:center;padding:48px 32px;color:var(--txt3);font-size:13px}
 /* Designed empty states — first-use onboarding, not just a blank message
    (BACKLOG item 49). Distinct from the plain .empty above, which still
@@ -1005,6 +1200,12 @@ select option{background:var(--surf2);color:var(--txt)}
     <label class="bulk-all"><input type="checkbox" id="selectAllChk" onchange="selectAllToggle(this.checked)"> Select all</label>
     <span class="bulk-count" id="bulkCount">0 selected</span>
     <div class="bulk-acts">
+      <select class="sel-in" id="exportFormatSel" style="width:auto" aria-label="Export format">
+        <option value="md">Markdown (.md)</option>
+        <option value="txt">Plain text (.txt)</option>
+        <option value="srt">SRT subtitles (.srt)</option>
+        <option value="vtt">VTT subtitles (.vtt)</option>
+      </select>
       <button class="btn btn-s" onclick="exportSelected()">Export</button>
       <button class="btn btn-danger" onclick="deleteSelected()">Delete</button>
     </div>
@@ -1195,6 +1396,15 @@ select option{background:var(--surf2);color:var(--txt)}
           <option value="90">After 90 days</option>
         </select>
       </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Incognito mode</div><div class="s-lbl-s">While on, dictations aren't saved to history and audio isn't retained. Also toggleable from the tray icon.</div></div>
+        <div class="tog" data-key="incognito" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
+             role="switch" aria-checked="false" aria-label="Incognito mode" tabindex="0"><div class="tog-k"></div></div>
+      </div>
+      <div class="s-row col">
+        <div class="s-lbl"><div class="s-lbl-t">Redact patterns</div><div class="s-lbl-s">One regular expression per line. Matches are replaced with ▊▊▊ before an entry is stored — this only affects saved history, never the pasted text.</div></div>
+        <textarea class="ta-in" data-key="redact_patterns" data-type="lines" rows="3" placeholder="\\d{3}-\\d{2}-\\d{4}"></textarea>
+      </div>
     </div>
 
     <div class="s-sec">
@@ -1361,6 +1571,14 @@ function starIcon(filled) {
     : '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.286 3.958a1 1 0 00.95.69h4.162c.969 0 1.371 1.24.588 1.81l-3.368 2.446a1 1 0 00-.363 1.118l1.287 3.957c.3.922-.755 1.688-1.539 1.118l-3.367-2.446a1 1 0 00-1.176 0l-3.367 2.446c-.784.57-1.838-.196-1.539-1.118l1.286-3.957a1 1 0 00-.363-1.118L2.062 9.385c-.783-.57-.38-1.81.588-1.81h4.163a1 1 0 00.95-.69l1.286-3.958z"/></svg>';
 }
 
+function playIcon() {
+  return '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M6.5 4.27a1 1 0 011.5-.868l8 4.73a1 1 0 010 1.736l-8 4.73A1 1 0 016.5 13.73V4.27z"/></svg>';
+}
+
+function stopIcon() {
+  return '<svg viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1.5"/></svg>';
+}
+
 function highlightText(text, q) {
   if (!q) return esc(text);
   const lower = text.toLowerCase();
@@ -1496,18 +1714,21 @@ function filterEntries(items, q, srcFilter) {
 }
 
 function renderHistItem(e, i) {
+  const hasAudio = !!e.has_audio;
   return `
     <div class="list-item${e.pinned ? ' pinned' : ''}" id="hi-${e.index}">
       <input type="checkbox" class="li-check" ${_selectedIdx.has(e.index) ? 'checked' : ''}
         onclick="toggleSelect(${e.index}, this.checked)">
       <div class="li-text">${highlightText(e.text, _histQuery)}</div>
       <div class="li-meta">
+        ${hasAudio ? `<div class="wave-thumb" data-idx="${e.index}" title="Waveform"></div>` : ''}
         <span>${esc(e.label)}</span>
         <span>·</span><span>${e.words} words</span>
         ${e.source ? '<span class="src-badge">'+esc(e.source)+'</span>' : ''}
         ${e.pinned ? '<span class="pin-badge" title="Pinned">'+starIcon(true)+'</span>' : ''}
       </div>
       <div class="li-acts">
+        ${hasAudio ? `<button class="ia play" title="Play" aria-label="Play recording" onclick="toggleAudioPlay(${e.index})">${playIcon()}</button>` : ''}
         <button class="ia pin${e.pinned ? ' on' : ''}" title="${e.pinned ? 'Unpin' : 'Pin'}" aria-label="${e.pinned ? 'Unpin' : 'Pin'}"
           onclick="togglePin(${e.index}, ${e.pinned ? 'false' : 'true'})">${starIcon(e.pinned)}</button>
         <button class="ia" title="Copy" aria-label="Copy" onclick="copyText(_histTexts[${i}])">${copyIcon()}</button>
@@ -1559,6 +1780,84 @@ function renderHistory(items) {
   });
   el.innerHTML = html;
   updateBulkCount();
+  observeWaveThumbs();
+}
+
+// ── Audio playback (item 38) ────────────────────────────────────────────────
+let _playingIdx = null;
+
+async function toggleAudioPlay(idx) {
+  const wasPlaying = _playingIdx === idx;
+  if (_playingIdx !== null) {
+    // Only one plays at a time — stop whatever was playing before starting
+    // (or finishing) this click.
+    try { await window.pywebview.api.stop_audio(); } catch (e) {}
+    setPlayButtonState(_playingIdx, false);
+    _playingIdx = null;
+  }
+  if (wasPlaying) return; // this click was the stop toggle
+  try {
+    const res = await window.pywebview.api.play_history_audio(idx);
+    if (res && res.ok) {
+      _playingIdx = idx;
+      setPlayButtonState(idx, true);
+    } else {
+      showToast((res && res.error) || 'Could not play recording.');
+      if (res && res.error === 'Recording no longer on disk.') hideAudioControls(idx);
+    }
+  } catch (e) {
+    showToast('Could not play recording.');
+  }
+}
+
+function setPlayButtonState(idx, playing) {
+  const btn = document.querySelector(`#hi-${idx} .ia.play`);
+  if (!btn) return;
+  btn.classList.toggle('on', playing);
+  btn.innerHTML = playing ? stopIcon() : playIcon();
+  btn.title = playing ? 'Stop' : 'Play';
+  btn.setAttribute('aria-label', playing ? 'Stop playback' : 'Play recording');
+}
+
+function hideAudioControls(idx) {
+  const row = document.getElementById(`hi-${idx}`);
+  if (!row) return;
+  const btn = row.querySelector('.ia.play');
+  if (btn) btn.style.display = 'none';
+  const wave = row.querySelector('.wave-thumb');
+  if (wave) wave.style.display = 'none';
+}
+
+// ── Waveform thumbnails (item 88) — lazy: only fetched once a row's thumb
+// placeholder actually scrolls into view, so opening History with hundreds
+// of entries doesn't render hundreds of PNGs up front. ─────────────────────
+let _waveObserver = null;
+
+function observeWaveThumbs() {
+  if (!_waveObserver) {
+    _waveObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        _waveObserver.unobserve(entry.target);
+        loadWaveThumb(entry.target);
+      });
+    }, { root: document.getElementById('historyList'), rootMargin: '150px' });
+  }
+  document.querySelectorAll('.wave-thumb[data-idx]').forEach(el => _waveObserver.observe(el));
+}
+
+async function loadWaveThumb(el) {
+  const idx = parseInt(el.dataset.idx, 10);
+  try {
+    const res = await window.pywebview.api.get_waveform(idx);
+    if (res && res.ok && res.data) {
+      el.style.backgroundImage = `url(${res.data})`;
+    } else {
+      el.style.display = 'none';
+    }
+  } catch (e) {
+    el.style.display = 'none';
+  }
 }
 
 let _histSearchT = null;
@@ -1642,8 +1941,9 @@ async function deleteSelected() {
 async function exportSelected() {
   if (!_selectedIdx.size) return;
   const idxList = Array.from(_selectedIdx);
+  const fmt = document.getElementById('exportFormatSel').value;
   try {
-    const res = await window.pywebview.api.export_history_entries(idxList);
+    const res = await window.pywebview.api.export_history_entries(idxList, fmt);
     if (res && res.ok) {
       showToast(res.fallback ? 'Exported to ' + res.path : 'Exported to ' + res.path);
     } else if (res && res.cancelled) {
@@ -1758,6 +2058,8 @@ async function loadSettings() {
     if (val == null) return;
     if (el.dataset.type === 'array') {
       el.value = Array.isArray(val) ? val.join(', ') : val;
+    } else if (el.dataset.type === 'lines') {
+      el.value = Array.isArray(val) ? val.join('\n') : val;
     } else {
       el.value = val;
     }
@@ -1816,7 +2118,10 @@ const _SECTION_DEFAULTS = {
     paste_mode: 'auto', clipboard_restore_delay_ms: 150,
     electron_paste_method: 'ctrl_v',
   },
-  history: { history_max_entries: '100', recording_retention_days: '0' },
+  history: {
+    history_max_entries: '100', recording_retention_days: '0',
+    incognito: false, redact_patterns: [],
+  },
   agent: { lmstudio_model: 'qwen2.5-1.5b-instruct' },
   taskflow: {
     taskflow_enabled: true, taskflow_voice_confirm: false,
@@ -1845,6 +2150,7 @@ function applyDefaultsToForm(defaults) {
       if (el.classList.contains('tog')) { setTogState(el, !!val); return; }
       if (el.tagName === 'SELECT') { el.value = String(val); return; }
       if (el.dataset.type === 'array') { el.value = Array.isArray(val) ? val.join(', ') : val; return; }
+      if (el.dataset.type === 'lines') { el.value = Array.isArray(val) ? val.join('\n') : val; return; }
       el.value = val;
     });
     if (key === 'theme') applyTheme(val);
@@ -2173,6 +2479,10 @@ function collectSettings() {
     }
     if (el.dataset.type === 'array') {
       data[key] = el.value.split(',').map(s => s.trim()).filter(Boolean);
+      return;
+    }
+    if (el.dataset.type === 'lines') {
+      data[key] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
       return;
     }
     if (el.dataset.type === 'int') { data[key] = parseInt(el.value) || 0; return; }

@@ -342,6 +342,8 @@ _task_count       = 0           # tasks added to TaskFlow this session
 _on_toggle_agent_command_mode = None
 _agent_command_mode = False
 _on_rebuild_voice_profile = None
+_on_toggle_incognito = None
+_incognito = False
 
 
 def configure(on_view_history, on_toggle_pause=None,
@@ -349,11 +351,13 @@ def configure(on_view_history, on_toggle_pause=None,
               on_toggle_clipboard_only=None, clipboard_only: bool = False,
               on_relaunch_taskflow=None,
               on_toggle_agent_command_mode=None, agent_command_mode: bool = False,
-              on_rebuild_voice_profile=None, on_open_dashboard=None) -> None:
+              on_rebuild_voice_profile=None, on_open_dashboard=None,
+              on_toggle_incognito=None, incognito: bool = False) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
     global _on_toggle_clipboard_only, _clipboard_only, _on_relaunch_taskflow
     global _on_toggle_agent_command_mode, _agent_command_mode
     global _on_rebuild_voice_profile, _on_open_dashboard
+    global _on_toggle_incognito, _incognito
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
@@ -365,6 +369,8 @@ def configure(on_view_history, on_toggle_pause=None,
     _agent_command_mode = agent_command_mode
     _on_rebuild_voice_profile = on_rebuild_voice_profile
     _on_open_dashboard = on_open_dashboard if on_open_dashboard else on_view_profile
+    _on_toggle_incognito = on_toggle_incognito
+    _incognito = incognito
 
 
 def increment_task_count() -> None:
@@ -402,8 +408,25 @@ def set_agent_command_mode(enabled: bool) -> None:
         _icon.update_menu()
 
 
+def set_incognito(enabled: bool) -> None:
+    """Keep tray menu + tooltip in sync when incognito changes externally
+    (Settings page or hot-reload — item 86)."""
+    global _incognito
+    _incognito = enabled
+    if _icon is not None:
+        _icon.title = _with_incognito_suffix(
+            _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}"))
+        _icon.update_menu()
+
+
 def _label() -> str:
     return _LABELS.get(_state, _state)
+
+
+def _with_incognito_suffix(title: str) -> str:
+    """Eye-ish state on the tray tooltip (item 86) — small, muted marker so
+    the incognito state is visible without opening the menu."""
+    return f"{title}  ·  \U0001F576 Incognito" if _incognito else title
 
 
 def set_state(state: str) -> None:
@@ -419,7 +442,8 @@ def set_state(state: str) -> None:
                 _start_pulse()
             else:
                 _icon.icon = _ICONS.get(state, _ICONS["idle"])
-            _icon.title = _pause_tooltip() if _paused else _TOOLTIPS.get(state, f"VoiceDictate — {state}")
+            _icon.title = _with_incognito_suffix(
+                _pause_tooltip() if _paused else _TOOLTIPS.get(state, f"VoiceDictate — {state}"))
             _icon.update_menu()
 
 
@@ -454,7 +478,8 @@ def _set_paused(paused: bool, resume_at: float | None = None) -> None:
         _pause_timer.daemon = True
         _pause_timer.start()
     if _icon is not None:
-        _icon.title = _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}")
+        _icon.title = _with_incognito_suffix(
+            _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}"))
         _icon.update_menu()
 
 
@@ -610,6 +635,15 @@ def run() -> None:
         if _on_rebuild_voice_profile:
             _on_rebuild_voice_profile()
 
+    def _toggle_incognito(icon, item):
+        global _incognito
+        _incognito = not _incognito
+        if _on_toggle_incognito:
+            _on_toggle_incognito(_incognito)
+        icon.title = _with_incognito_suffix(
+            _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}"))
+        icon.update_menu()
+
     def _taskflow_label(_item) -> str:
         if _taskflow_status == "unknown":
             return "TaskFlow: —"
@@ -654,6 +688,7 @@ def run() -> None:
         pystray.MenuItem("Recent Dictations", recent_menu),
         pystray.MenuItem("Settings",     _open_settings),
         pystray.MenuItem(lambda _: "Paused" if _paused else "Pause", pause_menu),
+        pystray.MenuItem("Incognito", _toggle_incognito, checked=lambda item: _incognito),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("More", more_menu),
         pystray.Menu.SEPARATOR,
@@ -662,7 +697,7 @@ def run() -> None:
     _icon = pystray.Icon(
         name="dictation",
         icon=_ICONS["loading"],
-        title="VoiceDictate — Loading...",
+        title=_with_incognito_suffix("VoiceDictate — Loading..."),
         menu=menu,
     )
     _icon.run()

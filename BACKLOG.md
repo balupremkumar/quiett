@@ -60,11 +60,11 @@ Impact H/M/L, Effort S/M/L.
 
 ### History
 
-35. [ ] Consolidate the two history views (legacy Tk viewer in preview.py vs dashboard History page) into one. (M/M) — audit.
+35. [x] (2026-07-11) Consolidate the two history views: dashboard History page is canonical, tray already routed to it (main.py:1063); removed the legacy Tk viewer and its dead helpers from preview.py (242 lines).
 36. [x] (2026-07-11) Filter-as-you-type history search (150ms debounce, matches text + target app, empty-result message), verified by screenshot.
 37. [ ] Re-transcribe from history (right-click "process again") for after model/dictionary upgrades. (M/S) — superwhisper, Wispr Flow.
-38. [ ] Replay audio from history entries; the audio files are already stored in recordings/ (history.py:12). (M/S) — MacWhisper + audit.
-39. [ ] Export entries as Markdown/DOCX/SRT/VTT. (L-M/M) — MacWhisper.
+38. [x] (2026-07-11) Replay audio from history entries via winsound (SND_FILENAME|SND_ASYNC), play/stop toggle per row, button hidden when there's no audio or the file's gone.
+39. [x] (2026-07-11) Export entries as Markdown/plain text/SRT/VTT with a format picker; SRT/VTT use sequential 2s placeholder cues, disclaimed in the file header. DOCX dropped (no dependency allowed).
 40. [ ] Usage/stats tab: words dictated, WPM, top target apps; strong retention hook. (M/M) — Wispr Flow "Your Usage".
 
 ### Dictionary and snippets
@@ -139,9 +139,9 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 83. [x] (2026-07-11) All/Dictation/TaskFlow/Agent chips, AND-combined with text search, verified by screenshot. main.py now tags agent-session saves source="agent" (was untagged, chip would've been empty forever).
 84. [x] (2026-07-11) Select mode with per-entry checkboxes, select all, delete (single confirm, warns on pinned), export via file dialog with Downloads fallback.
 85. [x] (2026-07-11) Theme-aware `<mark>` highlight on matches; HTML-escaped per segment, no raw-text innerHTML injection.
-86. [ ] Privacy mode: incognito dictation (no history/audio), optional pattern redaction (emails, numbers). (M/M)
+86. [x] (2026-07-11) Privacy mode: incognito toggle in tray + Settings (config.json `incognito`, hot-reload, preview panel indicator), plus `redact_patterns` regex list applied at history-save time only.
 87. [x] (2026-07-11) Settings → History: keep 50/100/250/500 entries + auto-delete recordings never/7/30/90 days, instant-apply; history.py enforces on save and purge-on-startup, pinned exempt, defaults match old behaviour. Smoke-tested in isolation.
-88. [ ] Mini waveform thumbnail per entry with inline play for the stored audio. (L/M)
+88. [x] (2026-07-11) Mini waveform thumbnail per entry with stored audio, rendered server-side via PIL from the WAV's downsampled peaks, cached in-memory, lazy-loaded via IntersectionObserver so History with hundreds of entries doesn't render them all up front.
 
 ### Stats and delight
 

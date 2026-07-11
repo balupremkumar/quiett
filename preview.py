@@ -57,7 +57,6 @@ def _px(v: int) -> int:
 # ---------------------------------------------------------------------------
 
 _preview_q:      queue.Queue = queue.Queue()
-_history_q:      queue.Queue = queue.Queue()
 _profile_q:      queue.Queue = queue.Queue()
 _settings_q:     queue.Queue = queue.Queue()
 _badge_q:        queue.Queue = queue.Queue()
@@ -69,7 +68,6 @@ _root:        tk.Tk | None = None
 _ready = threading.Event()
 
 _preview_open  = False   # only touched on the tkinter thread
-_history_open  = False
 _profile_open  = False
 _settings_open = False
 
@@ -209,7 +207,8 @@ def show(text: str, hwnd: int, empty: bool = False,
          raw: str | None = None,
          reformat_backend: str | None = None,
          task_mode: bool = False,
-         duration: float = 0.0) -> None:
+         duration: float = 0.0,
+         incognito: bool = False) -> None:
     """Queue a dictation preview window. raw= is the unmodified Whisper
     transcript before filler-stripping/punctuation/correction cleanup;
     `text` is the cleaned version shown by default. When the two differ,
@@ -224,16 +223,17 @@ def show(text: str, hwnd: int, empty: bool = False,
 
     duration: seconds of recorded audio, when known — powers the speaking-pace
     (WPM) footer metric. 0.0 when unavailable.
+
+    incognito: when True, this dictation was not saved to history — shows a
+    small muted indicator in the panel header so the state is visible at
+    dictation time.
     """
     _preview_q.put({"text": text, "hwnd": hwnd, "empty": empty,
                     "confidence": confidence, "words": words,
                     "auto_dismiss": auto_dismiss, "raw": raw,
                     "reformat_backend": reformat_backend,
-                    "task_mode": task_mode, "duration": duration})
-
-
-def show_history() -> None:
-    _history_q.put(True)
+                    "task_mode": task_mode, "duration": duration,
+                    "incognito": incognito})
 
 
 def show_profile() -> None:
@@ -350,7 +350,7 @@ _PARTIAL_MAX_LINES = 2
 
 
 def _tick() -> None:
-    global _preview_open, _history_open, _profile_open, _settings_open
+    global _preview_open, _profile_open, _settings_open
     global _current_preview_win
 
     # Close any open preview if a new recording started (signal from any thread)
@@ -396,6 +396,7 @@ def _tick() -> None:
                     latest_preview.get("reformat_backend"),
                     latest_preview.get("task_mode", False),
                     latest_preview.get("duration", 0.0),
+                    latest_preview.get("incognito", False),
                 )
             except Exception as e:
                 log_error("preview", f"preview window failed to open, falling back to edge flash: {e}")
@@ -409,21 +410,6 @@ def _tick() -> None:
 
     # Always drain these queues so items don't accumulate while a window is open
     # and immediately reopen it the moment the user closes it.
-    history_requested = False
-    while True:
-        try:
-            _history_q.get_nowait()
-            history_requested = True
-        except queue.Empty:
-            break
-    if history_requested and not _history_open:
-        _history_open = True
-        try:
-            _open_history()
-        except Exception as e:
-            print(f"history window error: {e}")
-            _history_open = False
-
     profile_requested = False
     while True:
         try:
@@ -1530,7 +1516,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                  raw: str | None = None,
                  reformat_backend: str | None = None,
                  task_mode: bool = False,
-                 duration: float = 0.0) -> None:
+                 duration: float = 0.0,
+                 incognito: bool = False) -> None:
     global _current_preview_win
 
     refresh_theme()  # catch theme flips before drawing a fresh panel
@@ -1590,6 +1577,12 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     dot_lbl = tk.Label(header_row, text="●", bg=_BG, fg=(_FG3 if empty else _TASK),
                        font=(_FONT_FAM_TEXT, 7, "normal"), cursor="fleur")
     dot_lbl.pack(side=tk.LEFT, padx=(6, 0))
+    # Incognito indicator (item 86) — muted, so it doesn't compete with the
+    # destination/status but still makes the not-saved state visible.
+    if incognito:
+        incognito_lbl = tk.Label(header_row, text="incognito", bg=_BG, fg=_FG3,
+                                 font=(_FONT_FAM_TEXT, 8, "normal"), cursor="fleur")
+        incognito_lbl.pack(side=tk.LEFT, padx=(6, 0))
     # Pin — suspends the auto-dismiss countdown for long edits (item 55).
     # Only meaningful when there's a countdown running at all.
     pin_btn = None
@@ -2145,23 +2138,6 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         _dismiss_start()
 
 
-# ---------------------------------------------------------------------------
-# History viewer
-# ---------------------------------------------------------------------------
-
-def _fmt_ts(iso: str) -> str:
-    try:
-        dt = datetime.fromisoformat(iso)
-        if dt.date() == date.today():
-            return f"Today  {dt.strftime('%H:%M')}"
-        elif (date.today() - dt.date()).days < 7:
-            return dt.strftime("%a  %H:%M")
-        else:
-            return dt.strftime("%d %b %Y  %H:%M")
-    except Exception:
-        return iso
-
-
 def _open_agent_confirm(desc: str, confirm_cb) -> None:
     """Modal confirm gate for agent actions. Runs on the tkinter thread."""
     win = tk.Toplevel(_root)
@@ -2293,208 +2269,6 @@ def _open_long_confirm(duration: float, confirm_cb, cancel_cb=None) -> None:
 
     winfx.fade_in(win, target=0.97, duration_ms=150)
     win.focus_force()
-
-
-def _open_history() -> None:
-    entries = hist.load()
-
-    win = tk.Toplevel(_root)
-    win.title("VoiceDictate — History")
-    win.configure(bg=_BG)
-    win.geometry("620x500")
-    win.minsize(440, 260)
-
-    # ── Header: title + search ─────────────────────────────────────────────
-    header = tk.Frame(win, bg=_BG)
-    header.pack(fill=tk.X, padx=18, pady=(16, 10))
-
-    tk.Label(
-        header, text="Dictation History",
-        bg=_BG, fg=_FG, font=(_FONT_FAM_DISPLAY, 14, "bold"),
-    ).pack(side=tk.LEFT)
-
-    count_var = tk.StringVar(value=f"{len(entries)} entries")
-    tk.Label(header, textvariable=count_var, bg=_BG, fg=_FG3,
-             font=(_FONT_FAM_TEXT, 9)).pack(side=tk.RIGHT)
-
-    search_row = tk.Frame(win, bg=_BG)
-    search_row.pack(fill=tk.X, padx=18, pady=(0, 8))
-    search_var = tk.StringVar()
-    search_entry = tk.Entry(
-        search_row, textvariable=search_var, bg=_BG2, fg=_FG,
-        insertbackground=_FG, relief="flat", bd=0,
-        highlightthickness=1, highlightbackground=_BORDER,
-        highlightcolor=_BLUE, font=_FONT_BODY,
-    )
-    search_entry.pack(fill=tk.X, ipady=4)
-    # Placeholder behaviour
-    PLACEHOLDER = "Search…"
-    search_entry.insert(0, PLACEHOLDER)
-    search_entry.config(fg=_FG3)
-
-    def _on_search_focus(_=None):
-        if search_var.get() == PLACEHOLDER:
-            search_entry.delete(0, tk.END)
-            search_entry.config(fg=_FG)
-
-    def _on_search_blur(_=None):
-        if not search_var.get():
-            search_entry.insert(0, PLACEHOLDER)
-            search_entry.config(fg=_FG3)
-
-    search_entry.bind("<FocusIn>",  _on_search_focus)
-    search_entry.bind("<FocusOut>", _on_search_blur)
-
-    # ── Entries list (text widget with tags) ───────────────────────────────
-    list_frame = tk.Frame(win, bg=_BG)
-    list_frame.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 10))
-
-    sb = tk.Scrollbar(list_frame)
-    sb.pack(side=tk.RIGHT, fill=tk.Y)
-
-    txt = tk.Text(
-        list_frame, bg=_BG2, fg=_FG,
-        font=_FONT_BODY, wrap=tk.WORD,
-        relief="flat", bd=0, padx=12, pady=10,
-        yscrollcommand=sb.set, cursor="arrow",
-    )
-    txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    sb.config(command=txt.yview)
-
-    txt.tag_configure("ts",     foreground=_FG3, font=(_FONT_FAM_TEXT, 9), spacing1=4)
-    txt.tag_configure("ts_task", foreground=_TASK, font=(_FONT_FAM_TEXT, 9, "bold"), spacing1=4)
-    txt.tag_configure("body",   foreground=_FG,  font=_FONT_BODY, spacing3=6)
-    txt.tag_configure("sep",    foreground=_BORDER)
-    txt.tag_configure("hover",  background=_BG3)
-    txt.tag_configure("match",  background=_MATCH_BG, foreground=_MATCH_FG)
-    txt.tag_configure("flash",  background=_BLUE)  # brief click-to-copy confirmation, eased off in _flash_row
-
-    def _flash_row(start: str, end: str) -> None:
-        """Quick background flash on a row, echoing the copy-to-clipboard click."""
-        steps = 6
-        txt.tag_add("flash", start, end)
-
-        def tick(i: int) -> None:
-            try:
-                if not txt.winfo_exists():
-                    return
-            except Exception:
-                return
-            txt.tag_configure("flash", background=_hex_blend(_BLUE, _BG2, i / steps))
-            if i >= steps:
-                txt.tag_remove("flash", start, end)
-                return
-            txt.after(35, lambda: tick(i + 1))
-
-        tick(0)
-
-    def _populate(data: list, query: str = "") -> None:
-        txt.config(state="normal")
-        txt.delete("1.0", tk.END)
-
-        q = query.strip().lower()
-        if q == PLACEHOLDER.lower():
-            q = ""
-
-        filtered = [e for e in data
-                    if not q or q in e.get("text", "").lower()]
-        count_var.set(f"{len(filtered)} of {len(data)} entries" if q else f"{len(data)} entries")
-
-        if filtered:
-            for i, entry in enumerate(filtered):
-                body_text = entry.get("text", "").strip()
-                is_task = entry.get("source") == "taskflow"
-                ts = _fmt_ts(entry.get("timestamp", ""))
-                if is_task:
-                    ts = "✓ " + ts + " — added to to-do list"
-                start_idx = txt.index(tk.END)
-                txt.insert(tk.END, ts + "\n", "ts_task" if is_task else "ts")
-                body_start = txt.index(tk.END)
-                txt.insert(tk.END, body_text + "\n", "body")
-                body_end = txt.index(f"{tk.END}-1c")
-                end_idx = txt.index(tk.END)
-
-                # Per-entry click-to-copy tag spans entire entry
-                row_tag = f"row_{i}"
-                txt.tag_add(row_tag, start_idx, end_idx)
-                txt.tag_bind(row_tag, "<Button-1>",
-                             lambda e, t=body_text, s=start_idx, en=end_idx: (
-                                 _flash_row(s, en), _copy_with_toast(t)))
-                txt.tag_bind(row_tag, "<Enter>",
-                             lambda e, s=start_idx, en=end_idx: (
-                                 txt.tag_add("hover", s, en),
-                                 txt.config(cursor="hand2"),
-                             ))
-                txt.tag_bind(row_tag, "<Leave>",
-                             lambda e, s=start_idx, en=end_idx: (
-                                 txt.tag_remove("hover", s, en),
-                                 txt.config(cursor="arrow"),
-                             ))
-
-                # Highlight matches
-                if q:
-                    pos = body_start
-                    while True:
-                        idx = txt.search(q, pos, stopindex=body_end, nocase=True)
-                        if not idx:
-                            break
-                        end = f"{idx}+{len(q)}c"
-                        txt.tag_add("match", idx, end)
-                        pos = end
-
-                if i < len(filtered) - 1:
-                    txt.insert(tk.END, "─" * 64 + "\n", "sep")
-        else:
-            msg = "No matching entries." if q else "No dictation history yet."
-            txt.insert(tk.END, msg, "ts")
-        txt.config(state="disabled")
-
-    def _copy_with_toast(text: str) -> None:
-        try:
-            pyperclip.copy(text)
-        except Exception:
-            return
-        widgets.Toast(win, "Copied to clipboard",
-                      bg=_BG2, fg=_FG, duration_ms=1200)
-
-    _populate(entries)
-
-    def _on_search_change(*_):
-        _populate(entries, search_var.get())
-    search_var.trace_add("write", _on_search_change)
-
-    # ── Footer: clear + close ──────────────────────────────────────────────
-    bar = tk.Frame(win, bg=_BG)
-    bar.pack(fill=tk.X, padx=18, pady=(0, 14))
-
-    def on_clear() -> None:
-        hist.clear()
-        nonlocal entries
-        entries = []
-        _populate(entries, search_var.get())
-
-    def on_close() -> None:
-        global _history_open
-        _history_open = False
-        winfx.fade_out_then_destroy(win, duration_ms=140)
-
-    clear_wrap = tk.Frame(bar, bg=_BORDER, padx=1, pady=1)
-    tk.Button(
-        clear_wrap, text="Clear History", command=on_clear,
-        bg=_BG, fg=_FG2,
-        activebackground=_BG2, activeforeground=_FG,
-        relief="flat", bd=0,
-        font=_FONT_BTN, padx=10, pady=6, cursor="hand2",
-    ).pack()
-    clear_wrap.pack(side=tk.LEFT)
-
-    tk.Label(bar, text="Click any entry to copy",
-             bg=_BG, fg=_FG3, font=(_FONT_FAM_TEXT, 8)).pack(side=tk.RIGHT)
-
-    win.protocol("WM_DELETE_WINDOW", on_close)
-    win.bind("<Escape>", lambda _: on_close())
-
-    winfx.fade_in(win, target=1.0, duration_ms=160)
 
 
 # ---------------------------------------------------------------------------

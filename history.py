@@ -1,18 +1,40 @@
 import json
 import os
+import re
 import threading
 from datetime import datetime, timedelta
+
+from logger import warn as log_warn
 
 HISTORY_FILE = "history.json"
 _CONFIG_FILE = "config.json"
 _RECORDINGS_DIR = "recordings"
 MAX_ENTRIES = 100  # default cap; overridden by config.json's history_max_entries
+_REDACTED = "▊▊▊"
 
 _lock = threading.Lock()
 
 
+def _redact(text: str, patterns: list) -> str:
+    """Apply redact_patterns (item 86) at save-time only — the pasted text
+    itself is never touched. Invalid regexes are skipped with a log warning,
+    never allowed to crash a save."""
+    if not patterns:
+        return text
+    for pat in patterns:
+        if not isinstance(pat, str) or not pat.strip():
+            continue
+        try:
+            text = re.sub(pat, _REDACTED, text)
+        except re.error as exc:
+            log_warn("history", f"skipped invalid redact_patterns entry {pat!r}: {exc}")
+    return text
+
+
 def save(text: str, source: str | None = None, audio: str | None = None) -> None:
     with _lock:
+        cfg = _read_cfg()
+        text = _redact(text, cfg.get("redact_patterns", []))
         entries = _load()
         entry = {"timestamp": datetime.now().isoformat(), "text": text}
         if source:
@@ -20,7 +42,6 @@ def save(text: str, source: str | None = None, audio: str | None = None) -> None
         if audio:
             entry["audio"] = audio  # filename in recordings/ (voice-sample dataset)
         entries.insert(0, entry)
-        cfg = _read_cfg()
         entries = _enforce_cap(entries, _cap_from_cfg(cfg))
         _purge_expired_audio(entries, cfg)
         _write(entries)
