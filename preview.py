@@ -12,6 +12,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import date, datetime
 
 import math
@@ -330,12 +331,20 @@ _badge_logo_idx: int = 0
 _badge_state:  str | None = None
 _badge_anim_phase: float = 0.0            # drives the processing sweep
 _badge_smoothed: list[float] = []         # interpolated bar heights for ease-out decay
-_badge_partial_lbl: tk.Label | None = None  # live partial transcription line
+_badge_partial_lbl: tk.Text | None = None  # live partial transcription line (word-stabilised, item 51)
 _badge_status_lbl:  tk.Label | None = None  # dedicated status line — never shares space with transcript text
 _badge_stop_lbl:    tk.Label | None = None  # hover-reveal "finish now" control (item 8)
 _badge_cancel_lbl:  tk.Label | None = None  # hover-reveal "discard" control (item 8)
 _badge_hover_visible: bool = False           # are the hover controls currently faded in?
 _badge_hover_job = None                      # pending after() id for the leave-debounce
+
+# Live-partial word stabilisation (item 51) — a word that lands at the same
+# position in two consecutive partials is "committed" (stops changing colour);
+# everything past that point is still shifting under whisper's revisions.
+_partial_prev_words: list[str] = []
+_partial_committed_n: int = 0
+_partial_font_cache: "tkfont.Font | None" = None
+_PARTIAL_MAX_LINES = 2
 
 
 def _tick() -> None:
@@ -862,12 +871,24 @@ def _build_recording_badge(cfg: dict) -> None:
     )
     _badge_status_lbl.pack(fill=tk.X, pady=(6, 0))
 
-    # Live partial transcription line — packed lazily when text first arrives
-    _badge_partial_lbl = tk.Label(
-        inner, text="", bg=_BG, fg=_FG2,
-        font=(_FONT_FAM_TEXT, 9), wraplength=300,
-        justify="left", anchor="w",
+    # Live partial transcription line — packed lazily when text first arrives.
+    # A Text widget (not Label) so the stabilised prefix and the still-changing
+    # tail can render in different colours without a full-line redraw each
+    # tick (item 51). Wrapped ourselves (see _wrap_words_to_lines) against a
+    # fixed, DPI-scaled pixel width so height can grow 1 -> 2 lines exactly
+    # with the content, then cap there.
+    _partial_frame = tk.Frame(inner, bg=_BG, width=_px(300))
+    _partial_frame.pack_propagate(False)
+    _badge_partial_lbl = tk.Text(
+        _partial_frame, height=1, bg=_BG, fg=_FG3, bd=0, highlightthickness=0,
+        font=(_FONT_FAM_TEXT, 9), wrap="none", cursor="arrow",
+        padx=0, pady=0,
     )
+    _badge_partial_lbl.pack(fill=tk.BOTH, expand=True)
+    _badge_partial_lbl.tag_configure("committed", foreground=_FG2)
+    _badge_partial_lbl.tag_configure("tail", foreground=_FG3)
+    _badge_partial_lbl.configure(state="disabled")
+    _reset_partial_stability()
 
     _badge_label = None
     _badge_dot = None
@@ -1109,18 +1130,114 @@ def _draw_badge_frame() -> None:
         pass
 
 
+def _reset_partial_stability() -> None:
+    """Clear word-stabilisation state. Call whenever a fresh recording badge
+    is built so leftover text from the previous dictation can't bleed into
+    the next one's stabilisation comparison."""
+    global _partial_prev_words, _partial_committed_n
+    _partial_prev_words = []
+    _partial_committed_n = 0
+
+
+def _partial_font() -> "tkfont.Font":
+    """Lazily-created Font matching the partial line's rendering, used purely
+    for pixel-width measurement (no live window needed, so this is safe to
+    call and reason about without visually running the app)."""
+    global _partial_font_cache
+    if _partial_font_cache is None:
+        _partial_font_cache = tkfont.Font(family=_FONT_FAM_TEXT, size=9)
+    return _partial_font_cache
+
+
+def _wrap_words_to_lines(fnt: "tkfont.Font", words_tags: list,
+                         max_px: int) -> list:
+    """Greedy word-wrap of [(word, tag), ...] to lines no wider than max_px
+    (measured with `fnt`). Returns a list of lines, each a list of
+    (word, tag) pairs. Wrapping is computed ourselves (rather than relying on
+    the Text widget's own wrap engine) so the line count used to size the
+    widget always matches exactly what gets rendered."""
+    lines: list = [[]]
+    cur_width = 0
+    space_w = fnt.measure(" ")
+    for word, tag in words_tags:
+        w = fnt.measure(word)
+        if lines[-1] and cur_width + space_w + w > max_px:
+            lines.append([])
+            cur_width = 0
+        if lines[-1]:
+            cur_width += space_w
+        lines[-1].append((word, tag))
+        cur_width += w
+    return lines
+
+
 def _update_badge_partial(text: str) -> None:
-    """Show/refresh the live partial transcription line under the waveform."""
+    """Show/refresh the live partial transcription line under the waveform.
+
+    Stabilises the display instead of re-rendering the whole line every tick:
+    a word that lands at the same position in this partial and the previous
+    one has now been seen unchanged twice in a row, so it's rendered as
+    "committed" (normal muted colour); anything after that point is still
+    shifting under whisper's revisions and renders extra-muted. Wraps to a
+    DPI-scaled fixed width, growing 1 -> 2 lines with content and capping
+    there — once full, older (committed) words drop off the front behind a
+    leading ellipsis so the live edge (the tail) is always visible.
+    """
+    global _partial_prev_words, _partial_committed_n
     if not _badge_alive() or _badge_partial_lbl is None:
         return
     try:
-        disp = text if len(text) <= 160 else "…" + text[-160:]
-        if disp:
-            if not _badge_partial_lbl.winfo_ismapped():
-                _badge_partial_lbl.pack(fill=tk.X, pady=(6, 0))
-            _badge_partial_lbl.config(text=disp)
-        else:
-            _badge_partial_lbl.pack_forget()
+        new_words = text.split()
+
+        # Longest common prefix with the previous partial: a word only
+        # counts as committed once it's shown up unchanged at the same
+        # position twice in a row. Recomputed fresh each tick (not carried
+        # forward) so a later revision to an earlier word correctly drops it
+        # back to the muted "tail" style instead of leaving stale text
+        # looking falsely locked-in.
+        n = 0
+        while (n < len(new_words) and n < len(_partial_prev_words)
+               and new_words[n] == _partial_prev_words[n]):
+            n += 1
+        _partial_committed_n = n
+        _partial_prev_words = new_words
+
+        frame = _badge_partial_lbl.master
+        if not new_words:
+            frame.pack_forget()
+            return
+
+        words_tags = ([(w, "committed") for w in new_words[:_partial_committed_n]]
+                      + [(w, "tail") for w in new_words[_partial_committed_n:]])
+        box_w = _px(300)
+        lines = _wrap_words_to_lines(_partial_font(), words_tags, box_w)
+        truncated = len(lines) > _PARTIAL_MAX_LINES
+        visible = lines[-_PARTIAL_MAX_LINES:] if truncated else lines
+
+        if not frame.winfo_ismapped():
+            frame.pack(fill=tk.X, pady=(6, 0))
+
+        _badge_partial_lbl.configure(state="normal")
+        _badge_partial_lbl.delete("1.0", "end")
+        if truncated:
+            _badge_partial_lbl.insert("end", "…", "committed")
+        for i, line in enumerate(visible):
+            if truncated and i == 0 and line:
+                _badge_partial_lbl.insert("end", " ", "committed")
+            for j, (word, tag) in enumerate(line):
+                if j > 0:
+                    _badge_partial_lbl.insert("end", " ")
+                _badge_partial_lbl.insert("end", word, tag)
+            if i < len(visible) - 1:
+                _badge_partial_lbl.insert("end", "\n")
+        n_lines = max(1, len(visible))
+        _badge_partial_lbl.configure(state="disabled", height=n_lines)
+        # pack_propagate(False) on the wrapper frame means it won't auto-fit
+        # its child's height, so it must be given an explicit pixel height —
+        # otherwise the frame (and the badge) stays stuck at its very first
+        # size no matter how many lines the text wraps to.
+        frame.configure(height=_partial_font().metrics("linespace") * n_lines)
+
         # Badge grows with the text — recompute size and keep it anchored
         # to the bottom-right corner.
         _badge_win.update_idletasks()
@@ -1142,6 +1259,8 @@ def _handle_badge(cmd: str | None) -> None:
         refresh_theme()  # catch theme flips before drawing a fresh badge
 
     if cmd is None:
+        _reset_partial_stability()  # belt-and-suspenders: don't let a late-
+                                     # queued partial bleed into the next recording
         if _badge_alive():
             win = _badge_win
             _badge_win = None  # null first so reference is released

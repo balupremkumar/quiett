@@ -2,19 +2,27 @@
 
 Endpoints
 ---------
-GET  /health          ping
-GET  /history         recent dictation history (last N entries)
-GET  /config          current config.json
-POST /config          patch config.json fields (JSON body)
-POST /task            create a task via TaskFlow
-POST /dictate         trigger a dictation capture programmatically
+GET  /health                 ping
+GET  /history                recent dictation history (last N entries)
+GET  /config                 current config.json
+POST /config                 patch config.json fields (JSON body)
+POST /task                   create a task via TaskFlow
+POST /dictate                trigger a dictation capture programmatically
+GET  /diagnostics            whisper/hotkey/mic status for the dashboard's Diagnostics page
+POST /diagnostics/mic-probe  start a ~5s mic level test (409 while a real recording is active)
+GET  /diagnostics/mic-level  poll the live level of the running mic probe
 """
 
 import json
 import threading
+import time
 
+import numpy as np
+import sounddevice as sd
 from flask import Flask, jsonify, request
 
+import audio
+import transcribe
 from logger import log, warn
 
 _app = Flask(__name__)
@@ -118,6 +126,150 @@ def trigger_dictate():
     except Exception as exc:
         warn("api", f"/dictate error: {exc}")
         return jsonify({"error": str(exc)}), 500
+
+
+def _resolve_mic_status(cfg: dict) -> dict:
+    """Currently configured input device: name, whether it still exists, and
+    whether a real dictation recording is in progress right now."""
+    input_device = cfg.get("input_device")
+    try:
+        recording = audio.is_recording()
+    except Exception:
+        recording = False
+    device_name = "System default" if input_device is None else str(input_device)
+    device_exists = False
+    try:
+        if input_device is None:
+            info = sd.query_devices(kind="input")
+            device_name = info.get("name") or "System default"
+            device_exists = True
+        else:
+            info = sd.query_devices(input_device)
+            device_name = info.get("name") or str(input_device)
+            device_exists = int(info.get("max_input_channels", 0)) > 0
+    except Exception:
+        device_exists = False
+    return {"device_name": device_name, "device_exists": device_exists, "recording": recording}
+
+
+@_app.route("/diagnostics", methods=["GET"])
+def diagnostics():
+    try:
+        cfg = _get_config_fn() if _get_config_fn else {}
+    except Exception as exc:
+        warn("api", f"/diagnostics config read failed: {exc}")
+        cfg = {}
+
+    t0 = time.time()
+    try:
+        whisper_up = transcribe.server_alive()
+    except Exception:
+        whisper_up = False
+    latency_ms = round((time.time() - t0) * 1000, 1) if whisper_up else None
+
+    whisper_info = {
+        "up": whisper_up,
+        "latency_ms": latency_ms,
+        "model": cfg.get("model", "unknown"),
+        "device": transcribe.device_used(),
+    }
+    # keyboard.hook() has no observable "is it still alive" state read-only.
+    # This reports successful registration at startup, not a live heartbeat.
+    hotkey_info = {
+        "state": "registered_at_startup",
+        "combo": cfg.get("hotkey", "ctrl+alt"),
+        "note": "Hook health can't be independently measured while running. This "
+                "reflects successful registration when the app started.",
+    }
+    mic_info = _resolve_mic_status(cfg)
+
+    return jsonify({"whisper": whisper_info, "hotkey": hotkey_info, "mic": mic_info})
+
+
+# ── Mic level probe ──────────────────────────────────────────────────────────
+# Short-lived diagnostic recording so the dashboard can show a live level bar.
+# Entirely separate from audio.py's real dictation stream; refuses to start
+# while a real recording is active so the two never contend for the device.
+
+_PROBE_DURATION_S = 5.0
+_probe_lock = threading.Lock()
+_probe_active = threading.Event()
+_probe_levels: list = []
+_probe_stream = None
+_probe_started_at = 0.0
+
+
+def _probe_callback(indata, frames, time_info, status) -> None:
+    try:
+        peak = float(np.max(np.abs(indata)))
+        rms = float(np.sqrt(np.mean(indata ** 2)))
+    except Exception:
+        return
+    with _probe_lock:
+        _probe_levels.append({"t": round(time.time() - _probe_started_at, 3),
+                               "peak": peak, "rms": rms})
+        del _probe_levels[:-200]
+
+
+def _stop_probe() -> None:
+    global _probe_stream
+    with _probe_lock:
+        s = _probe_stream
+        _probe_stream = None
+    if s:
+        try:
+            s.stop()
+            s.close()
+        except Exception:
+            pass
+    _probe_active.clear()
+    log("api", "mic probe stopped")
+
+
+@_app.route("/diagnostics/mic-probe", methods=["POST"])
+def mic_probe():
+    if audio.is_recording():
+        return jsonify({"error": "A dictation recording is in progress. Try again once it finishes."}), 409
+    if _probe_active.is_set():
+        return jsonify({"error": "Mic test is already running."}), 409
+
+    global _probe_stream, _probe_started_at
+    try:
+        cfg = _get_config_fn() if _get_config_fn else {}
+        input_device = cfg.get("input_device")
+        with _probe_lock:
+            _probe_levels.clear()
+        _probe_started_at = time.time()
+        _probe_stream = sd.InputStream(
+            samplerate=16000, channels=1, dtype="float32",
+            device=input_device, callback=_probe_callback,
+        )
+        _probe_stream.start()
+        _probe_active.set()
+        t = threading.Timer(_PROBE_DURATION_S, _stop_probe)
+        t.daemon = True
+        t.start()
+        log("api", "mic probe started")
+        return jsonify({"status": "started", "duration_s": _PROBE_DURATION_S})
+    except Exception as exc:
+        _probe_active.clear()
+        _probe_stream = None
+        warn("api", f"/diagnostics/mic-probe failed: {exc}")
+        return jsonify({"error": str(exc)}), 500
+
+
+@_app.route("/diagnostics/mic-level", methods=["GET"])
+def mic_level():
+    with _probe_lock:
+        levels = list(_probe_levels)
+    peak = max((l["peak"] for l in levels), default=0.0)
+    current_rms = levels[-1]["rms"] if levels else 0.0
+    return jsonify({
+        "active": _probe_active.is_set(),
+        "levels": levels[-64:],
+        "peak": peak,
+        "current_rms": current_rms,
+    })
 
 
 def start() -> None:

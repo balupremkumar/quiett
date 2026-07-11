@@ -184,10 +184,8 @@ def shutdown() -> None:
     _ready.clear()
 
 
-def _chunks_to_wav_bytes(chunks: list) -> bytes:
-    """Concatenate float32 chunks to a 16-bit mono WAV byte string."""
-    audio = np.concatenate(chunks, axis=0).flatten()
-    # Convert float32 [-1, 1] to int16
+def _floats_to_wav_bytes(audio: np.ndarray) -> bytes:
+    """Encode a flat float32 [-1, 1] array as a 16-bit mono WAV byte string."""
     audio_i16 = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
@@ -196,6 +194,11 @@ def _chunks_to_wav_bytes(chunks: list) -> bytes:
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(audio_i16.tobytes())
     return buf.getvalue()
+
+
+def _chunks_to_wav_bytes(chunks: list) -> bytes:
+    """Concatenate float32 chunks to a 16-bit mono WAV byte string."""
+    return _floats_to_wav_bytes(np.concatenate(chunks, axis=0).flatten())
 
 
 def _post_inference(wav_bytes: bytes, language: str, initial_prompt: str | None) -> dict:
@@ -277,16 +280,31 @@ def run(
     return (text if text else None), confidence, (words or None)
 
 
+_PARTIAL_MAX_WINDOW_SECONDS = 20.0  # cap audio sent per partial — otherwise a
+                                    # long hold makes each re-transcription of
+                                    # the whole buffer slower than the last,
+                                    # and the live line falls further behind
+                                    # the longer someone keeps talking.
+
+
 def run_partial(chunks: list, language: str) -> str | None:
     """Quick raw transcription of the in-progress recording for the live badge.
 
-    No prompt, no postprocess — speed over polish. Returns None on any failure
-    so the caller can just skip the update.
+    Sends the whole buffer so far (matches what the final pass will see) —
+    except once the recording exceeds _PARTIAL_MAX_WINDOW_SECONDS, when only
+    the most recent window is sent, so per-partial latency stays roughly
+    constant instead of growing with recording length. No prompt, no
+    postprocess — speed over polish. Returns None on any failure so the
+    caller can just skip the update.
     """
     if not chunks or not _ready.is_set():
         return None
     try:
-        wav_bytes = _chunks_to_wav_bytes(chunks)
+        audio_arr = np.concatenate(chunks, axis=0).flatten()
+        max_samples = int(_PARTIAL_MAX_WINDOW_SECONDS * SAMPLE_RATE)
+        if len(audio_arr) > max_samples:
+            audio_arr = audio_arr[-max_samples:]
+        wav_bytes = _floats_to_wav_bytes(audio_arr)
         result = _post_inference(wav_bytes, language or "en", None)
         return (result.get("text") or "").strip()
     except Exception:

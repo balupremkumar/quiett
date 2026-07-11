@@ -12,6 +12,8 @@ import os
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 from datetime import date, datetime
 
 # webview and history are only needed when running as __main__ (subprocess),
@@ -86,6 +88,37 @@ def _merge_cfg(updates: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+_DIAG_API_BASE = "http://127.0.0.1:8090"
+
+
+def _diag_api_get(path: str, timeout: float = 2.0) -> "dict | None":
+    """GET against the main app's own HTTP API (api_server.py), same loopback
+    transport health.py uses for its own backend checks. Returns None if the
+    main app isn't running or didn't answer in time."""
+    try:
+        with urllib.request.urlopen(_DIAG_API_BASE + path, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _diag_api_post(path: str, timeout: float = 2.0) -> dict:
+    """POST against api_server.py. Always returns a dict with 'ok' and either
+    'body' (parsed JSON) or 'error' (network failure, not an HTTP error)."""
+    try:
+        req = urllib.request.Request(_DIAG_API_BASE + path, method="POST", data=b"")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return {"ok": True, "body": json.loads(resp.read().decode("utf-8"))}
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            body = {}
+        return {"ok": False, "http_error": True, "body": body}
+    except Exception as exc:
+        return {"ok": False, "http_error": False, "error": str(exc)}
 
 
 def _format_history_export(entries: list) -> str:
@@ -420,6 +453,34 @@ class DashboardAPI:
     def get_about(self) -> dict:
         return {"version": VERSION, "changelog": _CHANGELOG}
 
+    def get_diagnostics(self) -> dict:
+        """Diagnostics page data. Routed through api_server.py in the main
+        app's process, since audio/hotkey state lives there, not in this
+        subprocess. {"reachable": False} if the main app isn't running."""
+        data = _diag_api_get("/diagnostics")
+        if data is None:
+            return {"reachable": False}
+        data["reachable"] = True
+        return data
+
+    def start_mic_probe(self) -> dict:
+        result = _diag_api_post("/diagnostics/mic-probe")
+        if not result["ok"]:
+            if not result.get("http_error"):
+                return {"reachable": False}
+            return {"reachable": True, "error": result["body"].get("error")
+                     or "Couldn't start the mic test."}
+        body = result["body"]
+        body["reachable"] = True
+        return body
+
+    def get_mic_level(self) -> dict:
+        data = _diag_api_get("/diagnostics/mic-level")
+        if data is None:
+            return {"reachable": False}
+        data["reachable"] = True
+        return data
+
 
 
 
@@ -695,6 +756,19 @@ select option{background:var(--surf2);color:var(--txt)}
 .save-ok{font-size:12px;color:var(--success);opacity:0;transition:opacity .3s}
 .save-ok.show{opacity:1}
 
+/* ── Diagnostics ── */
+.diag-row{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt);padding:3px 0}
+.diag-row .status-dot{width:8px;height:8px;flex-shrink:0;transition:background .15s}
+.diag-sub{font-size:11.5px;color:var(--txt3);padding:2px 0 2px 16px}
+.mic-meter-wrap{margin:10px 0 12px}
+.mic-meter{position:relative;height:10px;border-radius:5px;background:var(--surf2);
+  border:1px solid var(--brd);overflow:visible}
+.mic-meter-fill{position:absolute;left:0;top:0;bottom:0;width:0%;border-radius:5px;
+  background:var(--acc);transition:width .1s linear}
+.mic-meter-peak{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--warn);
+  left:0%;display:none}
+.diag-hint{font-size:12px;color:var(--txt3);margin-bottom:4px}
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar{width:5px}
 ::-webkit-scrollbar-track{background:transparent}
@@ -731,6 +805,10 @@ select option{background:var(--surf2);color:var(--txt)}
     <button class="nav-item" data-page="settings" onclick="navigateTo('settings')">
       <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
       Settings
+    </button>
+    <button class="nav-item" data-page="diagnostics" onclick="navigateTo('diagnostics')">
+      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/></svg>
+      Diagnostics
     </button>
     <button class="nav-item" data-page="about" onclick="navigateTo('about')">
       <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
@@ -1027,6 +1105,43 @@ select option{background:var(--surf2);color:var(--txt)}
   </div>
 </div>
 
+<!-- Diagnostics -->
+<div class="page" id="page-diagnostics">
+  <div class="ph">
+    <div><h1>Diagnostics</h1><div class="sub">Live status of the whisper server, hotkey hook, and microphone.</div></div>
+    <div class="ph-actions">
+      <button class="btn btn-s" onclick="loadDiagnostics()">Refresh</button>
+    </div>
+  </div>
+  <div class="dict-grid" id="diagGrid">
+    <div class="dict-sec">
+      <div class="dict-sec-ttl">Whisper server</div>
+      <div class="diag-row"><span class="status-dot" id="diagWhisperDot"></span><span id="diagWhisperTxt">Checking…</span></div>
+      <div class="diag-sub" id="diagWhisperLatency"></div>
+      <div class="diag-sub" id="diagWhisperModel"></div>
+      <div class="diag-sub" id="diagWhisperDevice"></div>
+    </div>
+    <div class="dict-sec">
+      <div class="dict-sec-ttl">Hotkey hook</div>
+      <div class="diag-row"><span class="status-dot" id="diagHotkeyDot"></span><span id="diagHotkeyTxt">Checking…</span></div>
+      <div class="diag-sub" id="diagHotkeyNote"></div>
+    </div>
+    <div class="dict-sec">
+      <div class="dict-sec-ttl">Microphone</div>
+      <div class="diag-row"><span class="status-dot" id="diagMicDot"></span><span id="diagMicTxt">Checking…</span></div>
+      <div class="diag-sub" id="diagMicRecording"></div>
+    </div>
+    <div class="dict-sec" style="grid-column:1 / -1">
+      <div class="dict-sec-ttl">Mic level test</div>
+      <div class="diag-hint">Runs a 5 second test recording to show your live input level. Nothing is saved.</div>
+      <div class="mic-meter-wrap">
+        <div class="mic-meter"><div class="mic-meter-fill" id="micMeterFill"></div><div class="mic-meter-peak" id="micMeterPeak"></div></div>
+      </div>
+      <button class="btn btn-p" id="micProbeBtn" onclick="startMicProbe()">Test mic</button>
+    </div>
+  </div>
+</div>
+
 <!-- About -->
 <div class="page" id="page-about">
   <div class="ph"><div><h1>About</h1><div class="sub">Version, licence, and credits.</div></div></div>
@@ -1149,6 +1264,7 @@ function navigateTo(page) {
   else if (page === 'history') loadHistory();
   else if (page === 'dictionary') loadDictionary();
   else if (page === 'settings') loadSettings();
+  else if (page === 'diagnostics') loadDiagnostics();
   else if (page === 'about') loadAbout();
 }
 
@@ -1545,6 +1661,142 @@ async function loadAbout() {
         ${c.notes.map(n => `<li style="margin-bottom:2px">${esc(n)}</li>`).join('')}
       </ul>
     </div>`).join('');
+}
+
+// ── Diagnostics page ───────────────────────────────────────────────────────
+// Routed through window.pywebview.api, same as every other dashboard
+// feature. The Python side (DashboardAPI.get_diagnostics etc.) makes the
+// actual loopback call to api_server.py in the main app's process, since
+// live audio/hotkey state lives there, not in this subprocess.
+let _micProbeTimer = null;
+let _micProbePeak = 0;
+
+function _setDot(id, colorVar) {
+  const el = document.getElementById(id);
+  if (el) el.style.background = colorVar;
+}
+
+async function loadDiagnostics() {
+  ['diagWhisperTxt', 'diagHotkeyTxt', 'diagMicTxt'].forEach(id => {
+    document.getElementById(id).textContent = 'Checking…';
+  });
+  ['diagWhisperDot', 'diagHotkeyDot', 'diagMicDot'].forEach(id => _setDot(id, 'var(--txt3)'));
+  document.getElementById('diagWhisperLatency').textContent = '';
+  document.getElementById('diagWhisperModel').textContent = '';
+  document.getElementById('diagWhisperDevice').textContent = '';
+  document.getElementById('diagHotkeyNote').textContent = '';
+  document.getElementById('diagMicRecording').textContent = '';
+
+  try {
+    const d = await window.pywebview.api.get_diagnostics();
+    if (!d || d.reachable === false) { renderDiagnosticsUnreachable(); return; }
+    renderDiagnostics(d);
+  } catch (e) {
+    renderDiagnosticsUnreachable();
+  }
+}
+
+function renderDiagnostics(d) {
+  const w = d.whisper || {};
+  _setDot('diagWhisperDot', w.up ? 'var(--success)' : 'var(--danger)');
+  document.getElementById('diagWhisperTxt').textContent = w.up ? 'Running' : 'Not responding';
+  document.getElementById('diagWhisperLatency').textContent = w.up && w.latency_ms != null
+    ? `Ping latency: ${w.latency_ms} ms` : 'Ping latency: unavailable';
+  document.getElementById('diagWhisperModel').textContent = `Model: ${w.model || 'unknown'}`;
+  document.getElementById('diagWhisperDevice').textContent = `Device: ${w.device || 'unknown'}`;
+
+  const h = d.hotkey || {};
+  _setDot('diagHotkeyDot', 'var(--success)');
+  document.getElementById('diagHotkeyTxt').textContent =
+    `Registered at startup (${h.combo || 'ctrl+alt'})`;
+  document.getElementById('diagHotkeyNote').textContent = h.note || '';
+
+  const m = d.mic || {};
+  _setDot('diagMicDot', m.device_exists ? 'var(--success)' : 'var(--danger)');
+  document.getElementById('diagMicTxt').textContent = m.device_exists
+    ? (m.device_name || 'Unknown device')
+    : (m.device_name ? `${m.device_name} not found` : 'No microphone found');
+  document.getElementById('diagMicRecording').textContent = m.recording
+    ? 'A dictation recording is in progress right now.'
+    : 'Not currently recording.';
+
+  const btn = document.getElementById('micProbeBtn');
+  if (btn && !_micProbeTimer) { btn.disabled = false; btn.title = ''; }
+}
+
+function renderDiagnosticsUnreachable() {
+  ['diagWhisperDot', 'diagHotkeyDot', 'diagMicDot'].forEach(id => _setDot(id, 'var(--warn)'));
+  const msg = "VoiceDictate isn't running";
+  document.getElementById('diagWhisperTxt').textContent = msg;
+  document.getElementById('diagHotkeyTxt').textContent = msg;
+  document.getElementById('diagMicTxt').textContent = msg;
+  document.getElementById('diagHotkeyNote').textContent = 'Start VoiceDictate to see live diagnostics.';
+  document.getElementById('diagWhisperLatency').textContent = '';
+  document.getElementById('diagWhisperModel').textContent = '';
+  document.getElementById('diagWhisperDevice').textContent = '';
+  document.getElementById('diagMicRecording').textContent = '';
+  const btn = document.getElementById('micProbeBtn');
+  if (btn) { btn.disabled = true; btn.title = 'Start VoiceDictate first.'; }
+}
+
+function _resetMicMeter() {
+  _micProbePeak = 0;
+  const fill = document.getElementById('micMeterFill');
+  const peak = document.getElementById('micMeterPeak');
+  if (fill) fill.style.width = '0%';
+  if (peak) peak.style.display = 'none';
+}
+
+async function startMicProbe() {
+  const btn = document.getElementById('micProbeBtn');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  _resetMicMeter();
+
+  let data;
+  try {
+    data = await window.pywebview.api.start_mic_probe();
+  } catch (e) {
+    data = null;
+  }
+  if (!data || data.reachable === false) {
+    showToast("Couldn't reach VoiceDictate to start the mic test.");
+    btn.disabled = false;
+    btn.textContent = 'Test mic';
+    return;
+  }
+  if (data.error) {
+    showToast(data.error);
+    btn.disabled = false;
+    btn.textContent = 'Test mic';
+    return;
+  }
+
+  const endAt = Date.now() + ((data.duration_s || 5) * 1000);
+  clearInterval(_micProbeTimer);
+  _micProbeTimer = setInterval(async () => {
+    if (Date.now() >= endAt) {
+      clearInterval(_micProbeTimer);
+      _micProbeTimer = null;
+      btn.disabled = false;
+      btn.textContent = 'Test mic';
+      return;
+    }
+    try {
+      const lvl = await window.pywebview.api.get_mic_level();
+      if (!lvl || lvl.reachable === false) return; // transient, keep last-known level on screen
+      const pct = Math.max(0, Math.min(100, Math.round((lvl.current_rms || 0) * 400)));
+      document.getElementById('micMeterFill').style.width = pct + '%';
+      const peakPct = Math.max(0, Math.min(100, Math.round((lvl.peak || 0) * 400)));
+      if (peakPct >= _micProbePeak) {
+        _micProbePeak = peakPct;
+        const pk = document.getElementById('micMeterPeak');
+        pk.style.left = peakPct + '%';
+        pk.style.display = 'block';
+      }
+    } catch (e) { /* transient, keep last-known level on screen */ }
+  }, 150);
 }
 
 function togClick(el) { el.classList.toggle('on'); autoSave(); }

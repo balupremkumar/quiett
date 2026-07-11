@@ -92,7 +92,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 
 ### Popup / preview panel, advanced
 
-51. [ ] Streaming partial transcript in the recording pill — words appear while you speak (whisper.cpp streaming mode), the single biggest "it's alive" premium signal. (H/L) — RE-ADMITTED by Balu 2026-07-11.
+51. [x] (2026-07-11) Live partial mechanism upgraded to feel streaming: tighter cadence (1.0s/0.7s) with latency-adaptive backoff, 20s tail window so long holds stop degrading, LCP word-diff renders stable words committed (_FG2) vs shifting tail muted (_FG3), pixel-wrapped 1→2 lines then ellipsis. Needs Balu's eyes on a real dictation.
 52. [ ] Pre-warmed hidden popup window reused across dictations (create once, show/hide) so the panel appears <100ms after release. (H/M)
 53. [x] (2026-07-11) Auto-dismiss countdown as a thin depleting accent bar along the panel's bottom edge; restarts on typing/focus/hover. (Bar, not ring — Canvas arcs jank in Tk.) Also fixed a pre-existing stale-after()-callback bug on close.
 54. [x] (2026-07-11) Drag panel by header, saved per monitor device name to config.json `panel_position`, clamped to work area on restore. Note: a saved drag overrides `_preview_position` mode unconditionally — flag if fixed mode should win.
@@ -122,7 +122,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 
 ### Settings, beyond items 27-34
 
-72. [ ] Diagnostics page: live mic level meter, whisper server status and latency, GPU device, hotkey hook health. (H/M) — RE-ADMITTED by Balu 2026-07-11.
+72. [x] (2026-07-11) Diagnostics page + GET /diagnostics + 5s mic probe (409 during real recordings, auto-stop). Transport via pywebview bridge, NOT CORS (first pass added Access-Control-Allow-Origin:* which would have exposed /history to any local webpage — caught in review, removed). API + probe verified E2E, page screenshot-verified light theme.
 73. [ ] "Test your mic" wizard with a sample transcription and feedback. (M/M)
 74. [ ] Model picker (tiny to large-v3) with plain-language speed/accuracy tradeoffs and VRAM cost shown. (H/M)
 75. [ ] Per-app profiles: different formatting/paste behaviour per target app (code-friendly in VS Code, prose in Word). (H/L)

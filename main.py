@@ -640,24 +640,44 @@ def main() -> None:
 
         _proceed()
 
+    _PARTIAL_MIN_START_SECONDS = 1.0   # first partial fires once this much audio exists
+    _PARTIAL_MIN_NEW_SECONDS   = 0.7   # ...then again once this much *new* audio has landed
+    _PARTIAL_MAX_NEW_SECONDS   = 3.0   # cadence ceiling once the server is struggling
+    _PARTIAL_SLOW_THRESHOLD    = 1.5   # seconds — a partial slower than this backs off the cadence
+    _PARTIAL_POLL_SECONDS      = 0.15
+
     def _partial_worker() -> None:
         """Live partial transcription while recording — feeds the badge.
 
-        Paced so a partial inference is only started when at least ~1.2s of new
-        audio exists, and never more than one at a time (the call itself blocks),
-        keeping whisper-server free when the final inference arrives.
+        Paced so a partial inference only starts once _PARTIAL_MIN_NEW_SECONDS
+        of new audio has landed since the last one. The call itself blocks this
+        loop (single thread), so a slow whisper-server response naturally delays
+        the next check instead of piling up a second request — no separate
+        in-flight guard needed.
+
+        If a partial consistently takes longer than _PARTIAL_SLOW_THRESHOLD, the
+        new-audio gate backs off (up to _PARTIAL_MAX_NEW_SECONDS) so the live
+        line never starves the eventual final transcription of server time; it
+        tightens back up once responses are fast again.
         """
         last_dur = 0.0
+        new_audio_gate = _PARTIAL_MIN_NEW_SECONDS
         while audio.is_recording():
-            time.sleep(0.25)
+            time.sleep(_PARTIAL_POLL_SECONDS)
             chunks = audio.get_chunks_snapshot()
             dur = sum(len(c) for c in chunks) / audio.SAMPLE_RATE
-            if dur < 1.5 or dur - last_dur < 1.2:
+            if dur < _PARTIAL_MIN_START_SECONDS or dur - last_dur < new_audio_gate:
                 continue
             if not audio.is_recording():
                 break
+            t0 = time.time()
             txt = transcribe.run_partial(chunks, _get_cfg().get("language", "en"))
+            latency = time.time() - t0
             last_dur = dur
+            if latency > _PARTIAL_SLOW_THRESHOLD:
+                new_audio_gate = min(_PARTIAL_MAX_NEW_SECONDS, new_audio_gate * 1.5)
+            elif latency < _PARTIAL_SLOW_THRESHOLD * 0.5:
+                new_audio_gate = max(_PARTIAL_MIN_NEW_SECONDS, new_audio_gate * 0.85)
             if txt and audio.is_recording():
                 preview.set_partial_text(txt)
 
