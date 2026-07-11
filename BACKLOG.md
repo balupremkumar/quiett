@@ -36,7 +36,7 @@ Impact H/M/L, Effort S/M/L.
 17. [x] (2026-07-11) Real vertical gradient via cached PIL column, single PhotoImage per frame (replaces six bands + per-bar rectangles); wave bar width/gap now DPI-scaled too.
 18. [x] (2026-07-11) Slide+fade entrance (14px drift, 200ms, ease-out) on panel and both badge variants via _play_entrance; `animations:false` in config.json disables.
 19. [ ] Adjustable pause-tolerance / wait-time slider so slow speakers aren't cut off. (M/M) — Windows 11 Voice Typing 2026.
-20. [ ] Evaluate popup stack migration: raw Win32 layered window (full control, L effort) vs PySide6/QML (GPU-composited 60fps, M) vs pywebview frameless (Chromium AA free, but cold-start latency + no native rounded corners bug #834). (H/L) — rendering agent 8-10.
+20. [ ] Evaluate popup stack migration: raw Win32 layered window (full control, L effort) vs PySide6/QML (GPU-composited 60fps, M) vs pywebview frameless (Chromium AA free, but cold-start latency + no native rounded corners bug #834). (H/L) — rendering agent 8-10. RULED 2026-07-11: Win11-only product (ULW/Win10 fallback polish out of scope); decision deferred until Balu tests the batch-4 motion in real use.
 
 ### Tray + desktop icons
 
@@ -92,7 +92,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 
 ### Popup / preview panel, advanced
 
-51. [ ] Streaming partial transcript in the recording pill — words appear while you speak (whisper.cpp streaming mode), the single biggest "it's alive" premium signal. (H/L)
+51. [ ] Streaming partial transcript in the recording pill — words appear while you speak (whisper.cpp streaming mode), the single biggest "it's alive" premium signal. (H/L) — RE-ADMITTED by Balu 2026-07-11.
 52. [ ] Pre-warmed hidden popup window reused across dictations (create once, show/hide) so the panel appears <100ms after release. (H/M)
 53. [x] (2026-07-11) Auto-dismiss countdown as a thin depleting accent bar along the panel's bottom edge; restarts on typing/focus/hover. (Bar, not ring — Canvas arcs jank in Tk.) Also fixed a pre-existing stale-after()-callback bug on close.
 54. [x] (2026-07-11) Drag panel by header, saved per monitor device name to config.json `panel_position`, clamped to work area on restore. Note: a saved drag overrides `_preview_position` mode unconditionally — flag if fixed mode should win.
@@ -122,7 +122,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 
 ### Settings, beyond items 27-34
 
-72. [ ] Diagnostics page: live mic level meter, whisper server status and latency, GPU device, hotkey hook health. (H/M)
+72. [ ] Diagnostics page: live mic level meter, whisper server status and latency, GPU device, hotkey hook health. (H/M) — RE-ADMITTED by Balu 2026-07-11.
 73. [ ] "Test your mic" wizard with a sample transcription and feedback. (M/M)
 74. [ ] Model picker (tiny to large-v3) with plain-language speed/accuracy tradeoffs and VRAM cost shown. (H/M)
 75. [ ] Per-app profiles: different formatting/paste behaviour per target app (code-friendly in VS Code, prose in Word). (H/L)
