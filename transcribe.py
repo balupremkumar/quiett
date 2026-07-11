@@ -249,17 +249,22 @@ def run(
     corrections: dict | None = None,
     initial_prompt: str | None = None,
     custom_vocabulary: list | None = None,
-) -> tuple[str | None, float | None, list | None]:
-    """Return (postprocessed_text, confidence, words) or (None, None, None)."""
+) -> tuple[str | None, float | None, list | None, str | None]:
+    """Return (postprocessed_text, confidence, words, raw_text) or (None, None, None, None).
+
+    raw_text is the unmodified Whisper transcript before filler-stripping,
+    spoken-punctuation, and correction cleanup — kept alongside the cleaned
+    text so the preview panel can offer a Raw/Cleaned toggle (item 9).
+    """
     if not chunks:
-        return None, None, None
+        return None, None, None, None
     audio = np.concatenate(chunks, axis=0).flatten()
     duration = len(audio) / SAMPLE_RATE
     if duration < min_seconds:
-        return None, None, None
+        return None, None, None, None
     if not _ready.wait(timeout=30):
         warn("transcribe", "model not ready after 30s, aborting transcription")
-        return None, None, None
+        return None, None, None, None
 
     prompt = _build_prompt(initial_prompt, custom_vocabulary)
     wav_bytes = _chunks_to_wav_bytes(chunks)
@@ -269,7 +274,7 @@ def run(
         result = _post_inference(wav_bytes, language, prompt)
     except Exception as exc:
         warn("transcribe", f"inference failed: {exc}")
-        return None, None, None
+        return None, None, None, None
 
     raw, words, confidence = _parse_response(result)
     log("transcribe", f"dur={duration:.1f}s inf={time.time()-t0:.2f}s "
@@ -277,7 +282,7 @@ def run(
 
     all_rules = {**(profile_rules or {}), **(corrections or {})}
     text = _postprocess(raw, filler_words, all_rules)
-    return (text if text else None), confidence, (words or None)
+    return (text if text else None), confidence, (words or None), (raw or None)
 
 
 _PARTIAL_MAX_WINDOW_SECONDS = 20.0  # cap audio sent per partial — otherwise a

@@ -123,6 +123,7 @@ _CONFIG_DEFAULTS = {
     "retain_audio_max_files":      200,
     "retain_audio_min_seconds":    3.0,
     "voice_profile_max_samples":   10,
+    "badge_animation":             "waveform",
 }
 
 _RECORDINGS_DIR = "recordings"
@@ -211,6 +212,8 @@ def _validate_config(raw: dict) -> dict:
         cfg["silence_threshold"] = 0.01
     if cfg["preview_position"] not in _VALID_POSITIONS:
         cfg["preview_position"] = "cursor"
+    if cfg.get("badge_animation") not in ("waveform", "pulse", "bars"):
+        cfg["badge_animation"] = "waveform"
     cfg["taskflow_enabled"] = bool(cfg.get("taskflow_enabled", True))
     if not isinstance(cfg.get("per_app_context"), dict):
         cfg["per_app_context"] = {}
@@ -424,9 +427,9 @@ def main() -> None:
         effective_prompt  = app_ctx.get("initial_prompt")    or cfg.get("initial_prompt")    or None
         effective_fillers = app_ctx.get("filler_words")      or cfg.get("filler_words", [])
 
-        text, confidence, words = None, None, None
+        text, confidence, words, raw_text = None, None, None, None
         try:
-            text, confidence, words = transcribe.run(
+            text, confidence, words, raw_text = transcribe.run(
                 chunks,
                 language=cfg["language"],
                 min_seconds=cfg["min_record_seconds"],
@@ -603,6 +606,10 @@ def main() -> None:
             inject.inject_text(text.strip(), hwnd)
             return
 
+        # raw= is withheld once TaskFlow has extracted tasks out of the
+        # utterance — `text` is now the remainder, and raw is the whole
+        # original transcript, so the two are no longer a clean pair to
+        # toggle between (item 9 scope: plain dictation only).
         preview.show(
             text, hwnd,
             empty=not text.strip(),
@@ -610,6 +617,7 @@ def main() -> None:
             words=None if task_extracted else words,
             auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
             duration=duration,
+            raw=None if task_extracted else raw_text,
         )
 
     def _on_audio_stop(chunks: list) -> None:

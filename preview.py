@@ -210,11 +210,13 @@ def show(text: str, hwnd: int, empty: bool = False,
          reformat_backend: str | None = None,
          task_mode: bool = False,
          duration: float = 0.0) -> None:
-    """Queue a dictation preview window. raw= is the pre-vibe-mode Whisper text.
+    """Queue a dictation preview window. raw= is the unmodified Whisper
+    transcript before filler-stripping/punctuation/correction cleanup;
+    `text` is the cleaned version shown by default. When the two differ,
+    the panel shows a Raw/Cleaned toggle (item 9).
 
-    reformat_backend: 'lmstudio' | 'api' | 'rules' | None — which backend
-    actually produced `text` when vibe mode ran, so the preview can show
-    whether it was LLM-cleaned or the regex fallback kicked in.
+    reformat_backend: kept for backward compatibility, currently unused —
+    there is no LLM cleanup backend to distinguish any more.
 
     task_mode: when True, this is a TaskFlow trigger-phrase capture — the
     panel relabels to "Add Task" and confirming creates a TaskFlow task
@@ -1017,8 +1019,118 @@ def _gradient_full(accent: str, width: int, height: int) -> "Image.Image":
     return img
 
 
+def _badge_animation_style() -> str:
+    """Which of _BADGE_ANIM_RENDERERS draws the badge's live level meter
+    (item 12, config key `badge_animation`). Unknown/missing values fall
+    back to the default "waveform" style. Dashboard picker UI is out of
+    scope here — this just reads whatever config.json holds."""
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            style = json.load(f).get("badge_animation", "waveform")
+    except Exception:
+        style = "waveform"
+    return style if style in _BADGE_ANIM_RENDERERS else "waveform"
+
+
+def _render_waveform_frame(smoothed: list, accent: str, canvas_w: int, canvas_h: int) -> "Image.Image":
+    """Default style (item 7): the per-bar amplitude history is upsampled via
+    a PIL grayscale resize — BICUBIC interpolates between samples for a
+    smooth curve instead of a stair-step — then rasterised as a filled
+    mirrored band at 3x supersample and downscaled with LANCZOS for
+    antialiasing, then cut from a vertical gradient with an alpha mask."""
+    max_half = canvas_h * 0.44
+    SS = 3  # supersample factor
+    big_w, big_h = canvas_w * SS, canvas_h * SS
+    mid_big = big_h / 2.0
+    max_half_big = max_half * SS
+
+    small = Image.new("L", (len(smoothed), 1))
+    small.putdata([int(max(0.0, min(1.0, v)) * 255) for v in smoothed])
+    curve_vals = small.resize((big_w, 1), Image.BICUBIC).getdata()
+
+    mask_big = Image.new("L", (big_w, big_h), 0)
+    top_pts, bottom_pts = [], []
+    for x in range(big_w):
+        amp = max(0.0, min(1.0, curve_vals[x] / 255.0))
+        h_big = max(SS, amp * max_half_big)
+        top_pts.append((x, mid_big - h_big))
+        bottom_pts.append((x, mid_big + h_big))
+    ImageDraw.Draw(mask_big).polygon(top_pts + bottom_pts[::-1], fill=255)
+    mask = mask_big.resize((canvas_w, canvas_h), Image.LANCZOS)
+
+    grad = _gradient_full(accent, canvas_w, canvas_h)
+    bg_layer = Image.new("RGB", (canvas_w, canvas_h), _BG)
+    return Image.composite(grad, bg_layer, mask)
+
+
+def _render_bars_frame(smoothed: list, accent: str, canvas_w: int, canvas_h: int) -> "Image.Image":
+    """"bars" style (item 12): the classic discrete equalizer bars, mirrored
+    from the centreline with rounded caps — simpler and punchier than the
+    continuous waveform, closer to a classic voice-recorder meter."""
+    img = Image.new("RGB", (canvas_w, canvas_h), _BG)
+    draw = ImageDraw.Draw(img)
+    max_half = canvas_h * 0.44
+    mid = canvas_h / 2.0
+    radius = max(1, _WAVE_BAR_W // 2)
+    step = _WAVE_BAR_W + _WAVE_BAR_GAP
+    for i, amp in enumerate(smoothed):
+        amp = max(0.0, min(1.0, amp))
+        half_h = max(radius, amp * max_half)
+        x0 = i * step
+        x1 = x0 + _WAVE_BAR_W
+        draw.rounded_rectangle([x0, mid - half_h, x1, mid + half_h],
+                               radius=radius, fill=accent)
+    return img
+
+
+_pulse_falloff_cache: dict[tuple, "Image.Image"] = {}
+
+
+def _pulse_falloff(canvas_w: int, canvas_h: int) -> "Image.Image":
+    """Cached radial falloff (grayscale, 255 at centre fading to 0 at the
+    corners) reused every frame for the "pulse" style — built once per
+    canvas size rather than per tick."""
+    key = (canvas_w, canvas_h)
+    cached = _pulse_falloff_cache.get(key)
+    if cached is not None:
+        return cached
+    cx, cy = canvas_w / 2.0, canvas_h / 2.0
+    max_dist = math.hypot(cx, cy) or 1.0
+    img = Image.new("L", (canvas_w, canvas_h))
+    px = img.load()
+    for y in range(canvas_h):
+        for x in range(canvas_w):
+            dist = math.hypot(x - cx, y - cy) / max_dist
+            px[x, y] = int(max(0.0, 1.0 - dist) * 255)
+    _pulse_falloff_cache[key] = img
+    return img
+
+
+def _render_pulse_frame(smoothed: list, accent: str, canvas_w: int, canvas_h: int) -> "Image.Image":
+    """"pulse" style (item 12): a soft breathing glow of the accent colour,
+    centred on the badge, that brightens and widens with the recording's
+    overall energy instead of reading out per-bar detail."""
+    energy = max(0.0, min(1.0, sum(smoothed) / max(1, len(smoothed))))
+    falloff = _pulse_falloff(canvas_w, canvas_h)
+    factor = 0.5 + 1.5 * energy
+    mask = falloff.point(lambda v: min(255, int(v * factor)))
+    glow = Image.new("RGB", (canvas_w, canvas_h), accent)
+    bg_layer = Image.new("RGB", (canvas_w, canvas_h), _BG)
+    return Image.composite(glow, bg_layer, mask)
+
+
+# One function per style (item 12) — a future style is just one more entry
+# here plus a line in the dashboard Settings select (not built in this pass;
+# dashboard.py is owned elsewhere right now).
+_BADGE_ANIM_RENDERERS = {
+    "waveform": _render_waveform_frame,
+    "pulse":    _render_pulse_frame,
+    "bars":     _render_bars_frame,
+}
+
+
 def _draw_badge_frame() -> None:
-    """Render one frame of the mirrored gradient equalizer + update the timer + pulse logo."""
+    """Render one frame of the badge's live level meter + update the timer + pulse logo."""
     global _badge_anim_phase, _badge_logo_idx, _badge_gradient_img, _badge_gradient_id
     if _badge_canvas is None:
         return
@@ -1028,9 +1140,14 @@ def _draw_badge_frame() -> None:
 
     try:
         canvas_h = _LOGO_SIZE
-        max_half = canvas_h * 0.44
+        motion_on = _animations_enabled()
 
-        if _badge_state in ("recording", "recording_task"):
+        if not motion_on:
+            # Motion policy (item 47/12): every style renders a static frame
+            # when animations are off — no phase advance, no live audio
+            # levels, just a fixed neutral amplitude.
+            targets = [0.4] * _WAVE_BAR_N
+        elif _badge_state in ("recording", "recording_task"):
             levels = audio.get_recent_levels(_WAVE_BAR_N)
             silence = audio.get_silence_elapsed()
             timeout = audio.get_silence_timeout()
@@ -1056,8 +1173,12 @@ def _draw_badge_frame() -> None:
                 for i in range(_WAVE_BAR_N)
             ]
 
-        # Smooth interpolation: snap up fast, ease down slow (ease-out decay)
-        if len(_badge_smoothed) != _WAVE_BAR_N:
+        # Smooth interpolation: snap up fast, ease down slow (ease-out decay).
+        # Skipped when motion is off so the static frame doesn't ease its way
+        # to flat over the first few ticks — it's just flat immediately.
+        if not motion_on:
+            _badge_smoothed[:] = targets
+        elif len(_badge_smoothed) != _WAVE_BAR_N:
             _badge_smoothed[:] = list(targets)
         else:
             for i, t in enumerate(targets):
@@ -1067,39 +1188,11 @@ def _draw_badge_frame() -> None:
                 else:
                     _badge_smoothed[i] = cur * 0.78 + t * 0.22     # slow release
 
-        # Continuous smooth waveform (item 7): the 28-sample level history is
-        # upsampled via a PIL grayscale resize — BICUBIC interpolates between
-        # samples for a smooth curve instead of a stair-step — then
-        # rasterised as a filled mirrored band at 3x supersample and
-        # downscaled with LANCZOS for antialiasing. Same cached-composite
-        # PhotoImage-per-frame technique as the previous discrete bars
-        # (item 17), just cut from the gradient with a smooth alpha mask
-        # instead of cropping/pasting fixed-width columns.
         canvas_w = _WAVE_BAR_N * (_WAVE_BAR_W + _WAVE_BAR_GAP)
         canvas_h_i = int(canvas_h)
 
-        SS = 3  # supersample factor
-        big_w, big_h = canvas_w * SS, canvas_h_i * SS
-        mid_big = big_h / 2.0
-        max_half_big = max_half * SS
-
-        small = Image.new("L", (_WAVE_BAR_N, 1))
-        small.putdata([int(max(0.0, min(1.0, v)) * 255) for v in _badge_smoothed])
-        curve_vals = small.resize((big_w, 1), Image.BICUBIC).getdata()
-
-        mask_big = Image.new("L", (big_w, big_h), 0)
-        top_pts, bottom_pts = [], []
-        for x in range(big_w):
-            amp = max(0.0, min(1.0, curve_vals[x] / 255.0))
-            h_big = max(SS, amp * max_half_big)
-            top_pts.append((x, mid_big - h_big))
-            bottom_pts.append((x, mid_big + h_big))
-        ImageDraw.Draw(mask_big).polygon(top_pts + bottom_pts[::-1], fill=255)
-        mask = mask_big.resize((canvas_w, canvas_h_i), Image.LANCZOS)
-
-        grad = _gradient_full(accent, canvas_w, canvas_h_i)
-        bg_layer = Image.new("RGB", (canvas_w, canvas_h_i), _BG)
-        frame_img = Image.composite(grad, bg_layer, mask)
+        renderer = _BADGE_ANIM_RENDERERS.get(_badge_animation_style(), _render_waveform_frame)
+        frame_img = renderer(_badge_smoothed, accent, canvas_w, canvas_h_i)
         _badge_gradient_img = ImageTk.PhotoImage(frame_img)
         if _badge_gradient_id is None:
             _badge_gradient_id = _badge_canvas.create_image(0, 0, anchor="nw", image=_badge_gradient_img)
@@ -1616,6 +1709,13 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     _hooks: list = []  # WH_KEYBOARD_LL hooks active while this preview is open
     _dismiss_cancel_ref = [lambda: None]  # set below when the countdown exists (item 53)
 
+    # Raw/Cleaned toggle state (item 9) — declared here, ahead of on_insert,
+    # so the correction-learning comparison below can tell which side was
+    # actually showing at insert time. The toggle UI itself is only built
+    # further down when raw actually differs from the cleaned text.
+    _showing_raw = [False]
+    _raw_originals = {"cleaned": text, "raw": raw}
+
     def _close() -> None:
         global _preview_open, _current_preview_win
         _dismiss_cancel_ref[0]()
@@ -1636,7 +1736,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         submit = submit and not task_mode
         result = entry.get("1.0", "end-1c").rstrip()
         if not empty:
-            original = text.rstrip()
+            side = "raw" if _showing_raw[0] else "cleaned"
+            original = (_raw_originals[side] or "").rstrip()
             if original != result:
                 try:
                     promoted = profile.log_correction(original, result)
@@ -1761,30 +1862,25 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         ).pack()
         cancel_wrap.pack(side=tk.LEFT, padx=(8, 0))
 
-    # ── Raw / Prompt toggle (only when vibe mode produced a different text) ──
+    # ── Raw / Cleaned toggle (item 9) — only when cleanup actually changed
+    # the transcript. Each side keeps whatever the user has edited into it
+    # while the panel is open; toggling never clobbers the other side's
+    # edits, and whichever side is showing at Insert time is what gets
+    # pasted (on_insert reads straight from the entry widget).
     if raw and raw.strip() != text.strip() and not empty:
-        _showing_raw = [False]
+        _stash = {"cleaned": text, "raw": raw}
 
         def _toggle_raw():
+            current_side = "raw" if _showing_raw[0] else "cleaned"
+            _stash[current_side] = entry.get("1.0", "end-1c")
             _showing_raw[0] = not _showing_raw[0]
-            new_content = raw if _showing_raw[0] else text
-            new_label   = "Prompt" if _showing_raw[0] else "Raw"
-            entry.config(state="normal")
+            next_side = "raw" if _showing_raw[0] else "cleaned"
             entry.delete("1.0", tk.END)
-            entry.insert("1.0", new_content)
-            toggle_btn.config(text=new_label)
+            entry.insert("1.0", _stash[next_side])
+            toggle_btn.config(text=("Cleaned" if _showing_raw[0] else "Raw"))
 
         toggle_row = tk.Frame(frame, bg=_BG)
         toggle_row.pack(fill=tk.X, pady=(4, 0))
-
-        # Indicator: did the LLM actually clean this up, or did it silently
-        # fall back to the regex "rules" cleaner (e.g. LM Studio model unloaded)?
-        if reformat_backend == "rules":
-            tk.Label(toggle_row, text="rules fallback", bg=_BG, fg=_FG3,
-                     font=_FONT_CHIP).pack(side=tk.LEFT)
-        elif reformat_backend in ("lmstudio", "api"):
-            tk.Label(toggle_row, text="LLM", bg=_BG, fg="#22c55e",
-                     font=(_FONT_FAM_TEXT, 8, "bold")).pack(side=tk.LEFT)
 
         toggle_btn = tk.Button(
             toggle_row, text="Raw", command=_toggle_raw,

@@ -90,6 +90,30 @@ def _merge_cfg(updates: dict) -> bool:
         return False
 
 
+# Known config keys, used only to sanity-check imported settings files
+# (item 76); an import is rejected if it contains none of these. Mirrors main.py's
+# _CONFIG_DEFAULTS keys, plus dashboard-only keys that have no entry there
+# (theme, animations, sound_volume, history_max_entries,
+# recording_retention_days, dashboard_scale).
+_KNOWN_CONFIG_KEYS = frozenset({
+    "hotkey", "model", "language", "min_record_seconds", "max_record_seconds",
+    "filler_words", "clipboard_restore_delay_ms", "vad_filter", "corrections",
+    "silence_auto_stop_seconds", "preview_position", "preview_auto_dismiss_seconds",
+    "auto_paste_threshold", "initial_prompt", "custom_vocabulary", "input_device",
+    "history_paused", "silence_threshold", "per_app_paste", "per_app_context",
+    "electron_paste_method", "paste_mode", "hotkey_mode", "agent_hotkey",
+    "agent_mode_enabled", "agent_command_mode_enabled", "agent_trigger_phrases",
+    "api_server_enabled", "api_server_port", "lmstudio_model", "taskflow_enabled",
+    "taskflow_trigger_phrases", "taskflow_trailing_trigger_phrases",
+    "taskflow_direct_capture_modifiers", "taskflow_readback_phrases",
+    "taskflow_default_project", "taskflow_voice_confirm", "snippets",
+    "repaste_hotkey", "live_preview_enabled", "retain_audio",
+    "retain_audio_max_files", "retain_audio_min_seconds", "voice_profile_max_samples",
+    "badge_animation",
+    "theme", "animations", "sound_volume", "history_max_entries",
+    "recording_retention_days", "dashboard_scale",
+})
+
 _DIAG_API_BASE = "http://127.0.0.1:8090"
 
 
@@ -442,6 +466,75 @@ class DashboardAPI:
                 pass
         return ok
 
+    def export_settings(self) -> dict:
+        """Item 76: writes config.json (corrections/vocabulary already live in
+        it) to a single JSON file, excluding dashboard_window since that's
+        machine-specific window geometry, not a portable setting."""
+        try:
+            cfg = _read_cfg()
+            cfg.pop("dashboard_window", None)
+            content = json.dumps(cfg, indent=2, ensure_ascii=False)
+            default_name = f"voicedictate-settings-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+
+            dialog_ok = True
+            result = None
+            try:
+                win = webview.windows[0] if webview.windows else None
+                if win is None:
+                    raise RuntimeError("no window")
+                result = win.create_file_dialog(
+                    webview.FileDialog.SAVE, save_filename=default_name,
+                    file_types=("JSON file (*.json)",))
+            except Exception:
+                dialog_ok = False
+
+            if not dialog_ok:
+                downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+                os.makedirs(downloads, exist_ok=True)
+                path = os.path.join(downloads, default_name)
+            elif not result:
+                return {"ok": False, "cancelled": True}
+            else:
+                path = result if isinstance(result, str) else result[0]
+
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {"ok": True, "path": path, "fallback": not dialog_ok}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def import_settings(self) -> dict:
+        """Item 76: file dialog -> validate it's a JSON object with at least
+        one known config key -> shallow-merge over current config. Never
+        crashes on a malformed file; always returns a designed error."""
+        try:
+            win = webview.windows[0] if webview.windows else None
+            if win is None:
+                return {"ok": False, "error": "Dashboard window isn't ready yet."}
+            result = win.create_file_dialog(
+                webview.FileDialog.OPEN,
+                file_types=("JSON file (*.json)", "All files (*.*)"))
+            if not result:
+                return {"ok": False, "cancelled": True}
+            path = result if isinstance(result, str) else result[0]
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            return {"ok": False, "error": "That file isn't valid JSON."}
+        except Exception as exc:
+            return {"ok": False, "error": f"Couldn't read that file: {exc}"}
+
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "That file isn't a settings JSON object."}
+        data.pop("dashboard_window", None)
+        matched = [k for k in data if k in _KNOWN_CONFIG_KEYS]
+        if not matched:
+            return {"ok": False,
+                    "error": "That file doesn't look like a VoiceDictate settings export."}
+        if not _merge_cfg(data):
+            return {"ok": False, "error": "Couldn't save the imported settings."}
+        return {"ok": True, "imported_keys": len(matched)}
+
     def get_audio_devices(self) -> list:
         try:
             import audio
@@ -714,7 +807,11 @@ mark{background:var(--acc-bg);color:inherit;border-radius:2px;padding:0 1px}
 .s-sec:last-child{margin-bottom:0}
 .s-sec-ttl{padding:11px 16px;font-size:11px;font-weight:700;color:var(--txt3);
   text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--brd);
-  background:var(--surf2)}
+  background:var(--surf2);display:flex;align-items:center;justify-content:space-between}
+.sec-reset-btn{font-size:10px;font-weight:600;letter-spacing:.3px;text-transform:none;
+  color:var(--acc);background:none;border:none;cursor:pointer;padding:2px 6px;
+  border-radius:4px;font-family:var(--font);transition:background .1s}
+.sec-reset-btn:hover{background:var(--acc-bg)}
 .s-row{display:flex;align-items:center;padding:11px 16px;gap:14px;
   border-bottom:1px solid var(--brd);min-height:44px}
 .s-row:last-child{border-bottom:none}
@@ -769,6 +866,15 @@ select option{background:var(--surf2);color:var(--txt)}
   left:0%;display:none}
 .diag-hint{font-size:12px;color:var(--txt3);margin-bottom:4px}
 
+/* ── Keyboard focus (BACKLOG item 80) ── */
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:3px}
+.tog:focus-visible{outline-offset:3px}
+/* Reveal hover-only action buttons when a keyboard user tabs into them,
+   not just on mouse hover. */
+.list-item:focus-within .li-acts{display:flex}
+.corr-item:focus-within .corr-del{display:flex}
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar{width:5px}
 ::-webkit-scrollbar-track{background:transparent}
@@ -820,7 +926,7 @@ select option{background:var(--surf2);color:var(--txt)}
       <div class="status-dot" id="statusDot"></div>
       <span id="statusTxt">Ready</span>
     </div>
-    <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle theme">
+    <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle theme">
       <svg id="themeIcon" viewBox="0 0 20 20" fill="currentColor">
         <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/>
       </svg>
@@ -940,13 +1046,30 @@ select option{background:var(--surf2);color:var(--txt)}
   <div class="settings-scroll" id="settingsForm">
 
     <div class="s-sec">
-      <div class="s-sec-ttl">Appearance</div>
+      <div class="s-sec-ttl">Appearance<button class="sec-reset-btn" onclick="resetSection('appearance')">Reset section</button></div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Theme</div><div class="s-lbl-s">Dark or light interface</div></div>
         <select class="sel-in" data-key="theme" onchange="applyThemeFromSelect(this.value)">
           <option value="dark">Dark</option>
           <option value="light">Light</option>
           <option value="system">Follow Windows</option>
+        </select>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Dashboard scale</div><div class="s-lbl-s">Resizes this window's interface. The floating preview panel is unaffected</div></div>
+        <select class="sel-in" data-key="dashboard_scale" onchange="applyScaleFromSelect(this.value)">
+          <option value="90">90%</option>
+          <option value="100" selected>100%</option>
+          <option value="110">110%</option>
+          <option value="125">125%</option>
+        </select>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Recording animation</div><div class="s-lbl-s">Style of the pill's motion while you speak</div></div>
+        <select class="sel-in" data-key="badge_animation">
+          <option value="waveform">Waveform</option>
+          <option value="pulse">Pulse</option>
+          <option value="bars">Bars</option>
         </select>
       </div>
       <div class="s-row">
@@ -966,7 +1089,8 @@ select option{background:var(--surf2);color:var(--txt)}
       </div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Animations</div><div class="s-lbl-s">Popup slide/fade motion. Also off automatically when Windows' own "Show animations" setting is off</div></div>
-        <div class="tog" data-key="animations" onclick="togClick(this)"><div class="tog-k"></div></div>
+        <div class="tog" data-key="animations" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
+             role="switch" aria-checked="false" aria-label="Animations" tabindex="0"><div class="tog-k"></div></div>
       </div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Sound volume</div><div class="s-lbl-s">Record/stop/success/error chimes. 0 = mute</div></div>
@@ -980,7 +1104,7 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
-      <div class="s-sec-ttl">Audio</div>
+      <div class="s-sec-ttl">Audio<button class="sec-reset-btn" onclick="resetSection('audio')">Reset section</button></div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Input Device</div><div class="s-lbl-s">Microphone used for recording</div></div>
         <select class="sel-in" data-key="input_device" id="micSelect">
@@ -990,7 +1114,7 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
-      <div class="s-sec-ttl">Recording</div>
+      <div class="s-sec-ttl">Recording<button class="sec-reset-btn" onclick="resetSection('recording')">Reset section</button></div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Min duration (s)</div><div class="s-lbl-s">Ignore recordings shorter than this</div></div>
         <input class="n-in" type="number" data-key="min_record_seconds" min="0.1" max="5" step="0.1">
@@ -1000,17 +1124,23 @@ select option{background:var(--surf2);color:var(--txt)}
         <input class="n-in" type="number" data-key="max_record_seconds" min="5" max="300" step="5">
       </div>
       <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Silence auto-stop (s)</div><div class="s-lbl-s">Release hotkey automatically after silence. 0 = off</div></div>
-        <input class="n-in" type="number" data-key="silence_auto_stop_seconds" min="0" max="10" step="0.5">
+        <div class="s-lbl"><div class="s-lbl-t">Silence auto-stop</div><div class="s-lbl-s">Stops recording automatically after this much silence. Slow speakers or people who pause mid-sentence should raise it. 0 = never auto-stop</div></div>
+        <div class="range-row">
+          <input class="range-in" type="range" id="silenceAutoStopRange" data-key="silence_auto_stop_seconds"
+                 min="0" max="10" step="0.5"
+                 oninput="document.getElementById('silenceAutoStopLbl').textContent=silenceAutoStopLabel(this.value)">
+          <span id="silenceAutoStopLbl" class="range-val" style="width:44px">3.0s</span>
+        </div>
       </div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">VAD filter</div><div class="s-lbl-s">Strip silence via voice activity detection</div></div>
-        <div class="tog" data-key="vad_filter" onclick="togClick(this)"><div class="tog-k"></div></div>
+        <div class="tog" data-key="vad_filter" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
+             role="switch" aria-checked="false" aria-label="VAD filter" tabindex="0"><div class="tog-k"></div></div>
       </div>
     </div>
 
     <div class="s-sec">
-      <div class="s-sec-ttl">Transcription</div>
+      <div class="s-sec-ttl">Transcription<button class="sec-reset-btn" onclick="resetSection('transcription')">Reset section</button></div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Language</div><div class="s-lbl-s">ISO code, e.g. en, fr, de</div></div>
         <input class="t-in" type="text" data-key="language" maxlength="10">
@@ -1026,10 +1156,11 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
-      <div class="s-sec-ttl">Paste</div>
+      <div class="s-sec-ttl">Paste<button class="sec-reset-btn" onclick="resetSection('paste')">Reset section</button></div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Clipboard-only mode</div><div class="s-lbl-s">Copy to clipboard instead of auto-pasting</div></div>
-        <div class="tog" data-key="_paste_clipboard_only" onclick="togClick(this)"><div class="tog-k"></div></div>
+        <div class="tog" data-key="_paste_clipboard_only" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
+             role="switch" aria-checked="false" aria-label="Clipboard-only mode" tabindex="0"><div class="tog-k"></div></div>
       </div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Clipboard restore delay (ms)</div><div class="s-lbl-s">How long before restoring your previous clipboard</div></div>
@@ -1045,7 +1176,7 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
-      <div class="s-sec-ttl">History</div>
+      <div class="s-sec-ttl">History<button class="sec-reset-btn" onclick="resetSection('history')">Reset section</button></div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Keep history</div><div class="s-lbl-s">Older entries are trimmed past this count. Pinned entries are never trimmed.</div></div>
         <select class="sel-in" data-key="history_max_entries">
@@ -1067,7 +1198,7 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
-      <div class="s-sec-ttl">Agent Command Mode</div>
+      <div class="s-sec-ttl">Agent Command Mode<button class="sec-reset-btn" onclick="resetSection('agent')">Reset section</button></div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">LM Studio model</div><div class="s-lbl-s">Model identifier as shown in lms ls (e.g. qwen/qwen2.5-1.5b-instruct)</div></div>
         <input class="t-in wide" type="text" data-key="lmstudio_model">
@@ -1078,19 +1209,30 @@ select option{background:var(--surf2);color:var(--txt)}
       <div class="s-sec-ttl">System</div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Start with Windows</div><div class="s-lbl-s">Launch hidden at logon via Task Scheduler</div></div>
-        <div class="tog" id="autostartTog" onclick="autostartClick(this)"><div class="tog-k"></div></div>
+        <div class="tog" id="autostartTog" onclick="autostartClick(this)" onkeydown="togKeydown(event,this)"
+             role="switch" aria-checked="false" aria-label="Start with Windows" tabindex="0"><div class="tog-k"></div></div>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Export settings</div><div class="s-lbl-s">Save your settings, corrections, and vocabulary to a JSON file</div></div>
+        <button class="btn btn-s" onclick="exportSettings()">Export settings</button>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Import settings</div><div class="s-lbl-s">Load settings from a previously exported JSON file</div></div>
+        <button class="btn btn-s" onclick="importSettings()">Import settings</button>
       </div>
     </div>
 
     <div class="s-sec">
-      <div class="s-sec-ttl">TaskFlow integration</div>
+      <div class="s-sec-ttl">TaskFlow integration<button class="sec-reset-btn" onclick="resetSection('taskflow')">Reset section</button></div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Enable TaskFlow</div><div class="s-lbl-s">Voice triggers create tasks in TaskFlow</div></div>
-        <div class="tog" data-key="taskflow_enabled" onclick="togClick(this)"><div class="tog-k"></div></div>
+        <div class="tog" data-key="taskflow_enabled" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
+             role="switch" aria-checked="false" aria-label="Enable TaskFlow" tabindex="0"><div class="tog-k"></div></div>
       </div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Voice confirmation</div><div class="s-lbl-s">Speak the task title back after creating it</div></div>
-        <div class="tog" data-key="taskflow_voice_confirm" onclick="togClick(this)"><div class="tog-k"></div></div>
+        <div class="tog" data-key="taskflow_voice_confirm" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
+             role="switch" aria-checked="false" aria-label="Voice confirmation" tabindex="0"><div class="tog-k"></div></div>
       </div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Default project</div><div class="s-lbl-s">Project name for new tasks (leave blank for none)</div></div>
@@ -1324,7 +1466,7 @@ async function loadHome() {
         ${e.source ? '<span class="src-badge">'+esc(e.source)+'</span>' : ''}
       </div>
       <div class="li-acts">
-        <button class="ia" title="Copy" onclick="copyText(_homeTexts[${i}])">${copyIcon()}</button>
+        <button class="ia" title="Copy" aria-label="Copy" onclick="copyText(_homeTexts[${i}])">${copyIcon()}</button>
       </div>
     </div>`).join('');
 }
@@ -1366,10 +1508,10 @@ function renderHistItem(e, i) {
         ${e.pinned ? '<span class="pin-badge" title="Pinned">'+starIcon(true)+'</span>' : ''}
       </div>
       <div class="li-acts">
-        <button class="ia pin${e.pinned ? ' on' : ''}" title="${e.pinned ? 'Unpin' : 'Pin'}"
+        <button class="ia pin${e.pinned ? ' on' : ''}" title="${e.pinned ? 'Unpin' : 'Pin'}" aria-label="${e.pinned ? 'Unpin' : 'Pin'}"
           onclick="togglePin(${e.index}, ${e.pinned ? 'false' : 'true'})">${starIcon(e.pinned)}</button>
-        <button class="ia" title="Copy" onclick="copyText(_histTexts[${i}])">${copyIcon()}</button>
-        <button class="ia del" title="Delete" onclick="deleteHistory(${e.index})">${trashIcon()}</button>
+        <button class="ia" title="Copy" aria-label="Copy" onclick="copyText(_histTexts[${i}])">${copyIcon()}</button>
+        <button class="ia del" title="Delete" aria-label="Delete" onclick="deleteHistory(${e.index})">${trashIcon()}</button>
       </div>
     </div>`;
 }
@@ -1544,7 +1686,7 @@ function renderCorrections(corr) {
       <span class="corr-from">${esc(from)}</span>
       <span class="corr-arr">→</span>
       <span class="corr-to">${esc(to)}</span>
-      <button class="corr-del" title="Remove" onclick="removeCorrection(${JSON.stringify(from)})">${xIcon()}</button>
+      <button class="corr-del" title="Remove" aria-label="Remove correction for ${esc(from)}" onclick="removeCorrection(${JSON.stringify(from)})">${xIcon()}</button>
     </div>`).join('');
 }
 
@@ -1557,7 +1699,7 @@ function renderVocab(vocab) {
   }
   el.innerHTML = vocab.map(w => `
     <div class="vchip">${esc(w)}
-      <button class="vdel" title="Remove" onclick="removeVocab(${JSON.stringify(w)})">${xIcon()}</button>
+      <button class="vdel" title="Remove" aria-label="Remove ${esc(w)} from vocabulary" onclick="removeVocab(${JSON.stringify(w)})">${xIcon()}</button>
     </div>`).join('');
 }
 
@@ -1625,25 +1767,146 @@ async function loadSettings() {
   document.querySelectorAll('.tog[data-key]').forEach(tog => {
     const key = tog.dataset.key;
     let val = key === '_paste_clipboard_only' ? (cfg.paste_mode === 'clipboard_only') : cfg[key];
-    tog.classList.toggle('on', !!val);
+    setTogState(tog, !!val);
   });
 
   // Theme select
   const themeSel = document.querySelector('select[data-key="theme"]');
   if (themeSel) themeSel.value = cfg.theme || 'dark';
 
+  // Dashboard scale (item 79) — apply live, this subprocess window only
+  applyScale(cfg.dashboard_scale || 100);
+
   // Sound volume live label
   const volRange = document.getElementById('soundVolumeRange');
   if (volRange) document.getElementById('soundVolumeLbl').textContent = volRange.value + '%';
 
+  // Silence auto-stop live label (item 19)
+  const silRange = document.getElementById('silenceAutoStopRange');
+  if (silRange) document.getElementById('silenceAutoStopLbl').textContent = silenceAutoStopLabel(silRange.value);
+
   // Autostart state lives in Task Scheduler, not config
   try {
     const on = await window.pywebview.api.get_autostart();
-    document.getElementById('autostartTog').classList.toggle('on', !!on);
+    setTogState(document.getElementById('autostartTog'), !!on);
   } catch (e) {}
 }
 
 async function reloadSettings() { await loadSettings(); }
+
+// ── Section reset-to-defaults (item 30) ────────────────────────────────────
+// Mirrors main.py's _CONFIG_DEFAULTS values for the keys this dashboard
+// exposes, section by section. Keys with no entry in _CONFIG_DEFAULTS
+// (theme, animations, sound_volume, history_max_entries,
+// recording_retention_days, dashboard_scale) are dashboard-only settings —
+// their "factory" value is defined here instead.
+const _SECTION_DEFAULTS = {
+  appearance: {
+    theme: 'dark', dashboard_scale: 100, badge_animation: 'waveform',
+    preview_position: 'cursor', preview_auto_dismiss_seconds: 0,
+    animations: true, sound_volume: 100,
+  },
+  audio: { input_device: null },
+  recording: {
+    min_record_seconds: 0.5, max_record_seconds: 120,
+    silence_auto_stop_seconds: 3, vad_filter: false,
+  },
+  transcription: { language: 'en', filler_words: [], initial_prompt: '' },
+  paste: {
+    paste_mode: 'auto', clipboard_restore_delay_ms: 150,
+    electron_paste_method: 'ctrl_v',
+  },
+  history: { history_max_entries: '100', recording_retention_days: '0' },
+  agent: { lmstudio_model: 'qwen2.5-1.5b-instruct' },
+  taskflow: {
+    taskflow_enabled: true, taskflow_voice_confirm: false,
+    taskflow_default_project: '',
+  },
+};
+const _SECTION_LABELS = {
+  appearance: 'Appearance', audio: 'Audio', recording: 'Recording',
+  transcription: 'Transcription', paste: 'Paste', history: 'History',
+  agent: 'Agent Command Mode', taskflow: 'TaskFlow integration',
+};
+
+function applyDefaultsToForm(defaults) {
+  Object.entries(defaults).forEach(([key, val]) => {
+    if (key === 'paste_mode') {
+      const tog = document.querySelector('.tog[data-key="_paste_clipboard_only"]');
+      if (tog) setTogState(tog, val === 'clipboard_only');
+      return;
+    }
+    if (key === 'input_device') {
+      const sel = document.getElementById('micSelect');
+      if (sel) sel.value = val == null ? '' : String(val);
+      return;
+    }
+    document.querySelectorAll(`[data-key="${key}"]`).forEach(el => {
+      if (el.classList.contains('tog')) { setTogState(el, !!val); return; }
+      if (el.tagName === 'SELECT') { el.value = String(val); return; }
+      if (el.dataset.type === 'array') { el.value = Array.isArray(val) ? val.join(', ') : val; return; }
+      el.value = val;
+    });
+    if (key === 'theme') applyTheme(val);
+    if (key === 'dashboard_scale') applyScale(val);
+    if (key === 'sound_volume') {
+      const lbl = document.getElementById('soundVolumeLbl');
+      if (lbl) lbl.textContent = val + '%';
+    }
+    if (key === 'silence_auto_stop_seconds') {
+      const lbl = document.getElementById('silenceAutoStopLbl');
+      if (lbl) lbl.textContent = silenceAutoStopLabel(val);
+    }
+  });
+}
+
+async function resetSection(id) {
+  const defaults = _SECTION_DEFAULTS[id];
+  if (!defaults) return;
+  if (!confirm(`Reset ${_SECTION_LABELS[id]} settings to their defaults?`)) return;
+  applyDefaultsToForm(defaults);
+  const ok = await window.pywebview.api.save_settings(collectSettings());
+  if (ok) {
+    flashSaved();
+    showToast(`${_SECTION_LABELS[id]} reset to defaults.`);
+  } else {
+    showToast('Could not save the reset. Try again.');
+  }
+}
+
+// ── Import / export settings (item 76) ─────────────────────────────────────
+async function exportSettings() {
+  try {
+    const res = await window.pywebview.api.export_settings();
+    if (res && res.ok) {
+      showToast('Exported to ' + res.path);
+    } else if (res && res.cancelled) {
+      // user cancelled the save dialog — no toast
+    } else {
+      showToast('Export failed' + (res && res.error ? ': ' + res.error : ''));
+    }
+  } catch (e) {
+    showToast('Export failed: ' + e);
+  }
+}
+
+async function importSettings() {
+  try {
+    const res = await window.pywebview.api.import_settings();
+    if (res && res.ok) {
+      await loadSettings();
+      const cfg = await window.pywebview.api.get_config();
+      applyTheme(cfg.theme || 'dark');
+      showToast(`Imported ${res.imported_keys} setting${res.imported_keys === 1 ? '' : 's'}.`);
+    } else if (res && res.cancelled) {
+      // user cancelled the open dialog — no toast
+    } else {
+      showToast((res && res.error) || 'Import failed.');
+    }
+  } catch (e) {
+    showToast('Import failed: ' + e);
+  }
+}
 
 // ── About page ─────────────────────────────────────────────────────────────
 async function loadAbout() {
@@ -1799,7 +2062,38 @@ async function startMicProbe() {
   }, 150);
 }
 
-function togClick(el) { el.classList.toggle('on'); autoSave(); }
+// Keeps the on/off class and the aria-checked state of a switch-role toggle
+// in sync — every place that flips a .tog goes through this (item 80).
+function setTogState(el, on) {
+  el.classList.toggle('on', !!on);
+  el.setAttribute('aria-checked', String(!!on));
+}
+
+function togClick(el) { setTogState(el, !el.classList.contains('on')); autoSave(); }
+
+// Enter/Space activates a .tog the same way a click does (item 80) — the
+// toggle is a div with role="switch", not a native control, so it needs its
+// own key handling. Reuses whichever onclick handler is already on the
+// element (togClick, autostartClick, ...).
+function togKeydown(e, el) {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    el.click();
+  }
+}
+
+// ── Dashboard scale (item 79) — this window only, not the Tk preview panel ─
+function applyScale(pct) {
+  const n = parseInt(pct, 10) || 100;
+  document.documentElement.style.zoom = (n / 100);
+}
+function applyScaleFromSelect(val) { applyScale(val); }
+
+// ── Silence auto-stop slider label (item 19) ────────────────────────────────
+function silenceAutoStopLabel(v) {
+  const n = parseFloat(v);
+  return n === 0 ? 'Off' : n.toFixed(1) + 's';
+}
 
 // ── Backend status (BACKLOG item 48b) ───────────────────────────────────────
 // The sidebar footer dot/label already existed but was a hardcoded "Ready" —
@@ -1846,12 +2140,13 @@ function flashSaved() {
 }
 
 async function autostartClick(el) {
-  el.classList.toggle('on');
+  const next = !el.classList.contains('on');
+  setTogState(el, next);
   try {
-    await window.pywebview.api.set_autostart(el.classList.contains('on'));
+    await window.pywebview.api.set_autostart(next);
     flashSaved();
   } catch (e) {
-    el.classList.toggle('on');  // revert on failure
+    setTogState(el, !next);  // revert on failure
   }
 }
 
@@ -1881,7 +2176,7 @@ function collectSettings() {
       return;
     }
     if (el.dataset.type === 'int') { data[key] = parseInt(el.value) || 0; return; }
-    if (el.type === 'number') { data[key] = parseFloat(el.value) || 0; return; }
+    if (el.type === 'number' || el.type === 'range') { data[key] = parseFloat(el.value) || 0; return; }
     data[key] = el.value;
   });
   return data;
@@ -1893,10 +2188,19 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
   if (_themePref === 'system') applyTheme('system');
 });
 
+// Escape exits History's bulk select mode (item 80) — wherever focus is on
+// the page, not just when a specific control is focused.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && _currentPage === 'history' && _selectMode) {
+    toggleSelectMode();
+  }
+});
+
 window.addEventListener('pywebviewready', async function () {
   try {
     const cfg = await window.pywebview.api.get_config();
     applyTheme(cfg.theme || 'dark');
+    applyScale(cfg.dashboard_scale || 100);
     const sf = document.getElementById('settingsForm');
     sf.addEventListener('input', autoSave);
     sf.addEventListener('change', autoSave);

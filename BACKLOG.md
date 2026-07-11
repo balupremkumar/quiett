@@ -25,17 +25,17 @@ Impact H/M/L, Effort S/M/L.
 
 7. [x] (2026-07-11) True continuous waveform: 28-sample level history upsampled bicubic, mirrored filled polygon at 3x supersample, LANCZOS downscale, gradient composited via mask; same 50ms cadence. Needs Balu's eyes on a real dictation.
 8. [x] (2026-07-11) Hover fades in ⏹ stop / ✕ cancel on the badge (calls audio.stop/cancel directly, same path as hotkey release); zero layout shift, 120ms debounce, recording states only.
-9. [ ] Raw-vs-cleaned transcript toggle in the preview panel before accepting. (M/M) — superwhisper Voice/AI toggle.
+9. [x] (2026-07-11) Toggle existed as dead vibe-mode code; revived and fixed 2 real bugs (edits clobbered on flip, correction-learning compared wrong side). transcribe.run() now returns raw_text; per-side edit stash; toggle hidden when raw == cleaned.
 10. [x] (2026-07-11) Confirm gate before transcribing recordings >30s (`_LONG_RECORDING_CONFIRM_SECONDS`, main.py; modal in preview.py, Enter transcribes / Esc discards); gate sits before whisper so no wasted inference.
 11. [x] (2026-07-11) Dedicated status row in the wave badge ("Recording…", "Processing…", "Cleaning up…") between waveform and partial transcript; panel header already carried the status dot. No "Done" state invented (would touch main.py flow).
-12. [ ] Selectable listening-state animations (pulse, ink-flow, etc.) as a personalisation touch. (L/M) — VoiceInk's nine animations.
-13. [ ] Context-capture badge confirming clipboard/selection was grabbed as context. (L/S) — superwhisper Super Mode.
+12. [x] (2026-07-11) Three styles behind `badge_animation` (waveform default / pulse / bars), renderer-dict pattern for future styles, static frame when motion off, Settings select wired instant-apply.
+13. [x] (2026-07-11) CLOSED as not-applicable: audited, nothing in the codebase captures clipboard/selection as context (per_app_context is vocab overrides; inject.py clipboard reads are save/restore only). Revisit only if a context feature is ever built.
 14. [ ] Acrylic backdrop on the popup via `DWMWA_SYSTEMBACKDROP_TYPE` = `DWMSBT_TRANSIENTWINDOW` (documented Win11 route, not the fragile Win10 accent API). (M/M) — MS Learn system backdrops.
 15. [x] (2026-07-11) DWM drop shadow via `DwmExtendFrameIntoClientArea` 1px bottom margin (winfx.py), Win11 corner-preference path only; Win10 region fallback untouched.
 16. [x] (2026-07-10) `DWMWA_WINDOW_CORNER_PREFERENCE` in winfx.apply_rounded_region, region mask kept as Win10 fallback (with DPI-scaled radius). Turned out to be the full fix, not just interim — see item 1.
 17. [x] (2026-07-11) Real vertical gradient via cached PIL column, single PhotoImage per frame (replaces six bands + per-bar rectangles); wave bar width/gap now DPI-scaled too.
 18. [x] (2026-07-11) Slide+fade entrance (14px drift, 200ms, ease-out) on panel and both badge variants via _play_entrance; `animations:false` in config.json disables.
-19. [ ] Adjustable pause-tolerance / wait-time slider so slow speakers aren't cut off. (M/M) — Windows 11 Voice Typing 2026.
+19. [x] (2026-07-11) silence_auto_stop_seconds exposed as a 0-10s slider ("Off" at 0), instant-apply, float-parse fix in collectSettings for range inputs.
 20. [ ] Evaluate popup stack migration: raw Win32 layered window (full control, L effort) vs PySide6/QML (GPU-composited 60fps, M) vs pywebview frameless (Chromium AA free, but cold-start latency + no native rounded corners bug #834). (H/L) — rendering agent 8-10. RULED 2026-07-11: Win11-only product (ULW/Win10 fallback polish out of scope); decision deferred until Balu tests the batch-4 motion in real use.
 
 ### Tray + desktop icons
@@ -52,7 +52,7 @@ Impact H/M/L, Effort S/M/L.
 27. [ ] Settings search bar that filters and highlights matching controls across sections. (H/M) — Raycast Settings v2.
 28. [ ] Hotkey-recorder control ("press a key combination…") with live chord display, replacing any dropdown/text binding. (H/M) — PowerToys Keyboard Manager.
 29. [x] (2026-07-10) Instant-apply settings (debounced 450ms, "Saved" flash), Save button removed.
-30. [ ] Per-section reset-to-defaults, scoped so users can undo just hotkeys or just model settings. (M/S) — Windows settings guidelines.
+30. [x] (2026-07-11) "Reset section" on 8 Settings sections, JS defaults mirror of main._CONFIG_DEFAULTS, one confirm, instant-apply.
 31. [ ] Expose appearance settings (accent, popup size, position with visual picker, animation style); today every colour, font, and dimension is a hardcoded constant (preview.py:67-118). (M/M) — audit.
 32. [ ] One panel per concern, no nested menus (the ShareX failure mode vs CleanShot X). (H/M) — CleanShot comparisons.
 33. [ ] Single type scale and 8px spacing grid shared across the Tk popup and the web dashboard; inconsistent spacing across windows is the biggest cheap-vs-premium tell. (H/M) — Raycast/Linear design-system analyses.
@@ -126,11 +126,11 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 73. [ ] "Test your mic" wizard with a sample transcription and feedback. (M/M)
 74. [ ] Model picker (tiny to large-v3) with plain-language speed/accuracy tradeoffs and VRAM cost shown. (H/M)
 75. [ ] Per-app profiles: different formatting/paste behaviour per target app (code-friendly in VS Code, prose in Word). (H/L)
-76. [ ] Import/export settings + dictionary as one file for backup/migration. (M/S)
+76. [x] (2026-07-11) Export/import via file dialog (Downloads fallback), validates known keys, excludes dashboard_window, designed error toasts, never raises on bad files.
 77. [x] (2026-07-11) About page: VERSION "0.1.0" (new constant — confirm scheme), description, licence line, whisper.cpp/LM Studio credits, hardcoded changelog, disabled update button (offline). Verified by screenshot.
 78. [x] (2026-07-10) Autostart toggle in Settings → System via schtasks ONLOGON /RL HIGHEST (plain-task fallback when not elevated).
-79. [ ] UI scale / font-size setting. (M/M)
-80. [ ] Full keyboard navigation with visible focus rings across the dashboard. (M/S)
+79. [x] (2026-07-11) dashboard_scale select 90-125% via documentElement zoom, live + persisted; dashboard only (Tk is DPI-handled).
+80. [x] (2026-07-11) :focus-visible accent ring, toggles as role=switch with Enter/Space + aria-checked sync, focus-within reveals row actions, aria-labels on icon-only buttons, Esc exits select mode. Covers the dashboard half of item 97.
 
 ### History, beyond items 35-40
 
