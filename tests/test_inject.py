@@ -30,14 +30,22 @@ def reset_mocks():
 
 
 class TestInjectText:
-    def test_skips_zero_hwnd(self):
+    def test_zero_hwnd_falls_back_to_clipboard(self, monkeypatch):
+        """No target window: text must land on the clipboard, never be dropped."""
+        copied, infos = [], []
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: copied.append(t) or True)
+        monkeypatch.setattr(inject, "_notify_info", lambda m: infos.append(m))
         inject.inject_text("hello", 0)
-        _pyperclip.copy.assert_not_called()
+        assert copied == ["hello"]
+        assert infos
 
-    def test_skips_invalid_window(self):
+    def test_invalid_window_falls_back_to_clipboard(self, monkeypatch):
         _win32gui.IsWindow.return_value = False
+        copied = []
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: copied.append(t) or True)
+        monkeypatch.setattr(inject, "_notify_info", lambda m: None)
         inject.inject_text("hello", 9999)
-        _pyperclip.copy.assert_not_called()
+        assert copied == ["hello"]
 
     def test_default_path_types_text(self, monkeypatch):
         """Default (non-terminal) path types text via Unicode SendInput."""
@@ -82,3 +90,38 @@ class TestInjectText:
     def test_configure_sets_restore_delay(self):
         inject.configure(restore_delay_ms=300)
         assert inject._restore_delay_ms == 300
+
+
+class TestCaptureForeground:
+    """Own-app windows (tray icon message window, preview, dashboard subprocess)
+    must never be captured as paste targets."""
+
+    def _fake_user32(self, pid_value: int):
+        fake = MagicMock()
+
+        def fake_gwtpi(hwnd, byref_pid):
+            byref_pid._obj.value = pid_value
+            return 1
+
+        fake.GetWindowThreadProcessId.side_effect = fake_gwtpi
+        return fake
+
+    def test_own_process_window_returns_zero(self, monkeypatch):
+        import os
+        _win32gui.GetForegroundWindow.return_value = 4242
+        monkeypatch.setattr(inject, "_user32", self._fake_user32(os.getpid()))
+        assert inject.capture_foreground() == 0
+
+    def test_dashboard_subprocess_returns_zero(self, monkeypatch):
+        _win32gui.GetForegroundWindow.return_value = 4242
+        _win32gui.GetWindowText.return_value = "VoiceDictate"
+        monkeypatch.setattr(inject, "_user32", self._fake_user32(99999))
+        monkeypatch.setattr(inject, "_get_exe_name", lambda h: "pythonw3.13.exe")
+        assert inject.capture_foreground() == 0
+
+    def test_foreign_window_passes_through(self, monkeypatch):
+        _win32gui.GetForegroundWindow.return_value = 4242
+        _win32gui.GetWindowText.return_value = "Untitled - Notepad"
+        monkeypatch.setattr(inject, "_user32", self._fake_user32(99999))
+        monkeypatch.setattr(inject, "_get_exe_name", lambda h: "notepad.exe")
+        assert inject.capture_foreground() == 4242

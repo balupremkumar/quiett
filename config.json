@@ -3,7 +3,7 @@
   "model": "large-v3-turbo",
   "language": "en",
   "min_record_seconds": 0.5,
-  "max_record_seconds": 120.0,
+  "max_record_seconds": 120,
   "filler_words": [
     "um",
     "uh",
@@ -29,7 +29,7 @@
     "ClaudiumD": "CLAUDE.md",
     "full Passover": "full pass over"
   },
-  "silence_auto_stop_seconds": 3.0,
+  "silence_auto_stop_seconds": 3,
   "preview_position": "cursor",
   "initial_prompt": "",
   "custom_vocabulary": [
@@ -84,7 +84,7 @@
   "api_server_port": 8090,
   "lmstudio_model": "qwen2.5-1.5b-instruct",
   "silence_threshold": 0.01,
-  "preview_auto_dismiss_seconds": 0.0,
+  "preview_auto_dismiss_seconds": 0,
   "auto_paste_threshold": 0.0,
   "history_paused": false,
   "taskflow_enabled": true,
@@ -112,7 +112,10 @@
   "taskflow_default_project": "",
   "taskflow_voice_confirm": false,
   "vad_silence_mode": false,
-  "theme": "dark",
+  "theme": "light",
+  "animations": true,
+  "badge_animation": "waveform",
+  "sound_volume": 100,
   "snippets": {
     "insert my email": "you@example.com"
   },
@@ -121,5 +124,7 @@
   "retain_audio": true,
   "retain_audio_max_files": 200,
   "retain_audio_min_seconds": 3.0,
-  "voice_profile_max_samples": 10
+  "voice_profile_max_samples": 10,
+  "history_max_entries": "100",
+  "recording_retention_days": "0"
 }

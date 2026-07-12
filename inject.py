@@ -524,7 +524,27 @@ def configure(restore_delay_ms: int, per_app_paste: dict | None = None,
 
 
 def capture_foreground() -> int:
-    return win32gui.GetForegroundWindow()
+    """Foreground hwnd to paste into later, or 0 when the foreground window is
+    one of our own surfaces (tray icon message window, preview panel, dashboard
+    subprocess) — typing a dictation back into those loses it (seen 2026-07-12:
+    498 chars typed into the hidden pystray window)."""
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        return 0
+    pid = wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    own = pid.value == os.getpid()
+    if not own:
+        # The dashboard runs as a separate python subprocess with this exact title.
+        try:
+            title = win32gui.GetWindowText(hwnd)
+        except Exception:
+            title = ""
+        own = title == "VoiceDictate" and _get_exe_name(hwnd).startswith("python")
+    if own:
+        warn("inject", f"foreground is our own window (class='{_get_class(hwnd)}') — no paste target")
+        return 0
+    return hwnd
 
 
 def _get_class(hwnd: int) -> str:
@@ -870,7 +890,11 @@ def inject_text(text: str, hwnd: int) -> None:
         return
 
     if not hwnd or not win32gui.IsWindow(hwnd):
-        log("inject", "no target hwnd")
+        # No usable target — never drop the text; leave it on the clipboard.
+        if _clipboard_set_text(text):
+            _notify_info(f"No target window — copied to clipboard ({len(text)} chars), press Ctrl+V to paste")
+        else:
+            _notify_failure("No target window and clipboard copy failed")
         return
 
     target_cls   = _get_class(hwnd)

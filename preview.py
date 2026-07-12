@@ -63,7 +63,6 @@ _badge_q:        queue.Queue = queue.Queue()
 _toast_q:        queue.Queue = queue.Queue()
 _flash_q:        queue.Queue = queue.Queue()
 _agent_q:        queue.Queue = queue.Queue()
-_long_confirm_q: queue.Queue = queue.Queue()
 _root:        tk.Tk | None = None
 _ready = threading.Event()
 
@@ -288,12 +287,6 @@ def show_agent_confirm(desc: str, confirm_cb) -> None:
     _agent_q.put({"desc": desc, "cb": confirm_cb})
 
 
-def show_long_recording_confirm(duration: float, confirm_cb, cancel_cb=None) -> None:
-    """Confirm gate before transcribing a very long recording (BACKLOG item 10).
-    Safe to call from any thread. confirm_cb/cancel_cb take no arguments."""
-    _long_confirm_q.put({"duration": duration, "confirm_cb": confirm_cb, "cancel_cb": cancel_cb})
-
-
 _partial_q: queue.Queue = queue.Queue()
 
 
@@ -483,17 +476,6 @@ def _tick() -> None:
                 _open_agent_confirm(a["desc"], a["cb"])
             except Exception as exc:
                 log_error("preview", f"agent confirm error: {exc}")
-        except queue.Empty:
-            break
-
-    # Drain long-recording confirm queue (item 10)
-    while True:
-        try:
-            c = _long_confirm_q.get_nowait()
-            try:
-                _open_long_confirm(c["duration"], c["confirm_cb"], c.get("cancel_cb"))
-            except Exception as exc:
-                log_error("preview", f"long recording confirm error: {exc}")
         except queue.Empty:
             break
 
@@ -2188,77 +2170,6 @@ def _open_agent_confirm(desc: str, confirm_cb) -> None:
 
     win.bind("<Return>", lambda _: do_run())
     win.bind("<Escape>", lambda _: do_cancel())
-
-    win.update_idletasks()
-    sw = win.winfo_screenwidth()
-    sh = win.winfo_screenheight()
-    w  = win.winfo_reqwidth()
-    h  = win.winfo_reqheight()
-    win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
-
-    winfx.fade_in(win, target=0.97, duration_ms=150)
-    win.focus_force()
-
-
-def _open_long_confirm(duration: float, confirm_cb, cancel_cb=None) -> None:
-    """Confirm gate before transcribing a very long recording (BACKLOG item
-    10). Runs on the tkinter thread; confirm_cb/cancel_cb take no arguments."""
-    refresh_theme()  # catch theme flips before drawing
-
-    win = tk.Toplevel(_root)
-    win.title("VoiceDictate")
-    win.configure(bg=_BG)
-    win.resizable(False, False)
-    win.attributes("-topmost", True)
-    win.attributes("-alpha", 0.0)
-    winfx.apply_rounded_region(win, radius=12)
-
-    accent_bar = tk.Frame(win, bg=_BLUE, height=3)
-    accent_bar.pack(fill=tk.X, side=tk.TOP)
-
-    body = tk.Frame(win, bg=_BG)
-    body.pack(fill=tk.BOTH, expand=True, padx=24, pady=(18, 14))
-
-    secs = max(0, int(round(duration)))
-    mins, rem = divmod(secs, 60)
-    dur_label = f"{mins}m {rem:02d}s" if mins else f"{secs}s"
-
-    tk.Label(body, text=f"Long recording ({dur_label}) — transcribe?", bg=_BG, fg=_FG,
-             font=(_FONT_FAM_DISPLAY, 13, "bold"), wraplength=340, justify="left").pack(anchor="w")
-
-    tk.Label(body, text="That's a lot of audio — make sure the hotkey wasn't held by accident.",
-             bg=_BG2, fg=_FG2, font=_FONT_BODY, wraplength=340, justify="left",
-             padx=12, pady=8).pack(fill=tk.X, pady=(10, 0))
-
-    hint = tk.Label(body, text="Enter to transcribe  ·  Esc to discard",
-                    bg=_BG, fg=_FG3, font=_FONT_HINT)
-    hint.pack(anchor="w", pady=(8, 0))
-
-    btns = tk.Frame(body, bg=_BG)
-    btns.pack(fill=tk.X, pady=(14, 0))
-
-    def do_confirm():
-        win.destroy()
-        if confirm_cb:
-            confirm_cb()
-
-    def do_cancel():
-        win.destroy()
-        if cancel_cb:
-            cancel_cb()
-
-    tk.Button(btns, text="Discard", command=do_cancel,
-              bg=_BG2, fg=_FG2, activebackground=_BG3, activeforeground=_FG,
-              relief="flat", bd=0, font=_FONT_BTN, padx=12, pady=6,
-              cursor="hand2").pack(side=tk.RIGHT, padx=(6, 0))
-    tk.Button(btns, text="Transcribe", command=do_confirm,
-              bg=_BLUE, fg="#ffffff", activebackground=_BLUE_HV,
-              activeforeground="#ffffff", relief="flat", bd=0,
-              font=_FONT_BTN, padx=16, pady=6, cursor="hand2").pack(side=tk.RIGHT)
-
-    win.bind("<Return>", lambda _: do_confirm())
-    win.bind("<Escape>", lambda _: do_cancel())
-    win.protocol("WM_DELETE_WINDOW", do_cancel)
 
     win.update_idletasks()
     sw = win.winfo_screenwidth()

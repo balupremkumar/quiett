@@ -318,6 +318,11 @@ def _load_window_geom() -> "dict | None":
         w, h = max(_MIN_W, int(geom["w"])), max(_MIN_H, int(geom["h"]))
     except Exception:
         return None
+    # Windows reports minimized windows at -32000,-32000; a config poisoned
+    # by such a save must fall back to the default placement, not be clamped
+    # onto a monitor edge.
+    if x <= -30000 or y <= -30000:
+        return None
     try:
         screens = webview.screens
         if screens:
@@ -336,6 +341,10 @@ def _load_window_geom() -> "dict | None":
 
 def _save_window_geom(win) -> None:
     try:
+        # Minimizing fires a moved event with the -32000,-32000 shell
+        # placeholder position — persisting that loses the real geometry.
+        if win.x <= -30000 or win.y <= -30000:
+            return
         _merge_cfg({"dashboard_window": {
             "x": win.x, "y": win.y, "w": win.width, "h": win.height,
         }})
@@ -2059,7 +2068,7 @@ async function loadSettings() {
     if (el.dataset.type === 'array') {
       el.value = Array.isArray(val) ? val.join(', ') : val;
     } else if (el.dataset.type === 'lines') {
-      el.value = Array.isArray(val) ? val.join('\n') : val;
+      el.value = Array.isArray(val) ? val.join('\\n') : val;
     } else {
       el.value = val;
     }
@@ -2150,7 +2159,7 @@ function applyDefaultsToForm(defaults) {
       if (el.classList.contains('tog')) { setTogState(el, !!val); return; }
       if (el.tagName === 'SELECT') { el.value = String(val); return; }
       if (el.dataset.type === 'array') { el.value = Array.isArray(val) ? val.join(', ') : val; return; }
-      if (el.dataset.type === 'lines') { el.value = Array.isArray(val) ? val.join('\n') : val; return; }
+      if (el.dataset.type === 'lines') { el.value = Array.isArray(val) ? val.join('\\n') : val; return; }
       el.value = val;
     });
     if (key === 'theme') applyTheme(val);
@@ -2482,7 +2491,7 @@ function collectSettings() {
       return;
     }
     if (el.dataset.type === 'lines') {
-      data[key] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+      data[key] = el.value.split('\\n').map(s => s.trim()).filter(Boolean);
       return;
     }
     if (el.dataset.type === 'int') { data[key] = parseInt(el.value) || 0; return; }

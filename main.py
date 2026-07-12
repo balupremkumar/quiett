@@ -71,7 +71,6 @@ _agent_session: bool = False  # True when Ctrl+Shift+C triggered this recording
 _last_dictation_text: str = ""  # newest final transcription — used by the repaste hotkey
 
 _UNDO_PHRASES = {"scratch that", "undo that", "undo last insert"}
-_LONG_RECORDING_CONFIRM_SECONDS = 30.0  # BACKLOG item 10 — gate before transcribing accidental long holds
 
 _HOT_RELOAD_INTERVAL = 30  # seconds
 
@@ -640,26 +639,13 @@ def main() -> None:
         agent_mode = _agent_session
         duration = (sum(len(c) for c in chunks) / audio.SAMPLE_RATE) if chunks else 0.0
 
-        def _proceed() -> None:
-            tray.set_state("processing")
-            preview.show_badge("processing")
-            threading.Thread(
-                target=_run_transcription,
-                args=(chunks, hwnd, task_mode, agent_mode, duration),
-                daemon=True,
-            ).start()
-
-        # BACKLOG item 10 — very long holds are usually an accidental hotkey
-        # stick; confirm before burning a whisper-server pass on them instead
-        # of silently processing.
-        if duration > _LONG_RECORDING_CONFIRM_SECONDS:
-            tray.set_state("idle")
-            preview.hide_badge()
-            preview.show_long_recording_confirm(
-                duration, _proceed, lambda: tray.set_state("idle"))
-            return
-
-        _proceed()
+        tray.set_state("processing")
+        preview.show_badge("processing")
+        threading.Thread(
+            target=_run_transcription,
+            args=(chunks, hwnd, task_mode, agent_mode, duration),
+            daemon=True,
+        ).start()
 
     _PARTIAL_MIN_START_SECONDS = 1.0   # first partial fires once this much audio exists
     _PARTIAL_MIN_NEW_SECONDS   = 0.7   # ...then again once this much *new* audio has landed
