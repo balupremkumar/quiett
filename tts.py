@@ -110,11 +110,18 @@ def _ref_from_profile() -> tuple[str, str]:
         warn("tts", f"tts_reference {chosen!r} not found, falling back to manifest best")
         chosen = manifest["best"]
         wav = os.path.join(_PROFILE_DIR, chosen)
+    # Transcript: sidecar .txt beats the manifest (pinned references live
+    # outside the manifest and survive profile rebuilds), whisper as fallback.
     text = ""
-    for s in manifest.get("samples", []):
-        if s.get("file") == chosen:
-            text = (s.get("transcript") or "").strip()
-            break
+    sidecar = os.path.splitext(wav)[0] + ".txt"
+    if os.path.isfile(sidecar):
+        with open(sidecar, encoding="utf-8") as f:
+            text = f.read().strip()
+    if not text:
+        for s in manifest.get("samples", []):
+            if s.get("file") == chosen:
+                text = (s.get("transcript") or "").strip()
+                break
     if not text:
         text = _transcribe_ref(wav)
     return wav, text
@@ -213,8 +220,11 @@ def speak(text: str) -> None:
     try:
         ensure_ready()
         _last_used = time.monotonic()
+        # seed 42 matches the P0 bench renders Balu picked the voice from;
+        # fixed seed keeps delivery consistent between plays of the same text.
         resp = _post_json("/v1/audio/speech",
-                          {"input": text, "voice": _VOICE, "response_format": "pcm"},
+                          {"input": text, "voice": _VOICE, "response_format": "pcm",
+                           "seed": 42},
                           timeout=120)
         device = _get_cfg().get("tts_output_device") or None
         with resp, sd.RawOutputStream(samplerate=_SAMPLE_RATE, channels=1,

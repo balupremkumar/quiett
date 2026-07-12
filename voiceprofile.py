@@ -156,8 +156,18 @@ def rebuild(max_samples: int = 10, min_score: float = 0.5) -> dict:
             **metrics,
         })
 
-    # Remove stale sample files beyond this build's count
+    # Remove stale sample files beyond this build's count. The config-pinned
+    # TTS reference (and its transcript sidecar) is user-chosen and must
+    # survive rebuilds — it is not a curated sample.
     keep = {s["file"] for s in samples} | {os.path.basename(MANIFEST_FILE)}
+    try:
+        with open("config.json", encoding="utf-8") as f:
+            pinned = json.load(f).get("tts_reference")
+        if pinned:
+            keep.add(pinned)
+            keep.add(os.path.splitext(pinned)[0] + ".txt")
+    except Exception:
+        pass
     for f in os.listdir(PROFILE_DIR):
         if f not in keep:
             try:

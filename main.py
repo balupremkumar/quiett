@@ -128,6 +128,7 @@ _CONFIG_DEFAULTS = {
     "redact_patterns":             [],
     "tts_enabled":                 False,   # cloned-voice playback — OFF by default, loads nothing until used
     "tts_hotkey":                  "ctrl+shift+s",  # NOT ctrl+alt+<x>: ctrl+alt is the record hold
+    "tts_reference":               "",      # voice_profile filename pinned by ear; "" = manifest best
     "tts_port":                    8092,
     "tts_unload_idle_seconds":     300,     # kill tts-server after this idle; 0 = never
 }

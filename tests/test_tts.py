@@ -107,6 +107,20 @@ class TestVoiceRegistration:
         tts.ensure_ready()
         assert len(_FakeTTSHandler.registered) == 1
 
+    def test_pinned_reference_with_sidecar_wins(self, fake_server, monkeypatch, tmp_path):
+        profile = tts._PROFILE_DIR
+        import pathlib
+        pinned = pathlib.Path(profile) / "tts_reference.wav"
+        pinned.write_bytes(b"RIFFpinned")
+        (pathlib.Path(profile) / "tts_reference.txt").write_text("pinned transcript")
+        port = fake_server.server_address[1]
+        tts.set_cfg_getter(lambda: {"tts_port": port,
+                                    "tts_reference": "tts_reference.wav"})
+        tts.ensure_ready()
+        reg = _FakeTTSHandler.registered[0]
+        assert base64.b64decode(reg["wav_b64"]) == b"RIFFpinned"
+        assert reg["ref_text"] == "pinned transcript"
+
 
 class TestSpeak:
     def test_speak_streams_pcm_to_output(self, fake_server):
