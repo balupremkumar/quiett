@@ -125,6 +125,7 @@
   "retain_audio_max_files": 200,
   "retain_audio_min_seconds": 3.0,
   "voice_profile_max_samples": 10,
+  "tts_enabled": true,
   "history_max_entries": "100",
   "recording_retention_days": "0"
 }

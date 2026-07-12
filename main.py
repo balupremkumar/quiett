@@ -45,6 +45,7 @@ import reformat
 import taskflow
 import tray
 import transcribe
+import tts
 import voiceprofile
 from logger import log, error as log_error
 
@@ -125,6 +126,10 @@ _CONFIG_DEFAULTS = {
     "badge_animation":             "waveform",
     "incognito":                   False,
     "redact_patterns":             [],
+    "tts_enabled":                 False,   # cloned-voice playback — OFF by default, loads nothing until used
+    "tts_hotkey":                  "ctrl+shift+s",  # NOT ctrl+alt+<x>: ctrl+alt is the record hold
+    "tts_port":                    8092,
+    "tts_unload_idle_seconds":     300,     # kill tts-server after this idle; 0 = never
 }
 
 _RECORDINGS_DIR = "recordings"
@@ -805,6 +810,48 @@ def main() -> None:
         except Exception as exc:
             log_error("main", f"agent hotkey failed: {exc}")
 
+    # Speak-selection hotkey — read the highlighted text aloud in the cloned
+    # voice (TTS_PLAN P2). Registered unconditionally so the tts_enabled toggle
+    # applies instantly, but a disabled toggle costs nothing: no server, no
+    # VRAM, just a toast pointing at Settings.
+    tts.set_cfg_getter(_get_cfg)
+    _tts_hk = _cfg.get("tts_hotkey", "ctrl+shift+s")
+    if _tts_hk:
+        def _tts_worker() -> None:
+            text = inject.get_selected_text()
+            if not text.strip():
+                log("main", "tts: hotkey fired but no selection was grabbed")
+                preview.show_toast("Nothing selected to speak.")
+                return
+            tray.set_state("processing")
+            try:
+                tts.speak(text)
+            except Exception as exc:
+                log_error("main", f"tts speak failed: {exc}")
+                preview.show_toast(f"Voice playback failed: {exc}", kind="error")
+            finally:
+                tray.set_state("idle")
+
+        def _on_tts_hotkey() -> None:
+            if tts.is_speaking():
+                log("main", "tts: hotkey pressed while speaking — stopping")
+                tts.stop()
+                return
+            if audio.is_recording():
+                log("main", "tts: hotkey ignored, recording in progress")
+                return
+            if not _get_cfg().get("tts_enabled", False):
+                log("main", "tts: hotkey pressed but tts_enabled is off")
+                preview.show_toast("Voice playback is off. Enable it in Settings to use this hotkey.")
+                return
+            threading.Thread(target=_tts_worker, daemon=True).start()
+
+        try:
+            _kb.add_hotkey(_tts_hk, _on_tts_hotkey, suppress=False)
+            log("main", f"tts hotkey registered: {_tts_hk}")
+        except Exception as exc:
+            log_error("main", f"tts hotkey failed: {exc}")
+
     # Repaste hotkey — re-insert the last dictation into the focused app
     _repaste_hk = _cfg.get("repaste_hotkey", "")
     if _repaste_hk:
@@ -849,6 +896,7 @@ def main() -> None:
 
     threading.Thread(target=_load_model, daemon=True).start()
     atexit.register(transcribe.shutdown)
+    atexit.register(tts.shutdown)
 
     def _load_reformat() -> None:
         m = _cfg.get("lmstudio_model", "qwen2.5-1.5b-instruct")

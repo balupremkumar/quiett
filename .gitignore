@@ -1,3 +1,6 @@
+# Spike sandboxes (own venvs + model downloads, never shipped)
+spikes/
+
 # Python
 __pycache__/
 *.pyc

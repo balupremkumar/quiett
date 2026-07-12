@@ -56,6 +56,7 @@ _VK_RETURN = 0x0D
 _VK_TAB    = 0x09
 _VK_BACK   = 0x08
 _VK_Z      = 0x5A
+_VK_C      = 0x43
 
 _INPUT_KEYBOARD = 1
 _MAPVK_VK_TO_VSC = 0
@@ -859,6 +860,30 @@ def undo_last() -> bool:
     log("inject", f"undo_last: sent Ctrl+Z to hwnd={hwnd}")
     _last_insert = None
     return True
+
+
+def get_selected_text(timeout_ms: int = 600) -> str:
+    """Copy the current selection via synthetic Ctrl+C and return it, restoring
+    the user's clipboard afterwards. GetClipboardSequenceNumber tells us when
+    OUR copy has landed — polling for content would race other clipboard
+    writers and can't distinguish a stale value from a fresh one."""
+    old = _clipboard_get_text()
+    seq0 = _user32.GetClipboardSequenceNumber()
+    _wait_modifiers_released(timeout_ms=400)
+    _flush_all_modifiers()
+    time.sleep(0.03)
+    _send_keystroke([_VK_CONTROL], _VK_C)
+    text = ""
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        time.sleep(0.03)
+        if _user32.GetClipboardSequenceNumber() != seq0:
+            time.sleep(0.02)  # give the source app time to finish writing
+            text = _clipboard_get_text()
+            break
+    if old:
+        _clipboard_set_text(old)
+    return text
 
 
 def inject_text_and_submit(text: str, hwnd: int) -> None:
