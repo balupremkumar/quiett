@@ -35,6 +35,7 @@ import api_server
 import audio
 import chime
 import dashboard
+import fitness
 import history
 import hotkey
 import inject
@@ -116,6 +117,8 @@ _CONFIG_DEFAULTS = {
                                      "read my tasks", "what are my tasks"],
     "taskflow_default_project":    "",
     "taskflow_voice_confirm":      False,
+    "fitness_enabled":             True,
+    "fitness_trigger_phrases":     ["food log", "log food", "macro log"],
     "snippets":                    {},
     "repaste_hotkey":              "ctrl+shift+space",
     "live_preview_enabled":        True,
@@ -244,6 +247,12 @@ def _validate_config(raw: dict) -> dict:
     if not isinstance(cfg.get("taskflow_default_project"), str):
         cfg["taskflow_default_project"] = ""
     cfg["taskflow_voice_confirm"] = bool(cfg.get("taskflow_voice_confirm", False))
+    cfg["fitness_enabled"] = bool(cfg.get("fitness_enabled", True))
+    if not isinstance(cfg.get("fitness_trigger_phrases"), list):
+        cfg["fitness_trigger_phrases"] = _CONFIG_DEFAULTS["fitness_trigger_phrases"]
+    else:
+        cfg["fitness_trigger_phrases"] = [p for p in cfg["fitness_trigger_phrases"]
+                                          if isinstance(p, str) and p.strip()]
     if not isinstance(cfg.get("snippets"), dict):
         cfg["snippets"] = {}
     if not isinstance(cfg.get("repaste_hotkey"), str):
@@ -389,6 +398,24 @@ def main() -> None:
             action_cb=_undo if task_id else None,
         )
         return True
+
+    def _handle_food_log(transcript: str, cfg: dict) -> None:
+        """POST a food-log utterance to Local FitnessPal. Runs on its own
+        daemon thread because a cold parse JIT-loads the LLM server-side and
+        can block for tens of seconds. The dictation is never lost: any
+        failure copies the transcript to the clipboard."""
+        resp = fitness.log_raw(transcript)
+        if resp is not None:
+            preview.show_toast(fitness.format_result(resp), kind="info")
+            return
+        if inject.copy_text(transcript):
+            preview.show_toast(
+                "Fitness log failed — transcript copied to clipboard.", kind="warn")
+        else:
+            preview.show_toast(
+                "Fitness log failed and the clipboard copy failed — "
+                "transcript is in app.log.", kind="warn")
+            log_error("main", f"fitness fallback lost to clipboard, transcript: {transcript!r}")
 
     def _handle_readback(cfg: dict) -> None:
         if not taskflow.check_health():
@@ -561,6 +588,18 @@ def main() -> None:
                 if isinstance(trig, str) and lowered == trig.strip().lower():
                     inject.inject_text(str(expansion), hwnd)
                     return
+
+        # Local FitnessPal: an utterance that STARTS with a food-log trigger
+        # ("food log ...") diverts wholesale to the macro tracker on :8091 —
+        # no preview, no paste. Start-anchored only (the TaskFlow near-miss
+        # lesson); the server stores the raw transcript before parsing and
+        # _handle_food_log falls back to the clipboard, so any misfire is
+        # visible and recoverable.
+        if cfg.get("fitness_enabled", True) and text.strip():
+            if fitness.match_trigger(text.strip(), cfg.get("fitness_trigger_phrases", [])):
+                threading.Thread(target=_handle_food_log,
+                                 args=(text.strip(), cfg), daemon=True).start()
+                return
 
         # TaskFlow: read-back, mark-done, and add-task trigger handling.
         # Must run before the auto-paste threshold below, else a confident

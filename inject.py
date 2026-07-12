@@ -452,6 +452,13 @@ def _clipboard_restore_snapshot(snapshot: list) -> bool:
         return False
 
 
+def copy_text(text: str) -> bool:
+    """Public clipboard write for integration fallbacks (e.g. the fitness
+    food-log path when its server is down). No snapshot/restore: the point
+    IS to hand the text to the user."""
+    return _clipboard_set_text(text)
+
+
 def _clipboard_set_text(text: str) -> bool:
     """Write text to clipboard using win32clipboard (handles 64-bit HGLOBAL correctly)."""
     try:
