@@ -344,6 +344,8 @@ _agent_command_mode = False
 _on_rebuild_voice_profile = None
 _on_toggle_incognito = None
 _incognito = False
+_on_toggle_fitness_lmstudio = None
+_fitness_lmstudio_enabled = False
 
 
 def configure(on_view_history, on_toggle_pause=None,
@@ -352,12 +354,14 @@ def configure(on_view_history, on_toggle_pause=None,
               on_relaunch_taskflow=None,
               on_toggle_agent_command_mode=None, agent_command_mode: bool = False,
               on_rebuild_voice_profile=None, on_open_dashboard=None,
-              on_toggle_incognito=None, incognito: bool = False) -> None:
+              on_toggle_incognito=None, incognito: bool = False,
+              on_toggle_fitness_lmstudio=None, fitness_lmstudio_enabled: bool = False) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
     global _on_toggle_clipboard_only, _clipboard_only, _on_relaunch_taskflow
     global _on_toggle_agent_command_mode, _agent_command_mode
     global _on_rebuild_voice_profile, _on_open_dashboard
     global _on_toggle_incognito, _incognito
+    global _on_toggle_fitness_lmstudio, _fitness_lmstudio_enabled
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
@@ -371,6 +375,8 @@ def configure(on_view_history, on_toggle_pause=None,
     _on_open_dashboard = on_open_dashboard if on_open_dashboard else on_view_profile
     _on_toggle_incognito = on_toggle_incognito
     _incognito = incognito
+    _on_toggle_fitness_lmstudio = on_toggle_fitness_lmstudio
+    _fitness_lmstudio_enabled = fitness_lmstudio_enabled
 
 
 def increment_task_count() -> None:
@@ -416,6 +422,15 @@ def set_incognito(enabled: bool) -> None:
     if _icon is not None:
         _icon.title = _with_incognito_suffix(
             _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}"))
+        _icon.update_menu()
+
+
+def set_fitness_lmstudio_enabled(enabled: bool) -> None:
+    """Keep tray menu in sync when fitness_lmstudio_enabled changes externally
+    (Settings page or hot-reload)."""
+    global _fitness_lmstudio_enabled
+    _fitness_lmstudio_enabled = enabled
+    if _icon is not None:
         _icon.update_menu()
 
 
@@ -644,6 +659,13 @@ def run() -> None:
             _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}"))
         icon.update_menu()
 
+    def _toggle_fitness_lmstudio(icon, item):
+        global _fitness_lmstudio_enabled
+        _fitness_lmstudio_enabled = not _fitness_lmstudio_enabled
+        if _on_toggle_fitness_lmstudio:
+            _on_toggle_fitness_lmstudio(_fitness_lmstudio_enabled)
+        icon.update_menu()
+
     def _taskflow_label(_item) -> str:
         if _taskflow_status == "unknown":
             return "TaskFlow: —"
@@ -689,6 +711,8 @@ def run() -> None:
         pystray.MenuItem("Settings",     _open_settings),
         pystray.MenuItem(lambda _: "Paused" if _paused else "Pause", pause_menu),
         pystray.MenuItem("Incognito", _toggle_incognito, checked=lambda item: _incognito),
+        pystray.MenuItem("Fitness Pal (LM Studio)", _toggle_fitness_lmstudio,
+                          checked=lambda item: _fitness_lmstudio_enabled),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("More", more_menu),
         pystray.Menu.SEPARATOR,

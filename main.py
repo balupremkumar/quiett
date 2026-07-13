@@ -40,6 +40,7 @@ import history
 import hotkey
 import inject
 import llm_client
+import lmstudio_boot
 import preview
 import profile
 import reformat
@@ -119,6 +120,7 @@ _CONFIG_DEFAULTS = {
     "taskflow_voice_confirm":      False,
     "fitness_enabled":             True,
     "fitness_trigger_phrases":     ["food log", "log food", "macro log"],
+    "fitness_lmstudio_enabled":    False,
     "snippets":                    {},
     "repaste_hotkey":              "ctrl+shift+space",
     "live_preview_enabled":        True,
@@ -253,6 +255,7 @@ def _validate_config(raw: dict) -> dict:
     else:
         cfg["fitness_trigger_phrases"] = [p for p in cfg["fitness_trigger_phrases"]
                                           if isinstance(p, str) and p.strip()]
+    cfg["fitness_lmstudio_enabled"] = bool(cfg.get("fitness_lmstudio_enabled", False))
     if not isinstance(cfg.get("snippets"), dict):
         cfg["snippets"] = {}
     if not isinstance(cfg.get("repaste_hotkey"), str):
@@ -1088,6 +1091,18 @@ def main() -> None:
                 with _cfg_lock:
                     _cfg["incognito"] = new_incognito
                 tray.set_incognito(new_incognito)
+            # Sync fitness_lmstudio_enabled into tray menu (Settings or tray
+            # may flip it) and boot/stop LM Studio to match.
+            new_fitness_lms = validated.get("fitness_lmstudio_enabled", False)
+            if new_fitness_lms != _cfg.get("fitness_lmstudio_enabled"):
+                with _cfg_lock:
+                    _cfg["fitness_lmstudio_enabled"] = new_fitness_lms
+                model = fresh.get("lmstudio_model", "qwen2.5-1.5b-instruct")
+                if new_fitness_lms:
+                    lmstudio_boot.boot(model)
+                else:
+                    lmstudio_boot.shutdown(model)
+                tray.set_fitness_lmstudio_enabled(new_fitness_lms)
         except Exception as exc:
             log_error("main", f"config hot-reload failed: {exc}")
         t = threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config)
@@ -1155,6 +1170,25 @@ def main() -> None:
             pass
         tray.set_incognito(enabled)
 
+    def _on_toggle_fitness_lmstudio(enabled: bool) -> None:
+        global _cfg
+        with _cfg_lock:
+            _cfg["fitness_lmstudio_enabled"] = enabled
+        model = _get_cfg().get("lmstudio_model", "qwen2.5-1.5b-instruct")
+        if enabled:
+            lmstudio_boot.boot(model)
+        else:
+            lmstudio_boot.shutdown(model)
+        try:
+            with open("config.json") as f:
+                raw = json.load(f)
+            raw["fitness_lmstudio_enabled"] = enabled
+            with open("config.json", "w") as f:
+                json.dump(raw, f, indent=2)
+        except Exception:
+            pass
+        tray.set_fitness_lmstudio_enabled(enabled)
+
     def _on_rebuild_voice_profile() -> None:
         def _worker() -> None:
             try:
@@ -1181,7 +1215,11 @@ def main() -> None:
         on_rebuild_voice_profile=_on_rebuild_voice_profile,
         on_toggle_incognito=_on_toggle_incognito,
         incognito=_cfg.get("incognito", False),
+        on_toggle_fitness_lmstudio=_on_toggle_fitness_lmstudio,
+        fitness_lmstudio_enabled=_cfg.get("fitness_lmstudio_enabled", False),
     )
+    if _cfg.get("fitness_lmstudio_enabled", False):
+        lmstudio_boot.boot(_cfg.get("lmstudio_model", "qwen2.5-1.5b-instruct"))
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()
 

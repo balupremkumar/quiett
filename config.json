@@ -128,5 +128,18 @@
   "tts_enabled": true,
   "tts_reference": "tts_reference.wav",
   "history_max_entries": "100",
-  "recording_retention_days": "0"
+  "recording_retention_days": "0",
+  "dashboard_window": {
+    "x": 1390,
+    "y": 476,
+    "w": 980,
+    "h": 660
+  },
+  "fitness_lmstudio_enabled": true,
+  "panel_position": {
+    "\\\\.\\DISPLAY1": {
+      "x": 1441,
+      "y": 1049
+    }
+  }
 }
