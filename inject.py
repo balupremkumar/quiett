@@ -341,6 +341,31 @@ def wait_modifiers_released(timeout_ms: int = 400) -> bool:
     return _wait_modifiers_released(timeout_ms)
 
 
+def flush_hotkey_modifiers_async() -> None:
+    """Fire-and-forget cleanup after ANY recording-hotkey interaction ends.
+
+    mstsc forwards the physical hotkey key-downs (Ctrl/Shift/Alt) into the
+    remote session but can drop the matching key-ups, leaving modifiers
+    logically stuck remotely — shift-click opens new windows, ctrl-click opens
+    new tabs, the number row stops working. The paste path already force-
+    flushes for RDP targets, but flows that never inject (task capture, agent
+    mode, cancel, too-short) ended with no flush at all. This waits for the
+    physical release, then sends unconditional key-ups while the RDP window
+    still has focus so mstsc forwards them; unmatched key-ups are no-ops for
+    everything else."""
+    threading.Thread(target=_flush_hotkey_modifiers, daemon=True).start()
+
+
+def _flush_hotkey_modifiers() -> None:
+    _wait_modifiers_released(timeout_ms=2000)
+    fg = win32gui.GetForegroundWindow()
+    if not fg or not _is_rdp(fg):
+        return
+    time.sleep(0.05)  # let mstsc forward the physical key-ups first
+    _flush_all_modifiers(force=True)
+    log("inject", "hotkey ended with RDP focused — force-flushed modifier key-ups")
+
+
 # ---------------------------------------------------------------------------
 # Raw Win32 clipboard — replaces pyperclip which uses a hidden Tk window that
 # Chromium-based apps (VS Code, Cursor, Chrome) sometimes time out reading from.
@@ -869,10 +894,16 @@ def get_selected_text(timeout_ms: int = 600) -> str:
     writers and can't distinguish a stale value from a fresh one."""
     old = _clipboard_get_text()
     seq0 = _user32.GetClipboardSequenceNumber()
+    is_rdp_fg = _is_rdp(win32gui.GetForegroundWindow())
     _wait_modifiers_released(timeout_ms=400)
-    _flush_all_modifiers()
+    _flush_all_modifiers(force=is_rdp_fg)
     time.sleep(0.03)
     _send_keystroke([_VK_CONTROL], _VK_C)
+    if is_rdp_fg:
+        # mstsc can drop the synthetic Ctrl-up in forwarding (same failure the
+        # paste path guards against) — flush while the RDP window has focus.
+        time.sleep(0.05)
+        _flush_all_modifiers(force=True)
     text = ""
     deadline = time.monotonic() + timeout_ms / 1000.0
     while time.monotonic() < deadline:

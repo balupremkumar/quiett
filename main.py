@@ -640,6 +640,7 @@ def main() -> None:
 
     def _on_audio_stop(chunks: list) -> None:
         hotkey.set_external_recording(False)  # release hold-mode suppression
+        inject.flush_hotkey_modifiers_async()  # un-stick modifiers in a focused RDP session
         hwnd = inject.capture_foreground()
         task_mode  = _task_session
         agent_mode = _agent_session
@@ -745,6 +746,10 @@ def main() -> None:
         preview.show_badge("too_short")
         threading.Timer(1.5, preview.hide_badge).start()
 
+    def _on_cancel() -> None:
+        audio.cancel()
+        inject.flush_hotkey_modifiers_async()  # cancelled recordings never reach inject
+
     def _on_not_ready() -> None:
         # Distinguish "still loading" (benign, resolves itself) from a
         # permanent load failure (BACKLOG item 48b) — the latter needs a red,
@@ -766,7 +771,7 @@ def main() -> None:
     hotkey.configure(
         on_start=_on_recording_start,
         on_stop=audio.stop,
-        on_cancel=audio.cancel,
+        on_cancel=_on_cancel,
         on_too_short=_on_too_short,
         on_not_ready=_on_not_ready,
         is_recording=audio.is_recording,
