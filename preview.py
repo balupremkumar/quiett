@@ -2011,16 +2011,38 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     # mode or whatever) instead of triggering on_insert().
     # activate_window uses AttachThreadInput to steal foreground even when our
     # process is not the current foreground process.
-    # Don't steal focus while the recording hotkey is still physically held.
-    # Recording stops on the FIRST modifier release; if an RDP window has focus
-    # and we grab it before the second key comes up, mstsc never forwards that
-    # key-up and the modifier stays stuck in the remote session (ctrl-clicks,
-    # broken right-click) until the user presses it again inside the remote.
-    inject.wait_modifiers_released(timeout_ms=500)
-    inject.activate_window(win.winfo_id())
-    win.lift()
-    win.focus_force()
-    entry.focus_set()
+    # NEVER steal focus while the recording hotkey is still physically held.
+    # Recording stops on the FIRST modifier release; the target app received
+    # the modifier key-downs, so it must also receive the key-ups. If we grab
+    # focus before every key is up, the ups are delivered to this preview
+    # instead: mstsc never forwards them, so the modifier stays stuck in the
+    # remote session, and Electron apps latch their own modifier tracking
+    # (ctrl-clicks, dead Ctrl+A, Tab acting as Alt+Tab) until the user presses
+    # the key again inside that app. The old 500ms blocking wait gave up and
+    # stole focus anyway; poll with after() instead, and only activate once
+    # the keys are up. Cap at ~10s: past that, leave focus alone — the
+    # suppressed Enter/Esc hooks below keep the panel usable without it.
+    def _activate_when_released(attempt: int = 0) -> None:
+        if not _preview_open or _current_preview_win is not win:
+            return  # panel already closed or replaced; never activate a corpse
+        held = inject.modifiers_physically_down()
+        if held:
+            if attempt == 0:
+                log("preview", f"deferring focus steal, modifiers still held: {held}")
+            if attempt < 200:
+                win.after(50, _activate_when_released, attempt + 1)
+            return
+        if attempt:
+            log("preview", f"modifiers released, stealing focus after {attempt * 50}ms deferral")
+        try:
+            inject.activate_window(win.winfo_id())
+            win.lift()
+            win.focus_force()
+            entry.focus_set()
+        except Exception:
+            pass
+
+    _activate_when_released()
 
     # ── Rounded corners + slide-up entrance ────────────────────────────────
     winfx.apply_rounded_region(win, radius=12)

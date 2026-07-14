@@ -59,6 +59,10 @@ def _parse_hotkey(keys: str) -> list[set]:
 def set_paused(val: bool) -> None:
     global _paused
     _paused = val
+    # Events arriving while paused are never seen, so any remembered key-down
+    # state is untrustworthy on both transitions; a stale True would let the
+    # next single-modifier press look like the full combo.
+    _held[:] = [False] * len(_mod_sets)
 
 
 def set_external_recording(active: bool) -> None:

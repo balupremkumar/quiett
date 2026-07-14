@@ -341,6 +341,16 @@ def wait_modifiers_released(timeout_ms: int = 400) -> bool:
     return _wait_modifiers_released(timeout_ms)
 
 
+def modifiers_physically_down() -> list[int]:
+    """Public wrapper. preview.py polls this to DEFER stealing focus until every
+    modifier is physically up: the target app received the hotkey key-downs, so
+    it must also receive the key-ups. If the preview grabs focus mid-hold, the
+    ups land in the preview instead and the target (an RDP session, or an
+    Electron app tracking modifiers from its own event stream) keeps the
+    modifier latched: clicks act as ctrl-clicks, Tab acts as Alt+Tab."""
+    return _modifiers_physically_down()
+
+
 def flush_hotkey_modifiers_async() -> None:
     """Fire-and-forget cleanup after ANY recording-hotkey interaction ends.
 
@@ -882,7 +892,7 @@ def undo_last() -> bool:
         return False
     _force_foreground(hwnd)
     time.sleep(0.15)
-    _wait_modifiers_released(timeout_ms=400)
+    _wait_modifiers_released(timeout_ms=1000)
     _flush_all_modifiers(force=_is_rdp(hwnd))
     time.sleep(0.03)
     _send_keystroke([_VK_CONTROL], _VK_Z)
@@ -902,7 +912,14 @@ def get_selected_text(timeout_ms: int = 600) -> str:
     old = _clipboard_get_text()
     seq0 = _user32.GetClipboardSequenceNumber()
     is_rdp_fg = _is_rdp(win32gui.GetForegroundWindow())
-    _wait_modifiers_released(timeout_ms=400)
+    if not _wait_modifiers_released(timeout_ms=2000):
+        # Never synthesise Ctrl+C while the user still physically holds part of
+        # the hotkey: a held Shift makes Windows see Ctrl+Shift+C (our own
+        # agent-mode hotkey, so we'd trigger ourselves) and a held Alt turns it
+        # into Ctrl+Alt+C for the target app.
+        warn("inject", "get_selected_text: modifiers still held after 2s "
+                       f"({_modifiers_physically_down()}), aborting the copy")
+        return ""
     _flush_all_modifiers(force=is_rdp_fg)
     time.sleep(0.03)
     _send_keystroke([_VK_CONTROL], _VK_C)
@@ -930,7 +947,10 @@ def inject_text_and_submit(text: str, hwnd: int) -> None:
     if _paste_mode == "clipboard_only":
         return
     time.sleep(0.15)  # let the target app process the paste before Enter lands
-    _wait_modifiers_released(timeout_ms=600)
+    if not _wait_modifiers_released(timeout_ms=3000):
+        # Enter under a still-held Ctrl would land as another Ctrl+Enter.
+        warn("inject", "inject_text_and_submit: modifiers still held, skipping the Enter forward")
+        return
     _flush_all_modifiers(force=_is_rdp(hwnd))
     time.sleep(0.03)
     _send_inputs([_make_vk_input(_VK_RETURN, key_up=False),
@@ -995,10 +1015,19 @@ def inject_text(text: str, hwnd: int) -> None:
         _wait_focus_settled(child, timeout_ms=250)
 
     # Wait for the user to physically release the recording hotkey before
-    # injecting input. Ctrl/Alt still held will corrupt either typed chars or
-    # the Ctrl+V keystroke.
-    if not _wait_modifiers_released(timeout_ms=400):
-        log("inject", f"modifiers still held after 400ms: {_modifiers_physically_down()}")
+    # injecting input. Ctrl/Alt still held corrupts either the typed chars or
+    # the Ctrl+V keystroke, and synthetic modifier-ups sent mid-hold get
+    # re-asserted by hardware auto-repeat, so injecting anyway can latch a
+    # modifier in the target. If the keys are still down after 3s, do not
+    # inject at all: leave the text on the clipboard for a manual paste.
+    if not _wait_modifiers_released(timeout_ms=3000):
+        warn("inject", "modifiers still held after 3s "
+                       f"({_modifiers_physically_down()}), not injecting")
+        if _clipboard_set_text(text):
+            _notify_failure("Keys still held down. Text copied, press Ctrl+V to paste.")
+        else:
+            _notify_failure("Keys still held down and clipboard copy failed")
+        return
     # Force-flush for RDP: clears modifiers stuck in the remote session (mstsc
     # has focus here, so the key-ups get forwarded) before we send Ctrl+V.
     _flush_all_modifiers(force=_is_rdp(hwnd))
