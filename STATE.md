@@ -22,7 +22,7 @@ P0 results so far: PyTorch/ROCm path FAILS latency for both engines (ROCm 7.13 a
 
 2026-07-13: LM Studio boot toggle shipped (driven from the fitness-pal session). Tray checkbox "Fitness Pal (LM Studio)" (top level, under Incognito), config key fitness_lmstudio_enabled (default false). Tick = lms server start + load qwen2.5-1.5b-instruct; untick = unload that model + server stop. New lmstudio_boot.py (daemon threads, CREATE_NO_WINDOW, toasts); boot-on-startup hook + hot-reload sync in main.py mirror the incognito pattern. 5 new tests, suite 178 green via `pytest tests -q` (bare pytest sweeps a broken vendored spike test under spikes/ — testpaths TODO). Verified live both ways via config hot-reload: boot ~10s, shutdown ~20s, VRAM freed. App restarted clean (PID 12080).
 
-2026-07-14: stuck-Shift bug root-caused (bg job): it's the RDP session (L-64A858), not local — mstsc forwards hotkey modifier key-downs but drops key-ups; existing force-flush only ran on paste-into-RDP, so task capture (Ctrl+Shift+Alt), agent mode (Ctrl+Shift+C), cancel/too-short never flushed. Fix on branch worktree-rdp-stuck-modifiers (59122b8, pushed): inject.flush_hotkey_modifiers_async() wired into audio stop + cancel, RDP force-flush around TTS Ctrl+C grab. 161 tests pass. Merged into main 2026-07-14 (this session).
+2026-07-14: stuck-Shift bug root-caused (bg job): it's the RDP session (L-64A858), not local — mstsc forwards hotkey modifier key-downs but drops key-ups; existing force-flush only ran on paste-into-RDP, so task capture (Ctrl+Shift+Alt), agent mode (Ctrl+Shift+C), cancel/too-short never flushed. Fix on branch worktree-rdp-stuck-modifiers (59122b8, pushed): inject.flush_hotkey_modifiers_async() wired into audio stop + cancel, RDP force-flush around TTS Ctrl+C grab. 161 tests pass. Merged into main 2026-07-14 (a34ee1e). Hardening committed adb6c45 + pushed (preview defers focus-steal via after() poll until keys physically up, 10s cap; inject paste/Enter/Ctrl+C abort while keys held, paste abort falls back to clipboard + toast; hotkey clears _held on pause). 178 tests pass, app restarted PID 9616. Only the in-RDP verify remains (Balu, remotely).
 
 ## Next steps
 - [ ] LATER, when Balu asks (he builds the app first): fitness.py + trigger phrases ("food log" etc.) posting raw transcripts to local-fitness-pal on 127.0.0.1:8091 — taskflow.py pattern, spec in that project's ARCHITECTURE.md §4. Voice-dictation stays otherwise uninvolved in that project.
@@ -39,7 +39,7 @@ P0 results so far: PyTorch/ROCm path FAILS latency for both engines (ROCm 7.13 a
 - [x] Double-enter insert confirmed intended by Balu 2026-07-11.
 
 ## Open bugs
-Sticky Ctrl/Shift/Alt in RDP session after hotkey use — root-caused 2026-07-14, fix on branch worktree-rdp-stuck-modifiers awaiting PR/merge; verify in-RDP after merge (shift-click + number row after a task capture).
+Sticky Ctrl/Shift/Alt in RDP session after hotkey use — root-caused 2026-07-14, fix merged (a34ee1e) + hardening committed (adb6c45), app restarted on the new build; in-RDP verify pending (shift-click + number row after a task capture).
 Titlebar follows Windows theme, not app theme (light app + dark OS = dark titlebar); small DWM call if wanted.
 Theme switch still needs app restart for Tk surfaces (BACKLOG item 4).
 2026-07-10 changes committed in 4 commits, 3aa16a0..b033298 (light-mode fixes, restart script, config theme=dark via fixed save path, plan/backlog docs incl. items 51-100); push to origin not done, ask Balu.

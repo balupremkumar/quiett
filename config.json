@@ -135,11 +135,11 @@
     "w": 980,
     "h": 660
   },
-  "fitness_lmstudio_enabled": true,
+  "fitness_lmstudio_enabled": false,
   "panel_position": {
     "\\\\.\\DISPLAY1": {
-      "x": 1441,
-      "y": 1049
+      "x": 1410,
+      "y": 843
     }
   }
 }
