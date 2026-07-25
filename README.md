@@ -13,8 +13,11 @@ pip install -r requirements.txt
 Transcription runs on a local **whisper.cpp** server (`whisper-server.exe`, GPU via Vulkan)
 using a ggml model in `models/` (default `large-v3-turbo`). The server binary lives in
 `third_party/` and the model `.bin` in `models/` — these are not pip-installable and are not
-downloaded automatically; they must be present before first run. Optional "vibe mode" reformats
-transcripts via a local LM Studio model (`qwen/qwen3-8b`).
+downloaded automatically; they must be present before first run.
+
+Read-aloud (Ctrl+Shift+S speaks the highlighted text in your cloned voice) runs on a local
+**qwentts.cpp** server (`tts-server.exe`, GPU via Vulkan) with its GGUF models under
+`third_party/qwentts.cpp/`. It starts on first use and unloads itself when idle.
 
 ## Run (terminal)
 

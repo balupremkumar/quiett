@@ -5,30 +5,31 @@ At session start, read STATE.md first and trust it; do not re-explore the repo o
 Check D:\Dev\ai\handovers\ for any *-to-voice-dictation.md newer than STATE.md and read it.
 A Stop hook keeps STATE.md current; when it fires, edit STATE.md in place, tersely.
 Ideation lists ("give me 25 improvements") go into BACKLOG.md; read it before generating new ideas, and tick or cull items there.
-When work here affects TaskFlow (to-do-app), write D:\Dev\ai\handovers\voice-dictation-to-to-do-app.md instead of printing a handover in chat.
 
 ## What this is
 Hold Ctrl+Alt to record, release to transcribe, floating preview panel appears near cursor — edit if needed, then Enter/Insert to paste into any focused app.
-Hold Ctrl+Shift+Alt instead to capture the whole utterance as a TaskFlow task.
+Ctrl+Shift+S reads the highlighted text aloud in the cloned voice. Tray → Study Mode switches that same hotkey to a slower, teacher-style delivery that pauses on sentences, paragraphs, lists and headings.
 Fully offline, Windows only.
+Scope ruled 2026-07-25: dictation in, read-aloud out, nothing else. TaskFlow capture, agent command mode and the Local FitnessPal divert were all removed; do not reintroduce them. No LLM runs in this app any more.
 
 ## Stack
 - Python + .venv
 - whisper.cpp server (third_party/whisper.cpp, Vulkan build, large-v3-turbo-q5_0 model) — NOT faster-whisper
-- LM Studio + Qwen2.5-1.5B-Instruct for agent command mode (lazy-loaded only when the toggle is on)
+- qwentts.cpp server (third_party/qwentts.cpp, Vulkan build, Qwen3-TTS) for cloned-voice read-aloud, started on first speak and reaped when idle
 - sounddevice (audio capture) | keyboard (global hotkey hook) | pyperclip (clipboard)
 - pystray (system tray) | Pillow (icons) | pywin32 | Tkinter (preview panel)
 
 ## Key files
 main.py (wiring) | audio.py | transcribe.py | preview.py | inject.py | hotkey.py | tray.py
-agent.py (command mode) | llm_client.py | taskflow.py | api_server.py | dashboard.py
+tts.py (read-aloud) | narration.py (segments, pauses, rate) | voiceprofile.py | api_server.py | dashboard.py
 history.py | config.json | run.bat / launch.vbs | app.log
 
 ## Key design decisions
 - Tkinter floating panel for edit-before-paste (prevents bad transcriptions landing silently)
 - Clipboard injection (more reliable than keyboard simulation across all Windows apps)
 - Clipboard save/restore after paste
-- Local LLMs load only on explicit toggle — never hold VRAM idle
+- Read-aloud synthesises a chunk at a time: the talker accelerates through a long request, chunking holds one pace
+- Model servers load lazily and get reaped when idle — never hold VRAM for a feature you are not using
 - Admin rights required if global hotkeys not detected (low-level keyboard hook)
 
 ## Restarting the app

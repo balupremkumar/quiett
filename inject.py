@@ -358,8 +358,8 @@ def flush_hotkey_modifiers_async() -> None:
     remote session but can drop the matching key-ups, leaving modifiers
     logically stuck remotely — shift-click opens new windows, ctrl-click opens
     new tabs, the number row stops working. The paste path already force-
-    flushes for RDP targets, but flows that never inject (task capture, agent
-    mode, cancel, too-short) ended with no flush at all. This waits for the
+    flushes for RDP targets, but flows that never inject (cancel, too-short)
+    ended with no flush at all. This waits for the
     physical release, then sends unconditional key-ups while the RDP window
     still has focus so mstsc forwards them; unmatched key-ups are no-ops for
     everything else."""
@@ -488,9 +488,9 @@ def _clipboard_restore_snapshot(snapshot: list) -> bool:
 
 
 def copy_text(text: str) -> bool:
-    """Public clipboard write for integration fallbacks (e.g. the fitness
-    food-log path when its server is down). No snapshot/restore: the point
-    IS to hand the text to the user."""
+    """Public clipboard write for fallback paths (used when there is no paste
+    target to inject into). No snapshot/restore: the point IS to hand the text
+    to the user."""
     return _clipboard_set_text(text)
 
 
@@ -914,9 +914,8 @@ def get_selected_text(timeout_ms: int = 600) -> str:
     is_rdp_fg = _is_rdp(win32gui.GetForegroundWindow())
     if not _wait_modifiers_released(timeout_ms=2000):
         # Never synthesise Ctrl+C while the user still physically holds part of
-        # the hotkey: a held Shift makes Windows see Ctrl+Shift+C (our own
-        # agent-mode hotkey, so we'd trigger ourselves) and a held Alt turns it
-        # into Ctrl+Alt+C for the target app.
+        # the hotkey: a held Shift makes Windows see Ctrl+Shift+C and a held
+        # Alt turns it into Ctrl+Alt+C for the target app.
         warn("inject", "get_selected_text: modifiers still held after 2s "
                        f"({_modifiers_physically_down()}), aborting the copy")
         return ""

@@ -1,9 +1,8 @@
 """
 Soft synthesized chimes — one consistent family for every audible cue in the
-app (BACKLOG item 45): record-start, record-stop, success (task added), and
-error. All four share the same soft-sine-bell synthesis (`_bell`) and only
-differ by interval/register, so they read as one voice rather than four
-unrelated beeps.
+app (BACKLOG item 45): record-start, record-stop, and error. All three share
+the same soft-sine-bell synthesis (`_bell`) and only differ by
+interval/register, so they read as one voice rather than three unrelated beeps.
 
 Generates the WAV files on first import (cached on disk) and plays them
 asynchronously via winsound — never blocks the calling thread. Respects the
@@ -30,7 +29,6 @@ os.makedirs(_CACHE_DIR, exist_ok=True)
 
 _START_PATH = os.path.join(_CACHE_DIR, "start.wav")
 _STOP_PATH  = os.path.join(_CACHE_DIR, "stop.wav")
-_TASK_PATH  = os.path.join(_CACHE_DIR, "task.wav")
 _ERROR_PATH = os.path.join(_CACHE_DIR, "error.wav")
 
 
@@ -69,12 +67,6 @@ def _ensure_chimes() -> None:
         # Falling bell — A4 + E4
         _write_wav(_STOP_PATH, _bell([(440.0, 0.55), (329.6, 0.45), (660.0, 0.15)],
                                      duration=0.24))
-    if not os.path.exists(_TASK_PATH):
-        # Bright ascending triad (C5-E5-G5) — distinct from the record/stop
-        # bells so "added to to-do list" reads as its own, separate event.
-        # Doubles as the app's one "success" cue (item 45).
-        _write_wav(_TASK_PATH, _bell([(523.25, 0.5), (659.25, 0.45), (783.99, 0.35)],
-                                     duration=0.26))
     if not os.path.exists(_ERROR_PATH):
         # Descending minor third (F4-D4), same soft-bell family but pitched
         # lower and falling — distinct from the stop bell (A4-E4, a fifth,
@@ -136,28 +128,5 @@ def play_stop() -> None:
     _play(_STOP_PATH)
 
 
-def play_task_added() -> None:
-    _play(_TASK_PATH)
-
-
 def play_error() -> None:
     _play(_ERROR_PATH)
-
-
-def speak(text: str) -> None:
-    """Optional SAPI text-to-speech confirmation (off by default — see
-    taskflow_voice_confirm in config.json). Runs on its own thread since
-    ISpVoice.Speak() blocks synchronously by default. Honours sound_volume
-    the same as the chimes (0 = mute) for a single consistent volume knob."""
-    def _run():
-        try:
-            pct = _volume_pct()
-            if pct <= 0:
-                return
-            import win32com.client
-            voice = win32com.client.Dispatch("SAPI.SpVoice")
-            voice.Volume = pct
-            voice.Speak(text)
-        except Exception:
-            pass
-    threading.Thread(target=_run, daemon=True).start()

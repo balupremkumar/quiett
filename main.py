@@ -30,21 +30,14 @@ import win32api
 import win32event
 import winerror
 
-import agent
 import api_server
 import audio
-import chime
 import dashboard
-import fitness
 import history
 import hotkey
 import inject
-import llm_client
-import lmstudio_boot
 import preview
 import profile
-import reformat
-import taskflow
 import tray
 import transcribe
 import tts
@@ -69,9 +62,6 @@ _enable_dpi_awareness()
 
 _cfg: dict = {}
 _cfg_lock = threading.Lock()
-_task_session: bool = False   # True when Ctrl+Shift+Alt was held at recording start
-_agent_session: bool = False  # True when Ctrl+Shift+C triggered this recording
-_last_dictation_text: str = ""  # newest final transcription — used by the repaste hotkey
 
 _UNDO_PHRASES = {"scratch that", "undo that", "undo last insert"}
 
@@ -102,27 +92,8 @@ _CONFIG_DEFAULTS = {
     "electron_paste_method":       "ctrl_v",
     "paste_mode":                  "auto",
     "hotkey_mode":                 "hold",
-    "agent_hotkey":                "ctrl+shift+c",
-    "agent_mode_enabled":          False,
-    "agent_command_mode_enabled":  False,
-    "agent_trigger_phrases":       ["hey computer", "computer run", "computer open"],
     "api_server_enabled":          True,
     "api_server_port":             8090,
-    "lmstudio_model":              "qwen2.5-1.5b-instruct",
-    "taskflow_enabled":            True,
-    "taskflow_trigger_phrases":    ["add this to TaskFlow", "add to my tasks", "add a task"],
-    "taskflow_trailing_trigger_phrases": ["add that to TaskFlow", "add that to my tasks",
-                                           "add that as a task"],
-    "taskflow_direct_capture_modifiers": ["ctrl", "shift", "alt"],
-    "taskflow_readback_phrases":   ["what's on my to-do list", "what's on my list",
-                                     "read my tasks", "what are my tasks"],
-    "taskflow_default_project":    "",
-    "taskflow_voice_confirm":      False,
-    "fitness_enabled":             True,
-    "fitness_trigger_phrases":     ["food log", "log food", "macro log"],
-    "fitness_lmstudio_enabled":    False,
-    "snippets":                    {},
-    "repaste_hotkey":              "ctrl+shift+space",
     "live_preview_enabled":        True,
     "retain_audio":                True,
     "retain_audio_max_files":      200,
@@ -135,7 +106,12 @@ _CONFIG_DEFAULTS = {
     "tts_hotkey":                  "ctrl+shift+s",  # NOT ctrl+alt+<x>: ctrl+alt is the record hold
     "tts_reference":               "",      # voice_profile filename pinned by ear; "" = manifest best
     "tts_port":                    8092,
+    "tts_speed":                   1.0,     # playback rate; <1 slows the voice down, pitch unchanged
+    "tts_max_chunk_chars":         120,     # synthesis chunk size; larger = the talker rushes, 0 = off
     "tts_unload_idle_seconds":     300,     # kill tts-server after this idle; 0 = never
+    "study_mode":                  False,   # read-aloud narrates with structural pauses instead of flat
+    "study_speed":                 0.95,    # ...and at its own rate, so normal read-aloud keeps tts_speed
+    "study_pause_scale":           1.0,     # multiplies every study pause, for tuning delivery by ear
 }
 
 _RECORDINGS_DIR = "recordings"
@@ -226,40 +202,15 @@ def _validate_config(raw: dict) -> dict:
         cfg["preview_position"] = "cursor"
     if cfg.get("badge_animation") not in ("waveform", "pulse", "bars"):
         cfg["badge_animation"] = "waveform"
-    cfg["taskflow_enabled"] = bool(cfg.get("taskflow_enabled", True))
     if not isinstance(cfg.get("per_app_context"), dict):
         cfg["per_app_context"] = {}
     if cfg.get("hotkey_mode") not in ("hold", "toggle", "auto"):
         cfg["hotkey_mode"] = "hold"
-    cfg["agent_mode_enabled"] = bool(cfg.get("agent_mode_enabled", False))
-    cfg["agent_command_mode_enabled"] = bool(cfg.get("agent_command_mode_enabled", False))
-    if not isinstance(cfg.get("agent_trigger_phrases"), list):
-        cfg["agent_trigger_phrases"] = []
     cfg["api_server_enabled"] = bool(cfg.get("api_server_enabled", True))
     try:
         cfg["api_server_port"] = max(1024, min(65535, int(cfg.get("api_server_port", 8090))))
     except (TypeError, ValueError):
         cfg["api_server_port"] = 8090
-    for key in ("taskflow_trigger_phrases", "taskflow_trailing_trigger_phrases",
-                "taskflow_readback_phrases"):
-        if not isinstance(cfg.get(key), list):
-            cfg[key] = _CONFIG_DEFAULTS[key]
-        else:
-            cfg[key] = [p for p in cfg[key] if isinstance(p, str) and p.strip()]
-    if not isinstance(cfg.get("taskflow_default_project"), str):
-        cfg["taskflow_default_project"] = ""
-    cfg["taskflow_voice_confirm"] = bool(cfg.get("taskflow_voice_confirm", False))
-    cfg["fitness_enabled"] = bool(cfg.get("fitness_enabled", True))
-    if not isinstance(cfg.get("fitness_trigger_phrases"), list):
-        cfg["fitness_trigger_phrases"] = _CONFIG_DEFAULTS["fitness_trigger_phrases"]
-    else:
-        cfg["fitness_trigger_phrases"] = [p for p in cfg["fitness_trigger_phrases"]
-                                          if isinstance(p, str) and p.strip()]
-    cfg["fitness_lmstudio_enabled"] = bool(cfg.get("fitness_lmstudio_enabled", False))
-    if not isinstance(cfg.get("snippets"), dict):
-        cfg["snippets"] = {}
-    if not isinstance(cfg.get("repaste_hotkey"), str):
-        cfg["repaste_hotkey"] = ""
     cfg["live_preview_enabled"] = bool(cfg.get("live_preview_enabled", True))
     cfg["retain_audio"] = bool(cfg.get("retain_audio", True))
     try:
@@ -274,6 +225,23 @@ def _validate_config(raw: dict) -> dict:
         cfg["voice_profile_max_samples"] = max(1, int(cfg.get("voice_profile_max_samples", 10)))
     except (TypeError, ValueError):
         cfg["voice_profile_max_samples"] = 10
+    try:
+        cfg["tts_speed"] = max(0.5, min(2.0, float(cfg.get("tts_speed", 1.0))))
+    except (TypeError, ValueError):
+        cfg["tts_speed"] = 1.0
+    try:
+        cfg["tts_max_chunk_chars"] = max(0, int(cfg.get("tts_max_chunk_chars", 120)))
+    except (TypeError, ValueError):
+        cfg["tts_max_chunk_chars"] = 120
+    cfg["study_mode"] = bool(cfg.get("study_mode", False))
+    try:
+        cfg["study_speed"] = max(0.5, min(2.0, float(cfg.get("study_speed", 0.95))))
+    except (TypeError, ValueError):
+        cfg["study_speed"] = 0.95
+    try:
+        cfg["study_pause_scale"] = max(0.0, min(3.0, float(cfg.get("study_pause_scale", 1.0))))
+    except (TypeError, ValueError):
+        cfg["study_pause_scale"] = 1.0
     cfg["incognito"] = bool(cfg.get("incognito", False))
     if not isinstance(cfg.get("redact_patterns"), list):
         cfg["redact_patterns"] = []
@@ -341,125 +309,10 @@ def main() -> None:
     _check_first_run()
 
     # ------------------------------------------------------------------
-    # TaskFlow helpers — auto-create (embedded mid-utterance capture),
-    # read-back, and mark-done. All run off the transcription worker thread
-    # already, so they're free to block briefly on TaskFlow's API.
-    # ------------------------------------------------------------------
-
-    def _relaunch_taskflow_with_toast() -> None:
-        threading.Thread(target=taskflow.ensure_running, daemon=True).start()
-
-    def _taskflow_unreachable_toast() -> None:
-        if taskflow.record_health_check(False):
-            preview.show_toast(
-                "TaskFlow seems to be down.", kind="warn",
-                action_label="Relaunch", action_cb=_relaunch_taskflow_with_toast,
-            )
-        tray.set_taskflow_status(False)
-
-    def _auto_create_task(task_content: str, cfg: dict) -> bool:
-        """Create a task with no confirmation step — used for a trigger
-        phrase found embedded mid-utterance, where stopping to click a
-        confirm button would break the user's conversational flow. Returns
-        False if TaskFlow is unreachable, so the caller can fold the raw
-        task content back into the normally-pasted remainder instead of
-        silently losing it.
-        """
-        spec = taskflow.build_task_spec(task_content, cfg.get("taskflow_default_project") or None)
-        title = spec.get("title", "").strip()
-        if not title:
-            return True
-        if taskflow.is_duplicate(title):
-            log("main", f"taskflow: skipped duplicate task {title!r}")
-            preview.show_toast(f"Already added recently: {title}", kind="info")
-            return True
-        if not taskflow.check_health():
-            _taskflow_unreachable_toast()
-            return False
-        taskflow.record_health_check(True)
-        tray.set_taskflow_status(True)
-        created = taskflow.create_task_from_spec(spec)
-        if created is None:
-            preview.show_toast(f"Couldn't reach TaskFlow — couldn't add {title!r}.", kind="warn")
-            return False
-
-        task_id = created.get("id")
-        chime.play_task_added()
-        tray.increment_task_count()
-        if not cfg.get("history_paused", False) and not cfg.get("incognito", False):
-            history.save(title, source="taskflow")
-        if cfg.get("taskflow_voice_confirm"):
-            chime.speak(f"Added {title} to your to-do list")
-
-        def _undo() -> None:
-            if task_id and taskflow.delete_task(task_id):
-                preview.show_toast(f"Removed: {title}", kind="info")
-
-        preview.show_toast(
-            f"Added to to-do list: {title}", kind="info",
-            action_label="Undo" if task_id else "",
-            action_cb=_undo if task_id else None,
-        )
-        return True
-
-    def _handle_food_log(transcript: str, cfg: dict) -> None:
-        """POST a food-log utterance to Local FitnessPal. Runs on its own
-        daemon thread because a cold parse JIT-loads the LLM server-side and
-        can block for tens of seconds. The dictation is never lost: any
-        failure copies the transcript to the clipboard."""
-        resp = fitness.log_raw(transcript)
-        if resp is not None:
-            preview.show_toast(fitness.format_result(resp), kind="info")
-            return
-        if inject.copy_text(transcript):
-            preview.show_toast(
-                "Fitness log failed — transcript copied to clipboard.", kind="warn")
-        else:
-            preview.show_toast(
-                "Fitness log failed and the clipboard copy failed — "
-                "transcript is in app.log.", kind="warn")
-            log_error("main", f"fitness fallback lost to clipboard, transcript: {transcript!r}")
-
-    def _handle_readback(cfg: dict) -> None:
-        if not taskflow.check_health():
-            _taskflow_unreachable_toast()
-            preview.show_toast("TaskFlow isn't running — can't read your list.", kind="warn")
-            return
-        tray.set_taskflow_status(True)
-        taskflow.record_health_check(True)
-        tasks = taskflow.list_tasks(completed=False)
-        summary = taskflow.format_task_list(tasks or [])
-        preview.show_toast(summary, kind="info")
-        if cfg.get("taskflow_voice_confirm"):
-            chime.speak(summary)
-
-    def _handle_complete(spoken_title: str, cfg: dict) -> None:
-        if not taskflow.check_health():
-            _taskflow_unreachable_toast()
-            preview.show_toast("TaskFlow isn't running.", kind="warn")
-            return
-        tray.set_taskflow_status(True)
-        taskflow.record_health_check(True)
-        match = taskflow.find_open_task_by_title(spoken_title)
-        if match is None:
-            preview.show_toast(f"Couldn't find an open task matching “{spoken_title}”.",
-                               kind="warn")
-            return
-        updated = taskflow.update_task(match["id"], completed=True)
-        title = match.get("title", spoken_title)
-        if updated is None:
-            preview.show_toast(f"Couldn't mark {title!r} as done.", kind="warn")
-            return
-        preview.show_toast(f"Marked done: {title}", kind="info")
-        if cfg.get("taskflow_voice_confirm"):
-            chime.speak(f"Marked {title} as done")
-
-    # ------------------------------------------------------------------
     # Callbacks wired between audio → transcription → preview → inject
     # ------------------------------------------------------------------
 
-    def _run_transcription(chunks: list, hwnd: int, task_session: bool = False,
-                           agent_session: bool = False, duration: float = 0.0) -> None:
+    def _run_transcription(chunks: list, hwnd: int, duration: float = 0.0) -> None:
         cfg = _get_cfg()
 
         # QW-5: per-app vocabulary/prompt override based on foreground exe
@@ -498,7 +351,7 @@ def main() -> None:
         # Spoken undo: "scratch that" as the whole utterance undoes the last
         # insert instead of pasting the phrase. Checked before history save so
         # command utterances don't pollute history.
-        if not agent_session and not task_session and lowered in _UNDO_PHRASES:
+        if lowered in _UNDO_PHRASES:
             ok = inject.undo_last()
             preview.show_toast("Undid last insert" if ok else "Nothing to undo",
                                kind="info")
@@ -509,151 +362,7 @@ def main() -> None:
         incognito = cfg.get("incognito", False)
         audio_file = _save_recording(chunks, cfg) if text.strip() and not incognito else None
         if text.strip() and not cfg.get("history_paused", False) and not incognito:
-            history.save(text.strip(), source="agent" if agent_session else None,
-                         audio=audio_file)
-
-        # Ctrl+Alt+C agent mode: classify + confirm gate via preview
-        if agent_session and text.strip():
-            tray.set_state("idle")
-            preview.hide_badge()
-            if not llm_client.is_available():
-                # BACKLOG item 48d — plain next step, not just "it's not running".
-                preview.show_toast(
-                    "Agent mode needs LM Studio running. Start it, then dictate again.",
-                    kind="warn")
-            else:
-                preview.show_badge("reformatting")
-                def _run_agent():
-                    try:
-                        actions = agent.interpret(text.strip())
-                        preview.hide_badge()
-                        known = [a for a in actions if a.get("action") != "unknown"]
-                        if not known:
-                            preview.show_toast(f"Didn't understand: {text.strip()}", kind="warn")
-                            return
-
-                        def _add_task_fn(title: str) -> bool:
-                            if not taskflow.check_health():
-                                return False
-                            spec = taskflow.build_task_spec(title)
-                            result = taskflow.create_task_from_spec(spec)
-                            if result:
-                                tray.increment_task_count()
-                            return bool(result)
-
-                        def _do_execute():
-                            for action in known:
-                                ok = agent.execute(
-                                    action,
-                                    inject_fn=lambda t, h: inject.inject_text(t, h or hwnd),
-                                    add_task_fn=_add_task_fn,
-                                )
-                                if not ok:
-                                    preview.show_toast(
-                                        f"Failed: {agent.describe([action])}", kind="warn"
-                                    )
-
-                        if any(a.get("action") == "run_command" for a in known):
-                            preview.show_agent_confirm(agent.describe(known), _do_execute)
-                        else:
-                            _do_execute()
-                    except Exception as exc:
-                        log_error("main", f"agent error: {exc}")
-                        preview.hide_badge()
-                        preview.show_toast("Agent error — check app.log.", kind="error")
-
-                threading.Thread(target=_run_agent, daemon=True).start()
-            return
-
-        # Ctrl+Shift+Alt direct-capture mode: skip all phrase matching and route
-        # the full transcript straight to the task confirm panel.
-        if task_session and text.strip():
-            preview.show(
-                text, hwnd,
-                empty=False,
-                confidence=confidence,
-                words=words,
-                auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
-                task_mode=True,
-                duration=duration,
-                incognito=incognito,
-            )
-            return
-
-        global _last_dictation_text
-        if text.strip():
-            _last_dictation_text = text.strip()
-
-        # Voice snippets: whole-utterance trigger → paste the expansion directly
-        # ("insert my email" → the address). Deterministic, so no preview.
-        if text.strip():
-            for trig, expansion in (cfg.get("snippets") or {}).items():
-                if isinstance(trig, str) and lowered == trig.strip().lower():
-                    inject.inject_text(str(expansion), hwnd)
-                    return
-
-        # Local FitnessPal: an utterance that STARTS with a food-log trigger
-        # ("food log ...") diverts wholesale to the macro tracker on :8091 —
-        # no preview, no paste. Start-anchored only (the TaskFlow near-miss
-        # lesson); the server stores the raw transcript before parsing and
-        # _handle_food_log falls back to the clipboard, so any misfire is
-        # visible and recoverable.
-        if cfg.get("fitness_enabled", True) and text.strip():
-            if fitness.match_trigger(text.strip(), cfg.get("fitness_trigger_phrases", [])):
-                threading.Thread(target=_handle_food_log,
-                                 args=(text.strip(), cfg), daemon=True).start()
-                return
-
-        # TaskFlow: read-back, mark-done, and add-task trigger handling.
-        # Must run before the auto-paste threshold below, else a confident
-        # "add this to TaskFlow X" would get silently pasted as raw text.
-        task_extracted = False
-        if cfg.get("taskflow_enabled", True) and text.strip():
-            stripped_text = text.strip()
-
-            if taskflow.match_trigger(stripped_text, cfg.get("taskflow_readback_phrases", [])):
-                threading.Thread(target=_handle_readback, args=(cfg,), daemon=True).start()
-                return
-
-            complete_title = taskflow.match_complete_command(stripped_text)
-            if complete_title:
-                threading.Thread(target=_handle_complete, args=(complete_title, cfg), daemon=True).start()
-                return
-
-            task_texts, remainder = taskflow.extract_tasks(
-                stripped_text,
-                cfg.get("taskflow_trigger_phrases", []),
-                cfg.get("taskflow_trailing_trigger_phrases", []),
-            )
-            if task_texts:
-                whole_utterance = len(task_texts) == 1 and not remainder.strip()
-                if whole_utterance:
-                    # Sole content of the recording — keep the deliberate
-                    # manual confirm step (review before it's created).
-                    preview.show(
-                        task_texts[0], hwnd,
-                        empty=not task_texts[0].strip(),
-                        confidence=confidence,
-                        words=None,
-                        auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
-                        task_mode=True,
-                        duration=duration,
-                        incognito=incognito,
-                    )
-                    return
-                # Embedded mid-utterance: auto-create immediately (no
-                # blocking confirm — that would break conversational flow).
-                # Anything TaskFlow couldn't take gets folded back into the
-                # remainder so it's never silently lost.
-                leftover = []
-                for task_text in task_texts:
-                    if not _auto_create_task(task_text, cfg):
-                        leftover.append(task_text)
-                remainder = (remainder + " " + " ".join(leftover)).strip() if leftover else remainder
-                if not remainder.strip():
-                    return
-                text = remainder
-                task_extracted = True
+            history.save(text.strip(), audio=audio_file)
 
         # Per-app auto-paste ("auto_paste": true in per_app_context) skips the
         # preview entirely for trusted apps; the global confidence threshold
@@ -665,18 +374,14 @@ def main() -> None:
             inject.inject_text(text.strip(), hwnd)
             return
 
-        # raw= is withheld once TaskFlow has extracted tasks out of the
-        # utterance — `text` is now the remainder, and raw is the whole
-        # original transcript, so the two are no longer a clean pair to
-        # toggle between (item 9 scope: plain dictation only).
         preview.show(
             text, hwnd,
             empty=not text.strip(),
             confidence=confidence,
-            words=None if task_extracted else words,
+            words=words,
             auto_dismiss=cfg.get("preview_auto_dismiss_seconds", 0.0),
             duration=duration,
-            raw=None if task_extracted else raw_text,
+            raw=raw_text,
             incognito=incognito,
         )
 
@@ -684,15 +389,13 @@ def main() -> None:
         hotkey.set_external_recording(False)  # release hold-mode suppression
         inject.flush_hotkey_modifiers_async()  # un-stick modifiers in a focused RDP session
         hwnd = inject.capture_foreground()
-        task_mode  = _task_session
-        agent_mode = _agent_session
         duration = (sum(len(c) for c in chunks) / audio.SAMPLE_RATE) if chunks else 0.0
 
         tray.set_state("processing")
         preview.show_badge("processing")
         threading.Thread(
             target=_run_transcription,
-            args=(chunks, hwnd, task_mode, agent_mode, duration),
+            args=(chunks, hwnd, duration),
             daemon=True,
         ).start()
 
@@ -737,24 +440,14 @@ def main() -> None:
             if txt and audio.is_recording():
                 preview.set_partial_text(txt)
 
-    def _on_recording_start(agent: bool = False) -> None:
-        global _task_session, _agent_session
-        _agent_session = agent
-        _task_session = bool(
-            not agent
-            and _get_cfg().get("taskflow_direct_capture_modifiers")
-            and (win32api.GetAsyncKeyState(0x10) & 0x8000)  # VK_SHIFT
-        )
-        if agent:
-            hotkey.set_external_recording(True)
+    def _on_recording_start() -> None:
         preview.close_current_preview()
         # No unconditional edge flash here — the badge's own entrance animation
         # is the "hotkey registered" signal; flash_screen_edge is now only a
         # fallback fired from preview.py if the badge itself fails to build
         # (item 46 — previously this double-fired alongside the badge).
         tray.set_state("recording")
-        badge = "recording_task" if _task_session else "recording"
-        preview.show_badge(badge)
+        preview.show_badge("recording")
         try:
             audio.start()
         except Exception as exc:
@@ -823,40 +516,7 @@ def main() -> None:
     )
     hotkey.start()
 
-    # Ctrl+Shift+C — agent/command mode
     import keyboard as _kb
-    _agent_hk = _cfg.get("agent_hotkey", "ctrl+shift+c")
-    if _cfg.get("agent_mode_enabled", False):
-        try:
-            # Build the set of key names to watch for release
-            _agent_hk_keys: set[str] = set()
-            for _part in _agent_hk.lower().split("+"):
-                _part = _part.strip()
-                if _part == "ctrl":
-                    _agent_hk_keys.update(["ctrl", "left ctrl", "right ctrl"])
-                elif _part == "shift":
-                    _agent_hk_keys.update(["shift", "left shift", "right shift"])
-                elif _part == "alt":
-                    _agent_hk_keys.update(["alt", "left alt", "right alt"])
-                else:
-                    _agent_hk_keys.add(_part)
-
-            def _agent_key_up(event):
-                if (event.event_type == "up"
-                        and event.name in _agent_hk_keys
-                        and _agent_session
-                        and audio.is_recording()):
-                    audio.stop()
-
-            _kb.add_hotkey(
-                _agent_hk,
-                lambda: _on_recording_start(agent=True) if transcribe.is_ready() and not audio.is_recording() else None,
-                suppress=False,
-            )
-            _kb.hook(_agent_key_up)
-            log("main", f"agent hotkey registered: {_agent_hk}")
-        except Exception as exc:
-            log_error("main", f"agent hotkey failed: {exc}")
 
     # Speak-selection hotkey — read the highlighted text aloud in the cloned
     # voice (TTS_PLAN P2). Registered unconditionally so the tts_enabled toggle
@@ -900,21 +560,6 @@ def main() -> None:
         except Exception as exc:
             log_error("main", f"tts hotkey failed: {exc}")
 
-    # Repaste hotkey — re-insert the last dictation into the focused app
-    _repaste_hk = _cfg.get("repaste_hotkey", "")
-    if _repaste_hk:
-        def _repaste() -> None:
-            if _last_dictation_text and not audio.is_recording():
-                hwnd = inject.capture_foreground()
-                threading.Thread(target=inject.inject_text,
-                                 args=(_last_dictation_text, hwnd),
-                                 daemon=True).start()
-        try:
-            _kb.add_hotkey(_repaste_hk, _repaste, suppress=False)
-            log("main", f"repaste hotkey registered: {_repaste_hk}")
-        except Exception as exc:
-            log_error("main", f"repaste hotkey failed: {exc}")
-
     # ------------------------------------------------------------------
     # Model loading
     # ------------------------------------------------------------------
@@ -946,38 +591,11 @@ def main() -> None:
     atexit.register(transcribe.shutdown)
     atexit.register(tts.shutdown)
 
-    def _load_reformat() -> None:
-        m = _cfg.get("lmstudio_model", "qwen2.5-1.5b-instruct")
-        agent.set_model(m)
-        reformat.load(model=m)
-
-    if _cfg.get("agent_command_mode_enabled", False):
-        agent.set_model(_cfg.get("lmstudio_model", "qwen2.5-1.5b-instruct"))
-        threading.Thread(target=_load_reformat, daemon=True).start()
-
-    # ------------------------------------------------------------------
-    # TaskFlow auto-launch — non-blocking, no-ops if never installed
-    # ------------------------------------------------------------------
-
-    def _ensure_taskflow() -> None:
-        if not _get_cfg().get("taskflow_enabled", True):
-            return
-        taskflow.ensure_running()
-        tray.set_taskflow_status(taskflow.check_health())
-
-    threading.Thread(target=_ensure_taskflow, daemon=True).start()
-
     # ------------------------------------------------------------------
     # HTTP API server (Phase 2)
     # ------------------------------------------------------------------
 
     if _cfg.get("api_server_enabled", True):
-        def _api_create_task(title: str, project=None) -> dict | None:
-            spec = taskflow.build_task_spec(title, project)
-            if not taskflow.check_health():
-                return None
-            return taskflow.create_task_from_spec(spec)
-
         def _api_patch_config(data: dict) -> None:
             try:
                 with open("config.json") as f:
@@ -991,7 +609,6 @@ def main() -> None:
         api_server.configure(
             get_config=_get_cfg,
             get_history=history.load,
-            create_task=_api_create_task,
             trigger_dictate=lambda: _on_recording_start() if transcribe.is_ready() and not audio.is_recording() else None,
             patch_config=_api_patch_config,
             port=_cfg.get("api_server_port", 8090),
@@ -1012,15 +629,9 @@ def main() -> None:
             pass
         threading.Thread(target=_load_model, daemon=True).start()
 
-    def _restart_lmstudio():
-        log("main", "user requested lmstudio restart")
-        threading.Thread(target=_load_reformat, daemon=True).start()
-
     health.configure(
         toast_fn=preview.show_toast,
         restart_whisper_fn=_restart_whisper,
-        restart_lmstudio_fn=_restart_lmstudio,
-        vibe_enabled_fn=lambda: _get_cfg().get("agent_command_mode_enabled", False),
     )
     health.start()
 
@@ -1041,13 +652,11 @@ def main() -> None:
                             "preview_position", "preview_auto_dismiss_seconds",
                             "auto_paste_threshold", "initial_prompt",
                             "custom_vocabulary", "input_device",
-                            "taskflow_enabled", "taskflow_trigger_phrases",
-                            "taskflow_trailing_trigger_phrases", "taskflow_readback_phrases",
-                            "taskflow_default_project", "taskflow_voice_confirm",
-                            "taskflow_direct_capture_modifiers",
-                            "snippets", "live_preview_enabled", "per_app_context",
+                            "live_preview_enabled", "per_app_context",
                             "retain_audio", "retain_audio_max_files",
-                            "retain_audio_min_seconds", "redact_patterns"):
+                            "retain_audio_min_seconds", "redact_patterns",
+                            "tts_speed", "tts_max_chunk_chars",
+                            "study_speed", "study_pause_scale"):
                     _cfg[key] = validated[key]
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],
@@ -1073,16 +682,6 @@ def main() -> None:
                 hotkey.rebind(new_keys)
                 with _cfg_lock:
                     _cfg["_active_hotkey"] = new_keys
-            # Sync agent_command_mode_enabled into tray menu
-            new_agent_cmd = validated.get("agent_command_mode_enabled", False)
-            if new_agent_cmd != _cfg.get("agent_command_mode_enabled"):
-                with _cfg_lock:
-                    _cfg["agent_command_mode_enabled"] = new_agent_cmd
-                tray.set_agent_command_mode(new_agent_cmd)
-                if new_agent_cmd and not reformat.is_ready():
-                    threading.Thread(target=_load_reformat, daemon=True).start()
-                elif not new_agent_cmd and reformat.is_ready():
-                    threading.Thread(target=reformat.unload, daemon=True).start()
             # Sync paste_mode state into tray menu
             new_paste_mode = validated.get("paste_mode", "auto")
             if new_paste_mode != _cfg.get("paste_mode"):
@@ -1096,18 +695,15 @@ def main() -> None:
                 with _cfg_lock:
                     _cfg["incognito"] = new_incognito
                 tray.set_incognito(new_incognito)
-            # Sync fitness_lmstudio_enabled into tray menu (Settings or tray
-            # may flip it) and boot/stop LM Studio to match.
-            new_fitness_lms = validated.get("fitness_lmstudio_enabled", False)
-            if new_fitness_lms != _cfg.get("fitness_lmstudio_enabled"):
+            # Sync study_mode into the tray, and with it the speed the picker
+            # shows: each mode carries its own rate.
+            new_study = validated.get("study_mode", False)
+            if new_study != _cfg.get("study_mode"):
                 with _cfg_lock:
-                    _cfg["fitness_lmstudio_enabled"] = new_fitness_lms
-                model = fresh.get("lmstudio_model", "qwen2.5-1.5b-instruct")
-                if new_fitness_lms:
-                    lmstudio_boot.boot(model)
-                else:
-                    lmstudio_boot.shutdown(model)
-                tray.set_fitness_lmstudio_enabled(new_fitness_lms)
+                    _cfg["study_mode"] = new_study
+                tray.set_study_mode(new_study)
+                tray.set_tts_speed(validated["study_speed"] if new_study
+                                   else validated["tts_speed"])
         except Exception as exc:
             log_error("main", f"config hot-reload failed: {exc}")
         t = threading.Timer(_HOT_RELOAD_INTERVAL, _reload_config)
@@ -1121,25 +717,6 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Tray
     # ------------------------------------------------------------------
-
-    def _on_toggle_agent_command_mode(enabled: bool) -> None:
-        global _cfg
-        with _cfg_lock:
-            _cfg["agent_command_mode_enabled"] = enabled
-        if enabled and not reformat.is_ready():
-            agent.set_model(_get_cfg().get("lmstudio_model", "qwen2.5-1.5b-instruct"))
-            threading.Thread(target=_load_reformat, daemon=True).start()
-        elif not enabled and reformat.is_ready():
-            threading.Thread(target=reformat.unload, daemon=True).start()
-        try:
-            with open("config.json") as f:
-                raw = json.load(f)
-            raw["agent_command_mode_enabled"] = enabled
-            with open("config.json", "w") as f:
-                json.dump(raw, f, indent=2)
-        except Exception:
-            pass
-        tray.set_agent_command_mode(enabled)
 
     def _on_toggle_clipboard_only(enabled: bool) -> None:
         global _cfg
@@ -1175,24 +752,38 @@ def main() -> None:
             pass
         tray.set_incognito(enabled)
 
-    def _on_toggle_fitness_lmstudio(enabled: bool) -> None:
-        global _cfg
-        with _cfg_lock:
-            _cfg["fitness_lmstudio_enabled"] = enabled
-        model = _get_cfg().get("lmstudio_model", "qwen2.5-1.5b-instruct")
-        if enabled:
-            lmstudio_boot.boot(model)
-        else:
-            lmstudio_boot.shutdown(model)
+    def _write_config_key(key: str, value) -> None:
         try:
             with open("config.json") as f:
                 raw = json.load(f)
-            raw["fitness_lmstudio_enabled"] = enabled
+            raw[key] = value
             with open("config.json", "w") as f:
                 json.dump(raw, f, indent=2)
         except Exception:
             pass
-        tray.set_fitness_lmstudio_enabled(enabled)
+
+    def _on_set_tts_speed(speed: float) -> None:
+        """The tray picker edits whichever mode is live, so a study pace never
+        overwrites the one picked for ordinary read-aloud."""
+        global _cfg
+        key = "study_speed" if _get_cfg().get("study_mode", False) else "tts_speed"
+        with _cfg_lock:
+            _cfg[key] = speed
+        _write_config_key(key, speed)
+        which = "Study mode" if key == "study_speed" else "Read-aloud"
+        preview.show_toast(f"{which} speed: {speed:g}x")
+
+    def _on_toggle_study_mode(enabled: bool) -> None:
+        global _cfg
+        with _cfg_lock:
+            _cfg["study_mode"] = enabled
+        _write_config_key("study_mode", enabled)
+        cfg = _get_cfg()
+        speed = cfg.get("study_speed", 0.95) if enabled else cfg.get("tts_speed", 1.0)
+        tray.set_tts_speed(speed)
+        preview.show_toast(
+            f"Study mode on — read-aloud pauses on structure at {speed:g}x."
+            if enabled else "Study mode off.")
 
     def _on_rebuild_voice_profile() -> None:
         def _worker() -> None:
@@ -1212,19 +803,17 @@ def main() -> None:
         on_view_profile=lambda: dashboard.open_window("home"),
         on_open_settings=lambda: dashboard.open_window("settings"),
         on_open_dashboard=lambda: dashboard.open_window("home"),
-        on_relaunch_taskflow=lambda: threading.Thread(target=taskflow.ensure_running, daemon=True).start(),
         on_toggle_clipboard_only=_on_toggle_clipboard_only,
         clipboard_only=_cfg.get("paste_mode", "auto") == "clipboard_only",
-        on_toggle_agent_command_mode=_on_toggle_agent_command_mode,
-        agent_command_mode=_cfg.get("agent_command_mode_enabled", False),
         on_rebuild_voice_profile=_on_rebuild_voice_profile,
         on_toggle_incognito=_on_toggle_incognito,
         incognito=_cfg.get("incognito", False),
-        on_toggle_fitness_lmstudio=_on_toggle_fitness_lmstudio,
-        fitness_lmstudio_enabled=_cfg.get("fitness_lmstudio_enabled", False),
+        on_toggle_study_mode=_on_toggle_study_mode,
+        study_mode=_cfg.get("study_mode", False),
+        on_set_tts_speed=_on_set_tts_speed,
+        tts_speed=(_cfg.get("study_speed", 0.95) if _cfg.get("study_mode", False)
+                   else _cfg.get("tts_speed", 1.0)),
     )
-    if _cfg.get("fitness_lmstudio_enabled", False):
-        lmstudio_boot.boot(_cfg.get("lmstudio_model", "qwen2.5-1.5b-instruct"))
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()
 

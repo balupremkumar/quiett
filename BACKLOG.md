@@ -3,8 +3,8 @@
 Ideas land here instead of being regenerated in chat.
 Tick when done, cull what no longer matters, add a date when adding items.
 
-- [ ] (2026-07-03) Voice profile / cloning: multi-sample build, local TTS (Qwen3 TTS feasibility), narrate mode.
-- [ ] (2026-07-03) Personal-assistant expansion of agent mode (open tab, go to site in current browser) — scoped design was approved 2026-07-01, verify what landed.
+- [ ] (2026-07-03) Voice profile / cloning: multi-sample build, local TTS (Qwen3 TTS feasibility), narrate mode. TTS shipped; narration next, see STUDY_MODE_PLAN.md.
+- [x] CULLED 2026-07-25: personal-assistant expansion of agent mode. Agent mode itself was deleted; do not reopen.
 - [ ] (2026-07-03) Remaining FluidVoice gap-analysis items not yet built (tier 2 minus item 9).
 
 ## Premium UI/UX revamp — 4-agent research (2026-07-10)
@@ -70,7 +70,7 @@ Impact H/M/L, Effort S/M/L.
 ### Dictionary and snippets
 
 41. [ ] Usage-ranked dictionary with starred/pinned terms getting transcription priority, auto-populated from user corrections. (H/M) — Wispr Flow.
-42. [ ] Voice-triggered snippets: say a trigger phrase, paste a predefined block. (M/M) — Wispr Flow cues.
+42. [x] CULLED 2026-07-25: voice-triggered snippets were built, then removed in the de-bloat pass. Do not rebuild without a fresh ruling.
 
 ### Onboarding / first-run
 

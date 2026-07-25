@@ -18,4 +18,4 @@ Rules:
 - Never restart by just launching run.bat or launch.vbs directly; that leaves stale copies running old code, which has repeatedly caused "the fix didn't work" false alarms.
 - After the restart, verify the fix by exercising the changed flow (dictate, check the log), not by the restart alone.
 - If the script prints FAIL, read the tailed log before attempting anything else.
-- LM Studio is intentionally NOT touched by this script; agent/vibe model loading is user-toggled.
+- LM Studio is intentionally NOT touched by this script; the Fitness Pal model load is user-toggled.

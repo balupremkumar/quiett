@@ -6,7 +6,6 @@ GET  /health                 ping
 GET  /history                recent dictation history (last N entries)
 GET  /config                 current config.json
 POST /config                 patch config.json fields (JSON body)
-POST /task                   create a task via TaskFlow
 POST /dictate                trigger a dictation capture programmatically
 GET  /diagnostics            whisper/hotkey/mic status for the dashboard's Diagnostics page
 POST /diagnostics/mic-probe  start a ~5s mic level test (409 while a real recording is active)
@@ -31,18 +30,16 @@ _port = 8090
 # Callbacks set by main.py at startup
 _get_config_fn   = None   # () -> dict
 _get_history_fn  = None   # () -> list
-_create_task_fn  = None   # (title: str, project: str | None) -> dict | None
 _trigger_dictate_fn = None  # () -> None
 _patch_config_fn = None   # (dict) -> None
 
 
-def configure(get_config, get_history, create_task, trigger_dictate, patch_config,
+def configure(get_config, get_history, trigger_dictate, patch_config,
               port: int = 8090) -> None:
-    global _get_config_fn, _get_history_fn, _create_task_fn
+    global _get_config_fn, _get_history_fn
     global _trigger_dictate_fn, _patch_config_fn, _port
     _get_config_fn      = get_config
     _get_history_fn     = get_history
-    _create_task_fn     = create_task
     _trigger_dictate_fn = trigger_dictate
     _patch_config_fn    = patch_config
     _port               = port
@@ -83,31 +80,6 @@ def patch_config():
         return jsonify({"status": "ok", "updated": list(data.keys())})
     except Exception as exc:
         warn("api", f"/config PATCH error: {exc}")
-        return jsonify({"error": str(exc)}), 500
-
-
-@_app.route("/task", methods=["POST"])
-def create_task():
-    """Create a task in TaskFlow.
-
-    Body: {"title": "...", "project": "..."} — project is optional.
-    Returns the created task object or an error.
-    """
-    try:
-        data = request.get_json(force=True) or {}
-        title   = (data.get("title") or "").strip()
-        project = data.get("project") or None
-        if not title:
-            return jsonify({"error": "title is required"}), 400
-        if not _create_task_fn:
-            return jsonify({"error": "task creation not available"}), 503
-        result = _create_task_fn(title, project)
-        if result is None:
-            return jsonify({"error": "TaskFlow unreachable"}), 503
-        log("api", f"/task created: {title!r}")
-        return jsonify({"status": "created", "task": result})
-    except Exception as exc:
-        warn("api", f"/task error: {exc}")
         return jsonify({"error": str(exc)}), 500
 
 

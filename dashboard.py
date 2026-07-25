@@ -108,17 +108,15 @@ _KNOWN_CONFIG_KEYS = frozenset({
     "silence_auto_stop_seconds", "preview_position", "preview_auto_dismiss_seconds",
     "auto_paste_threshold", "initial_prompt", "custom_vocabulary", "input_device",
     "history_paused", "silence_threshold", "per_app_paste", "per_app_context",
-    "electron_paste_method", "paste_mode", "hotkey_mode", "agent_hotkey",
-    "agent_mode_enabled", "agent_command_mode_enabled", "agent_trigger_phrases",
-    "api_server_enabled", "api_server_port", "lmstudio_model", "taskflow_enabled",
-    "taskflow_trigger_phrases", "taskflow_trailing_trigger_phrases",
-    "taskflow_direct_capture_modifiers", "taskflow_readback_phrases",
-    "taskflow_default_project", "taskflow_voice_confirm", "snippets",
-    "repaste_hotkey", "live_preview_enabled", "retain_audio",
+    "electron_paste_method", "paste_mode", "hotkey_mode",
+    "api_server_enabled", "api_server_port",
+    "live_preview_enabled", "retain_audio",
     "retain_audio_max_files", "retain_audio_min_seconds", "voice_profile_max_samples",
     "badge_animation", "incognito", "redact_patterns",
     "theme", "animations", "sound_volume", "history_max_entries",
     "recording_retention_days", "dashboard_scale",
+    "tts_enabled", "tts_speed", "tts_max_chunk_chars", "tts_reference",
+    "study_mode", "study_speed", "study_pause_scale",
 })
 
 _DIAG_API_BASE = "http://127.0.0.1:8090"
@@ -412,15 +410,7 @@ class DashboardAPI:
             whisper_ok = transcribe.server_alive()
         except Exception:
             whisper_ok = False
-        agent_enabled = bool(_read_cfg().get("agent_command_mode_enabled", False))
-        lmstudio_ok = None
-        if agent_enabled:
-            try:
-                import llm_client
-                lmstudio_ok = llm_client.is_available()
-            except Exception:
-                lmstudio_ok = False
-        return {"whisper_ok": whisper_ok, "agent_enabled": agent_enabled, "lmstudio_ok": lmstudio_ok}
+        return {"whisper_ok": whisper_ok}
 
     def get_history(self, limit: int = 200) -> list:
         entries = hist.load()
@@ -1202,8 +1192,6 @@ select option{background:var(--surf2);color:var(--txt)}
   <div class="chip-row" id="sourceChips">
     <button class="chip active" data-src="all" onclick="setSourceFilter('all')">All</button>
     <button class="chip" data-src="" onclick="setSourceFilter('')">Dictation</button>
-    <button class="chip" data-src="taskflow" onclick="setSourceFilter('taskflow')">TaskFlow</button>
-    <button class="chip" data-src="agent" onclick="setSourceFilter('agent')">Agent</button>
   </div>
   <div class="bulk-bar" id="bulkBar" style="display:none">
     <label class="bulk-all"><input type="checkbox" id="selectAllChk" onchange="selectAllToggle(this.checked)"> Select all</label>
@@ -1350,6 +1338,47 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
+      <div class="s-sec-ttl">Read-aloud<button class="sec-reset-btn" onclick="resetSection('readaloud')">Reset section</button></div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Enable read-aloud</div><div class="s-lbl-s">Ctrl+Shift+S speaks the highlighted text in your cloned voice. The voice server only starts on first use and unloads when idle</div></div>
+        <div class="tog" data-key="tts_enabled" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
+             role="switch" aria-checked="false" aria-label="Enable read-aloud" tabindex="0"><div class="tog-k"></div></div>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Speed</div><div class="s-lbl-s">Playback rate for normal read-aloud. Pitch is preserved, so slower still sounds like you</div></div>
+        <div class="range-row">
+          <input class="range-in" type="range" id="ttsSpeedRange" data-key="tts_speed"
+                 min="0.5" max="2" step="0.05"
+                 oninput="document.getElementById('ttsSpeedLbl').textContent=Number(this.value).toFixed(2)+'x'">
+          <span id="ttsSpeedLbl" class="range-val" style="width:52px">1.00x</span>
+        </div>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Study mode</div><div class="s-lbl-s">Same hotkey, teacher-style delivery: pauses land on sentences, paragraphs, lists and headings instead of running flat</div></div>
+        <div class="tog" data-key="study_mode" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
+             role="switch" aria-checked="false" aria-label="Study mode" tabindex="0"><div class="tog-k"></div></div>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Study speed</div><div class="s-lbl-s">Rate used while study mode is on, kept separate so it does not overwrite the speed above</div></div>
+        <div class="range-row">
+          <input class="range-in" type="range" id="studySpeedRange" data-key="study_speed"
+                 min="0.5" max="2" step="0.05"
+                 oninput="document.getElementById('studySpeedLbl').textContent=Number(this.value).toFixed(2)+'x'">
+          <span id="studySpeedLbl" class="range-val" style="width:52px">0.95x</span>
+        </div>
+      </div>
+      <div class="s-row">
+        <div class="s-lbl"><div class="s-lbl-t">Study pause length</div><div class="s-lbl-s">Scales every study-mode pause. Raise it to leave more thinking room between sentences</div></div>
+        <div class="range-row">
+          <input class="range-in" type="range" id="studyPauseRange" data-key="study_pause_scale"
+                 min="0" max="3" step="0.1"
+                 oninput="document.getElementById('studyPauseLbl').textContent=Number(this.value).toFixed(1)+'x'">
+          <span id="studyPauseLbl" class="range-val" style="width:52px">1.0x</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="s-sec">
       <div class="s-sec-ttl">Transcription<button class="sec-reset-btn" onclick="resetSection('transcription')">Reset section</button></div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Language</div><div class="s-lbl-s">ISO code, e.g. en, fr, de</div></div>
@@ -1417,14 +1446,6 @@ select option{background:var(--surf2);color:var(--txt)}
     </div>
 
     <div class="s-sec">
-      <div class="s-sec-ttl">Agent Command Mode<button class="sec-reset-btn" onclick="resetSection('agent')">Reset section</button></div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">LM Studio model</div><div class="s-lbl-s">Model identifier as shown in lms ls (e.g. qwen/qwen2.5-1.5b-instruct)</div></div>
-        <input class="t-in wide" type="text" data-key="lmstudio_model">
-      </div>
-    </div>
-
-    <div class="s-sec">
       <div class="s-sec-ttl">System</div>
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Start with Windows</div><div class="s-lbl-s">Launch hidden at logon via Task Scheduler</div></div>
@@ -1438,24 +1459,6 @@ select option{background:var(--surf2);color:var(--txt)}
       <div class="s-row">
         <div class="s-lbl"><div class="s-lbl-t">Import settings</div><div class="s-lbl-s">Load settings from a previously exported JSON file</div></div>
         <button class="btn btn-s" onclick="importSettings()">Import settings</button>
-      </div>
-    </div>
-
-    <div class="s-sec">
-      <div class="s-sec-ttl">TaskFlow integration<button class="sec-reset-btn" onclick="resetSection('taskflow')">Reset section</button></div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Enable TaskFlow</div><div class="s-lbl-s">Voice triggers create tasks in TaskFlow</div></div>
-        <div class="tog" data-key="taskflow_enabled" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
-             role="switch" aria-checked="false" aria-label="Enable TaskFlow" tabindex="0"><div class="tog-k"></div></div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Voice confirmation</div><div class="s-lbl-s">Speak the task title back after creating it</div></div>
-        <div class="tog" data-key="taskflow_voice_confirm" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
-             role="switch" aria-checked="false" aria-label="Voice confirmation" tabindex="0"><div class="tog-k"></div></div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Default project</div><div class="s-lbl-s">Project name for new tasks (leave blank for none)</div></div>
-        <input class="t-in" type="text" data-key="taskflow_default_project">
       </div>
     </div>
 
@@ -1523,8 +1526,8 @@ select option{background:var(--surf2);color:var(--txt)}
       <div class="s-lbl-s" style="font-size:12.5px;line-height:1.7">
         Speech recognition by <strong style="color:var(--txt2)">whisper.cpp</strong>
         (large-v3-turbo, Vulkan build) — ggml-org/whisper.cpp, MIT licence.<br>
-        Agent command mode via <strong style="color:var(--txt2)">LM Studio</strong> +
-        Qwen2.5-1.5B-Instruct.
+        Cloned-voice read-aloud by <strong style="color:var(--txt2)">qwentts.cpp</strong>
+        (Qwen3-TTS, Vulkan build) — MIT licence, Apache 2.0 weights.
       </div>
     </div>
     <div class="dict-sec">
@@ -2096,6 +2099,13 @@ async function loadSettings() {
   const silRange = document.getElementById('silenceAutoStopRange');
   if (silRange) document.getElementById('silenceAutoStopLbl').textContent = silenceAutoStopLabel(silRange.value);
 
+  // Read-aloud rate labels — the sliders carry the value, these show it
+  [['ttsSpeedRange', 'ttsSpeedLbl', 2], ['studySpeedRange', 'studySpeedLbl', 2],
+   ['studyPauseRange', 'studyPauseLbl', 1]].forEach(([rangeId, lblId, dp]) => {
+    const r = document.getElementById(rangeId);
+    if (r) document.getElementById(lblId).textContent = Number(r.value).toFixed(dp) + 'x';
+  });
+
   // Autostart state lives in Task Scheduler, not config
   try {
     const on = await window.pywebview.api.get_autostart();
@@ -2122,6 +2132,10 @@ const _SECTION_DEFAULTS = {
     min_record_seconds: 0.5, max_record_seconds: 120,
     silence_auto_stop_seconds: 3, vad_filter: false,
   },
+  readaloud: {
+    tts_enabled: false, tts_speed: 1.0,
+    study_mode: false, study_speed: 0.95, study_pause_scale: 1.0,
+  },
   transcription: { language: 'en', filler_words: [], initial_prompt: '' },
   paste: {
     paste_mode: 'auto', clipboard_restore_delay_ms: 150,
@@ -2131,16 +2145,11 @@ const _SECTION_DEFAULTS = {
     history_max_entries: '100', recording_retention_days: '0',
     incognito: false, redact_patterns: [],
   },
-  agent: { lmstudio_model: 'qwen2.5-1.5b-instruct' },
-  taskflow: {
-    taskflow_enabled: true, taskflow_voice_confirm: false,
-    taskflow_default_project: '',
-  },
 };
 const _SECTION_LABELS = {
   appearance: 'Appearance', audio: 'Audio', recording: 'Recording',
-  transcription: 'Transcription', paste: 'Paste', history: 'History',
-  agent: 'Agent Command Mode', taskflow: 'TaskFlow integration',
+  readaloud: 'Read-aloud', transcription: 'Transcription',
+  paste: 'Paste', history: 'History',
 };
 
 function applyDefaultsToForm(defaults) {
@@ -2171,6 +2180,15 @@ function applyDefaultsToForm(defaults) {
     if (key === 'silence_auto_stop_seconds') {
       const lbl = document.getElementById('silenceAutoStopLbl');
       if (lbl) lbl.textContent = silenceAutoStopLabel(val);
+    }
+    const rateLbls = {
+      tts_speed: ['ttsSpeedLbl', 2], study_speed: ['studySpeedLbl', 2],
+      study_pause_scale: ['studyPauseLbl', 1],
+    };
+    if (rateLbls[key]) {
+      const [lblId, dp] = rateLbls[key];
+      const lbl = document.getElementById(lblId);
+      if (lbl) lbl.textContent = Number(val).toFixed(dp) + 'x';
     }
   });
 }
@@ -2423,10 +2441,6 @@ async function refreshBackendStatus() {
       dot.style.background = 'var(--danger)';
       txt.textContent = 'Whisper down';
       dot.title = "Whisper server isn't responding. It restarts automatically.";
-    } else if (st.agent_enabled && st.lmstudio_ok === false) {
-      dot.style.background = 'var(--warn)';
-      txt.textContent = 'LM Studio down';
-      dot.title = 'Agent command mode needs LM Studio running locally.';
     } else {
       dot.style.background = 'var(--success)';
       txt.textContent = 'Ready';

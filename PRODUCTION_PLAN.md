@@ -10,8 +10,8 @@ Execution order at the bottom is the resume point.
 - Engine: whisper.cpp server (Vulkan, large-v3-turbo-q5_0) as a child process, HTTP transcription. Solid, shippable, MIT licence.
 - Capture: sounddevice; hotkeys via `keyboard` lib low-level hook (needs admin in some setups — installer implication).
 - Injection: clipboard paste with save/restore (inject.py, 38KB — battle-tested incl. RDP sticky-modifier fix).
-- Agent mode: LM Studio + Qwen2.5-1.5B. **Hard commercial blocker: customers will not install LM Studio.** See Part 5.
-- TaskFlow integration: personal, must become an optional plugin or be feature-flagged off in the sold build.
+- ~~Agent mode: LM Studio + Qwen2.5-1.5B~~, ~~TaskFlow integration~~ and ~~Local FitnessPal divert~~ — all DELETED from the product 2026-07-25 (de-bloat ruling). No LLM ships with, or is required by, this app any more, which removes the LM Studio redistribution blocker outright.
+- Read-aloud: qwentts.cpp server (Vulkan, Qwen3-TTS), MIT code and Apache 2.0 weights, subprocess with idle reaper. Shippable; see STUDY_MODE_PLAN.md for where narration is heading.
 
 ### UI surfaces (the polish targets)
 1. **Preview panel** (preview.py, 97KB Tkinter): themed, Segoe UI Variable, toasts, badges, edge-flash. Biggest file, monolithic.
@@ -21,7 +21,7 @@ Execution order at the bottom is the resume point.
 5. **First-run experience: none.** App assumes a configured dev machine. This is the single biggest gap to sellable.
 
 ### What is already production-grade
-Transcription quality pipeline (reformat, corrections, snippets), clipboard injection robustness, lazy LLM loading, health checks, history, multi-res icon export plumbing (tray.export_ico), create_shortcut.ps1.
+Transcription quality pipeline (corrections, custom vocabulary, speech profile), clipboard injection robustness, health checks, history, read-aloud with study mode, multi-res icon export plumbing (tray.export_ico), create_shortcut.ps1. (Reformat and snippets were removed 2026-07-25.)
 
 ### What is not
 No installer, no onboarding, no brand, placeholder icon, personal integrations baked in, config.json hand-edited paths, models/ path assumptions, no crash reporting, no update channel, no licence gate, GPL risk unchecked (see Part 5).
@@ -74,7 +74,7 @@ Reference products to tear down: Wispr Flow, SuperWhisper (mac), Windows Voice A
 ### 4.1 Build pipeline
 - PyInstaller **onedir** (not onefile: slow start, more AV false-positives) → `dist/<AppName>/`.
 - Bundle: whisper-server.exe + Vulkan deps, NOT the model (574MB — download on first run with checksum + resume).
-- Exclusions audit: strip tests, recordings/, profile.db, history.json, TaskFlow module behind a feature flag.
+- Exclusions audit: strip tests, recordings/, profile.db, history.json.
 - Smoke script: launch exe on a VM without Python, run one dictation.
 
 ### 4.2 Installer (Inno Setup)
@@ -90,12 +90,12 @@ Reference products to tear down: Wispr Flow, SuperWhisper (mac), Windows Voice A
 
 ### 4.4 Licence gate
 - Offline-validatable signed licence key (Ed25519 signature over email+tier+expiry), sold via LemonSqueezy or Polar.sh (they handle GST/VAT — matters for NZ).
-- Free tier: full dictation, watermark-free; Paid: agent mode, profiles, priority models. Keeps piracy pressure low.
+- Free tier: full dictation, watermark-free; Paid: cloned-voice read-aloud and study mode, profiles, priority models. Keeps piracy pressure low. (Was "agent mode"; that feature no longer exists.)
 
 ## Part 5 — Legal/commercial blockers (check before any sale)
 
 1. **`keyboard` lib is MIT — but verify; `pystray` LGPL** (dynamic linking OK, document it). Full pip-licenses audit needed.
-2. **LM Studio cannot be redistributed or required.** Agent mode options: (a) bundle llama.cpp server (MIT) + Qwen GGUF, (b) make agent mode "advanced, BYO OpenAI-compatible endpoint", (c) cut from v1. Recommend (c) then (a).
+2. ~~**LM Studio cannot be redistributed or required.**~~ Resolved 2026-07-25: nothing in the app uses LM Studio now. Blocker closed.
 3. Qwen2.5-1.5B is Apache-2.0 — fine if we later bundle. Whisper large-v3-turbo weights MIT. whisper.cpp MIT. All fine.
 4. EULA + privacy policy (one page: "audio never leaves your machine, recordings stored locally at X, delete anytime").
 5. Third-party licence NOTICE file generated into the installer.
@@ -106,7 +106,7 @@ Each step is one session-sized chunk; tick as done.
 
 - [ ] **P1. Name decision** (Balu) + domain check → rulings.md.
 - [ ] **P2. Icon set**: master SVG + scripts/make_icons.py + tray.py loads assets; design-critique the 16px. (No name needed if glyph-only.)
-- [ ] **P3. Feature-flag personal bits**: TaskFlow, voice-profile, agent mode behind config flags defaulting off in "product" mode.
+- [ ] **P3. Feature-flag personal bits**: voice-profile / cloned-voice reference behind a config flag defaulting off in "product" mode. (TaskFlow, agent mode and the Fitness Pal divert were deleted outright 2026-07-25, so they need no flag.)
 - [ ] **P4. Dashboard design-token pass** + light theme fix-ups (design suite, full order).
 - [ ] **P5. Onboarding wizard** in dashboard incl. model downloader.
 - [ ] **P6. PyInstaller onedir build** + smoke on clean VM.

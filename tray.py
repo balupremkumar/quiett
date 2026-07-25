@@ -336,80 +336,48 @@ def _stop_pulse() -> None:
 _on_open_settings = None
 _on_toggle_clipboard_only = None
 _clipboard_only   = False
-_on_relaunch_taskflow = None
-_taskflow_status  = "unknown"   # "running" | "down" | "unknown"
-_task_count       = 0           # tasks added to TaskFlow this session
-_on_toggle_agent_command_mode = None
-_agent_command_mode = False
 _on_rebuild_voice_profile = None
 _on_toggle_incognito = None
 _incognito = False
-_on_toggle_fitness_lmstudio = None
-_fitness_lmstudio_enabled = False
+_on_set_tts_speed = None
+_tts_speed = 1.0
+_on_toggle_study_mode = None
+_study_mode = False
 
 
 def configure(on_view_history, on_toggle_pause=None,
               on_view_profile=None, on_open_settings=None,
               on_toggle_clipboard_only=None, clipboard_only: bool = False,
-              on_relaunch_taskflow=None,
-              on_toggle_agent_command_mode=None, agent_command_mode: bool = False,
               on_rebuild_voice_profile=None, on_open_dashboard=None,
               on_toggle_incognito=None, incognito: bool = False,
-              on_toggle_fitness_lmstudio=None, fitness_lmstudio_enabled: bool = False) -> None:
+              on_set_tts_speed=None, tts_speed: float = 1.0,
+              on_toggle_study_mode=None, study_mode: bool = False) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
-    global _on_toggle_clipboard_only, _clipboard_only, _on_relaunch_taskflow
-    global _on_toggle_agent_command_mode, _agent_command_mode
+    global _on_toggle_clipboard_only, _clipboard_only
     global _on_rebuild_voice_profile, _on_open_dashboard
     global _on_toggle_incognito, _incognito
-    global _on_toggle_fitness_lmstudio, _fitness_lmstudio_enabled
+    global _on_set_tts_speed, _tts_speed
+    global _on_toggle_study_mode, _study_mode
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
     _on_open_settings = on_open_settings
     _on_toggle_clipboard_only = on_toggle_clipboard_only
     _clipboard_only   = clipboard_only
-    _on_relaunch_taskflow = on_relaunch_taskflow
-    _on_toggle_agent_command_mode = on_toggle_agent_command_mode
-    _agent_command_mode = agent_command_mode
     _on_rebuild_voice_profile = on_rebuild_voice_profile
     _on_open_dashboard = on_open_dashboard if on_open_dashboard else on_view_profile
     _on_toggle_incognito = on_toggle_incognito
     _incognito = incognito
-    _on_toggle_fitness_lmstudio = on_toggle_fitness_lmstudio
-    _fitness_lmstudio_enabled = fitness_lmstudio_enabled
-
-
-def increment_task_count() -> None:
-    """Call once per task successfully created via voice this session."""
-    global _task_count
-    _task_count += 1
-    if _icon is not None:
-        _icon.update_menu()
-
-
-def set_taskflow_status(running: bool) -> None:
-    """Keep the tray's TaskFlow status line in sync (called from the health
-    checks already made when creating/reading tasks — no extra polling)."""
-    global _taskflow_status
-    new_status = "running" if running else "down"
-    if new_status != _taskflow_status:
-        _taskflow_status = new_status
-        if _icon is not None:
-            _icon.update_menu()
+    _on_set_tts_speed = on_set_tts_speed
+    _tts_speed = tts_speed
+    _on_toggle_study_mode = on_toggle_study_mode
+    _study_mode = study_mode
 
 
 def set_clipboard_only(enabled: bool) -> None:
     """Keep tray menu in sync when paste_mode changes externally (e.g. hot-reload)."""
     global _clipboard_only
     _clipboard_only = enabled
-    if _icon is not None:
-        _icon.update_menu()
-
-
-def set_agent_command_mode(enabled: bool) -> None:
-    """Keep tray menu in sync when agent_command_mode_enabled changes externally."""
-    global _agent_command_mode
-    _agent_command_mode = enabled
     if _icon is not None:
         _icon.update_menu()
 
@@ -425,11 +393,20 @@ def set_incognito(enabled: bool) -> None:
         _icon.update_menu()
 
 
-def set_fitness_lmstudio_enabled(enabled: bool) -> None:
-    """Keep tray menu in sync when fitness_lmstudio_enabled changes externally
-    (Settings page or hot-reload)."""
-    global _fitness_lmstudio_enabled
-    _fitness_lmstudio_enabled = enabled
+def set_study_mode(enabled: bool) -> None:
+    """Keep the tray in sync when study_mode changes externally (Settings page
+    or hot-reload)."""
+    global _study_mode
+    _study_mode = enabled
+    if _icon is not None:
+        _icon.update_menu()
+
+
+def set_tts_speed(speed: float) -> None:
+    """Keep the speed picker showing the live mode's rate. Called when the
+    study toggle flips, since each mode carries its own speed."""
+    global _tts_speed
+    _tts_speed = speed
     if _icon is not None:
         _icon.update_menu()
 
@@ -591,6 +568,35 @@ def _mic_menu_items():
         )
 
 
+_TTS_SPEEDS = (0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5)
+
+
+def _select_tts_speed(speed: float):
+    def _handler(icon, item):
+        global _tts_speed
+        _tts_speed = speed
+        if _on_set_tts_speed:
+            _on_set_tts_speed(speed)
+        icon.update_menu()
+    return _handler
+
+
+def _tts_speed_items():
+    """Playback rate for read-aloud (Ctrl+Shift+S). Pitch is preserved, so a
+    slower rate still sounds like the same voice. The picker edits whichever
+    mode is live, so setting a study pace never overwrites the normal one."""
+    yield pystray.MenuItem(
+        lambda _: f"Setting: {'study mode' if _study_mode else 'normal'}",
+        lambda icon, item: None, enabled=False,
+    )
+    for speed in _TTS_SPEEDS:
+        label = "Normal (1x)" if speed == 1.0 else f"{speed:g}x"
+        yield pystray.MenuItem(
+            label, _select_tts_speed(speed),
+            checked=lambda item, s=speed: abs(_tts_speed - s) < 1e-6, radio=True,
+        )
+
+
 def run() -> None:
     global _icon
 
@@ -635,20 +641,16 @@ def run() -> None:
             _on_toggle_clipboard_only(_clipboard_only)
         icon.update_menu()
 
-    def _toggle_agent_command_mode(icon, item):
-        global _agent_command_mode
-        _agent_command_mode = not _agent_command_mode
-        if _on_toggle_agent_command_mode:
-            _on_toggle_agent_command_mode(_agent_command_mode)
-        icon.update_menu()
-
-    def _relaunch_taskflow(icon, item):
-        if _on_relaunch_taskflow:
-            _on_relaunch_taskflow()
-
     def _rebuild_voice_profile(icon, item):
         if _on_rebuild_voice_profile:
             _on_rebuild_voice_profile()
+
+    def _toggle_study_mode(icon, item):
+        global _study_mode
+        _study_mode = not _study_mode
+        if _on_toggle_study_mode:
+            _on_toggle_study_mode(_study_mode)
+        icon.update_menu()
 
     def _toggle_incognito(icon, item):
         global _incognito
@@ -658,21 +660,6 @@ def run() -> None:
         icon.title = _with_incognito_suffix(
             _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}"))
         icon.update_menu()
-
-    def _toggle_fitness_lmstudio(icon, item):
-        global _fitness_lmstudio_enabled
-        _fitness_lmstudio_enabled = not _fitness_lmstudio_enabled
-        if _on_toggle_fitness_lmstudio:
-            _on_toggle_fitness_lmstudio(_fitness_lmstudio_enabled)
-        icon.update_menu()
-
-    def _taskflow_label(_item) -> str:
-        if _taskflow_status == "unknown":
-            return "TaskFlow: —"
-        return f"TaskFlow: {'Running' if _taskflow_status == 'running' else 'Down — click to relaunch'}"
-
-    def _task_count_label(_item) -> str:
-        return f"Tasks added this session: {_task_count}"
 
     # Timed-pause flyout: durations + Resume (only enabled while paused)
     pause_menu = pystray.Menu(
@@ -686,16 +673,14 @@ def run() -> None:
     # Rebuilt on every open (callable menus) so they never show stale data
     recent_menu = pystray.Menu(_recent_history_items)
     mic_menu = pystray.Menu(_mic_menu_items)
+    tts_speed_menu = pystray.Menu(_tts_speed_items)
 
     # Rare/utility actions tucked away so the top level stays short
     more_menu = pystray.Menu(
-        pystray.MenuItem("Agent Command Mode", _toggle_agent_command_mode, checked=lambda item: _agent_command_mode),
         pystray.MenuItem("Clipboard Only", _toggle_clipboard_only, checked=lambda item: _clipboard_only),
         pystray.MenuItem("Microphone", mic_menu),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem(_taskflow_label, _relaunch_taskflow),
-        pystray.MenuItem(_task_count_label, lambda icon, item: None, enabled=False),
-        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Read-aloud Speed", tts_speed_menu),
         pystray.MenuItem("Speech Profile", _view_profile),
         pystray.MenuItem("Rebuild Voice Profile", _rebuild_voice_profile),
         pystray.MenuItem("Open Config", _open_config),
@@ -710,9 +695,8 @@ def run() -> None:
         pystray.MenuItem("Recent Dictations", recent_menu),
         pystray.MenuItem("Settings",     _open_settings),
         pystray.MenuItem(lambda _: "Paused" if _paused else "Pause", pause_menu),
+        pystray.MenuItem("Study Mode", _toggle_study_mode, checked=lambda item: _study_mode),
         pystray.MenuItem("Incognito", _toggle_incognito, checked=lambda item: _incognito),
-        pystray.MenuItem("Fitness Pal (LM Studio)", _toggle_fitness_lmstudio,
-                          checked=lambda item: _fitness_lmstudio_enabled),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("More", more_menu),
         pystray.Menu.SEPARATOR,

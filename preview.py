@@ -25,11 +25,9 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageTk
 
 import audio
 import chime
-import history as hist
 import hotkey
 import inject
 import profile
-import taskflow
 import tray
 import widgets
 import winfx
@@ -62,7 +60,6 @@ _settings_q:     queue.Queue = queue.Queue()
 _badge_q:        queue.Queue = queue.Queue()
 _toast_q:        queue.Queue = queue.Queue()
 _flash_q:        queue.Queue = queue.Queue()
-_agent_q:        queue.Queue = queue.Queue()
 _root:        tk.Tk | None = None
 _ready = threading.Event()
 
@@ -204,21 +201,12 @@ def show(text: str, hwnd: int, empty: bool = False,
          words: list | None = None,
          auto_dismiss: float = 0.0,
          raw: str | None = None,
-         reformat_backend: str | None = None,
-         task_mode: bool = False,
          duration: float = 0.0,
          incognito: bool = False) -> None:
     """Queue a dictation preview window. raw= is the unmodified Whisper
     transcript before filler-stripping/punctuation/correction cleanup;
     `text` is the cleaned version shown by default. When the two differ,
     the panel shows a Raw/Cleaned toggle (item 9).
-
-    reformat_backend: kept for backward compatibility, currently unused —
-    there is no LLM cleanup backend to distinguish any more.
-
-    task_mode: when True, this is a TaskFlow trigger-phrase capture — the
-    panel relabels to "Add Task" and confirming creates a TaskFlow task
-    instead of pasting.
 
     duration: seconds of recorded audio, when known — powers the speaking-pace
     (WPM) footer metric. 0.0 when unavailable.
@@ -230,9 +218,7 @@ def show(text: str, hwnd: int, empty: bool = False,
     _preview_q.put({"text": text, "hwnd": hwnd, "empty": empty,
                     "confidence": confidence, "words": words,
                     "auto_dismiss": auto_dismiss, "raw": raw,
-                    "reformat_backend": reformat_backend,
-                    "task_mode": task_mode, "duration": duration,
-                    "incognito": incognito})
+                    "duration": duration, "incognito": incognito})
 
 
 def show_profile() -> None:
@@ -280,11 +266,6 @@ def set_rerecord_callback(fn) -> None:
     """Set the callback invoked when user presses Ctrl+R in the preview panel."""
     global _on_rerecord
     _on_rerecord = fn
-
-
-def show_agent_confirm(desc: str, confirm_cb) -> None:
-    """Show a modal confirm gate for an agent action. Safe to call from any thread."""
-    _agent_q.put({"desc": desc, "cb": confirm_cb})
 
 
 _partial_q: queue.Queue = queue.Queue()
@@ -386,8 +367,6 @@ def _tick() -> None:
                     latest_preview.get("auto_dismiss", 0.0),
                     latest_preview.get("words"),
                     latest_preview.get("raw"),
-                    latest_preview.get("reformat_backend"),
-                    latest_preview.get("task_mode", False),
                     latest_preview.get("duration", 0.0),
                     latest_preview.get("incognito", False),
                 )
@@ -398,7 +377,7 @@ def _tick() -> None:
                 _show_edge_flash(_BLUE)
 
     # Live-update waveform badge
-    if _badge_state in ("recording", "recording_task", "processing") and _badge_alive():
+    if _badge_state in ("recording", "processing") and _badge_alive():
         _draw_badge_frame()
 
     # Always drain these queues so items don't accumulate while a window is open
@@ -468,17 +447,6 @@ def _tick() -> None:
         except queue.Empty:
             break
 
-    # Drain agent confirm queue
-    while True:
-        try:
-            a = _agent_q.get_nowait()
-            try:
-                _open_agent_confirm(a["desc"], a["cb"])
-            except Exception as exc:
-                log_error("preview", f"agent confirm error: {exc}")
-        except queue.Empty:
-            break
-
     _root.after(50, _tick)
 
 
@@ -500,7 +468,7 @@ def _show_anchored_toast(t: dict) -> None:
 
     if kind == "error":
         # Audible cue only for genuine errors (item 45/48) — warn/info stay
-        # visual-only so routine notices (TaskFlow down, undo, etc.) don't add noise.
+        # visual-only so routine notices (undo, clipboard fallback) don't add noise.
         chime.play_error()
 
     win = tk.Toplevel(_root)
@@ -599,9 +567,7 @@ def _show_edge_flash(colour: str) -> None:
 
 _BADGE_CFG = {
     "recording":      {"accent": "#e03030", "logo_bg": (210,  30,  30), "status": "Recording…"},
-    "recording_task": {"accent": "#22c55e", "logo_bg": ( 34, 197,  94), "status": "Recording task…"},  # green — Ctrl+Shift+Alt task capture
     "processing":     {"accent": "#c8a000", "logo_bg": (200, 160,   0), "status": "Processing…"},
-    "reformatting":   {"accent": "#7b5ea7", "logo_bg": (123,  94, 167), "status": "Cleaning up…"},
     "too_short":      {"accent": "#888888", "text": "Hold longer to record"},
     "not_ready":      {"accent": "#888888", "text": "Model loading, please wait"},
     # Designed error states (BACKLOG item 48) — red accent + a plain-English
@@ -678,7 +644,7 @@ def _badge_stop_clicked(_event=None) -> None:
     """Finish the recording now — identical to releasing the hotkey.
     Dispatched off the Tk thread since audio.stop() calls straight back into
     main.py's transcription pipeline."""
-    if _badge_state not in ("recording", "recording_task"):
+    if _badge_state != "recording":
         return
     threading.Thread(target=audio.stop, daemon=True).start()
 
@@ -686,7 +652,7 @@ def _badge_stop_clicked(_event=None) -> None:
 def _badge_cancel_clicked(_event=None) -> None:
     """Discard the recording — no transcription, mirrors a too-short release
     without the "hold longer" toast, since this is a deliberate cancel."""
-    if _badge_state not in ("recording", "recording_task"):
+    if _badge_state != "recording":
         return
 
     def _do() -> None:
@@ -703,7 +669,7 @@ def _badge_cancel_clicked(_event=None) -> None:
 
 def _badge_hover_set(visible: bool) -> None:
     global _badge_hover_visible
-    if visible and _badge_state not in ("recording", "recording_task"):
+    if visible and _badge_state != "recording":
         return
     if _badge_hover_visible == visible:
         return
@@ -1115,7 +1081,7 @@ def _draw_badge_frame() -> None:
             # when animations are off — no phase advance, no live audio
             # levels, just a fixed neutral amplitude.
             targets = [0.4] * _WAVE_BAR_N
-        elif _badge_state in ("recording", "recording_task"):
+        elif _badge_state == "recording":
             levels = audio.get_recent_levels(_WAVE_BAR_N)
             silence = audio.get_silence_elapsed()
             timeout = audio.get_silence_timeout()
@@ -1179,12 +1145,12 @@ def _draw_badge_frame() -> None:
                 except Exception:
                     pass
 
-        if _badge_time is not None and _badge_state in ("recording", "recording_task"):
+        if _badge_time is not None and _badge_state == "recording":
             elapsed = int(audio.get_elapsed())
             new_t = f"{elapsed // 60}:{elapsed % 60:02d}"
             if _badge_time.cget("text") != new_t:
                 _badge_time.config(text=new_t)
-        elif _badge_time is not None and _badge_state not in ("recording", "recording_task"):
+        elif _badge_time is not None and _badge_state != "recording":
             if _badge_time.cget("text") != "":
                 _badge_time.config(text="")
     except Exception:
@@ -1329,7 +1295,7 @@ def _handle_badge(cmd: str | None) -> None:
         return
 
     cfg = _BADGE_CFG.get(cmd, _BADGE_CFG["processing"])
-    needs_wave = cmd in ("recording", "recording_task", "processing", "reformatting")
+    needs_wave = cmd in ("recording", "processing")
 
     # Rebuild if widget type doesn't match the new state
     have_wave = _badge_canvas is not None
@@ -1362,7 +1328,7 @@ def _handle_badge(cmd: str | None) -> None:
     # Live update existing badge
     if needs_wave:
         if prev != cmd:
-            if cmd not in ("recording", "recording_task"):
+            if cmd != "recording":
                 # e.g. recording -> processing: stale hover controls from the
                 # recording state shouldn't linger on a badge that can no
                 # longer be stopped/cancelled (item 8).
@@ -1496,8 +1462,6 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                  auto_dismiss: float = 0.0,
                  words: list | None = None,
                  raw: str | None = None,
-                 reformat_backend: str | None = None,
-                 task_mode: bool = False,
                  duration: float = 0.0,
                  incognito: bool = False) -> None:
     global _current_preview_win
@@ -1515,15 +1479,12 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     win.attributes("-topmost", True)
     win.attributes("-alpha", 0.0)   # winfx fades in at end
 
-    # Task-mode gets its own accent (green) instead of the normal blue, applied
-    # consistently to the outer ring, heading, entry border, button, and chip —
-    # so a task capture is unmistakable from a normal paste preview at a glance.
-    accent    = _TASK if task_mode else _BLUE
-    accent_hv = _TASK_HV if task_mode else _BLUE_HV
+    accent    = _BLUE
+    accent_hv = _BLUE_HV
 
-    # 1-pixel outer ring for depth (task mode: accent-coloured, thicker)
-    ring = tk.Frame(win, bg=(accent if task_mode else _BORDER2), bd=0)
-    ring.pack(fill=tk.BOTH, expand=True, padx=(2 if task_mode else 1), pady=(2 if task_mode else 1))
+    # 1-pixel outer ring for depth
+    ring = tk.Frame(win, bg=_BORDER2, bd=0)
+    ring.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
 
     # Premium accent bar — 3px coloured strip at the very top
     tk.Frame(ring, bg=accent, height=3).pack(fill=tk.X, side=tk.TOP)
@@ -1547,12 +1508,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     # drag below, the pin button is excluded so its own click still toggles.
     header_row = tk.Frame(frame, bg=_BG, cursor="fleur")
     header_row.pack(fill=tk.X, pady=(0, 8))
-    if task_mode:
-        title_lbl = tk.Label(header_row, text="Add to To-Do List", bg=_BG, fg=accent,
-                             font=(_FONT_FAM_DISPLAY, 11, "bold"), anchor="w", cursor="fleur")
-    else:
-        title_lbl = tk.Label(header_row, text="VoiceDictate", bg=_BG, fg=_FG3,
-                             font=(_FONT_FAM_DISPLAY, 9, "normal"), anchor="w", cursor="fleur")
+    title_lbl = tk.Label(header_row, text="VoiceDictate", bg=_BG, fg=_FG3,
+                         font=(_FONT_FAM_DISPLAY, 9, "normal"), anchor="w", cursor="fleur")
     title_lbl.pack(side=tk.LEFT)
     # Status dot: green = ready to insert, grey = nothing usable.
     # A text glyph, not a Canvas oval — ClearType antialiases it for free.
@@ -1574,7 +1531,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         pin_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
     # Paste destination — so it's obvious where Enter sends the text
-    dest = "TaskFlow" if task_mode else _target_app_label(hwnd)
+    dest = _target_app_label(hwnd)
     dest_lbl = None
     if dest:
         dest_lbl = tk.Label(header_row, text=f"→  {dest}", bg=_BG, fg=_FG2,
@@ -1583,8 +1540,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
     # ── Text entry ─────────────────────────────────────────────────────────
     if empty:
-        display = ("Heard the trigger phrase, but no task text after it — try again"
-                   if task_mode else "Nothing detected — try again")
+        display = "Nothing detected — try again"
     else:
         display = text
     entry = tk.Text(
@@ -1708,7 +1664,6 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
             pass
 
     def on_insert(submit: bool = False) -> None:
-        submit = submit and not task_mode
         result = entry.get("1.0", "end-1c").rstrip()
         if not empty:
             side = "raw" if _showing_raw[0] else "cleaned"
@@ -1725,71 +1680,6 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                         action_cb=(lambda w=w_out, c=c_out: profile.delete_rule(w, c)),
                     )
 
-        if task_mode:
-            # Prime + close immediately, same as the normal Insert path below —
-            # the health-check/POST round-trip then runs off the Tk thread so
-            # the UI is never blocked waiting on the network.
-            inject.prime_foreground(hwnd)
-            _close()
-
-            def _relaunch() -> None:
-                threading.Thread(target=taskflow.ensure_running, daemon=True).start()
-
-            def _confirm_task() -> None:
-                try:
-                    if taskflow.is_duplicate(result):
-                        log("taskflow", f"duplicate skipped (task mode): {result!r}")
-                        show_toast(f"Already added recently: {result}", kind="info")
-                        return
-                    if not taskflow.check_health():
-                        warn("taskflow", "health check failed in task mode — aborting task creation")
-                        if taskflow.record_health_check(False):
-                            show_toast("TaskFlow seems to be down.", kind="warn",
-                                      action_label="Relaunch", action_cb=_relaunch)
-                        else:
-                            show_toast("TaskFlow isn't running — pasted instead.", kind="warn")
-                        inject.inject_text(result, hwnd)
-                        return
-                    taskflow.record_health_check(True)
-                    try:
-                        with open(_CONFIG_FILE, encoding="utf-8") as f:
-                            default_project = json.load(f).get("taskflow_default_project") or None
-                    except Exception:
-                        default_project = None
-                    spec = taskflow.build_task_spec(result, default_project)
-                    created = taskflow.create_task_from_spec(spec)
-                    if created is None:
-                        warn("taskflow", f"create_task_from_spec returned None for {result!r}")
-                        show_toast("Couldn't reach TaskFlow — pasted instead.", kind="warn")
-                        inject.inject_text(result, hwnd)
-                        return
-                    title = spec.get("title", result)
-                    task_id = created.get("id")
-                    chime.play_task_added()
-                    tray.increment_task_count()
-                    try:
-                        with open(_CONFIG_FILE, encoding="utf-8") as f:
-                            voice_confirm = json.load(f).get("taskflow_voice_confirm", False)
-                    except Exception:
-                        voice_confirm = False
-                    if voice_confirm:
-                        chime.speak(f"Added {title} to your to-do list")
-                    hist.save(title, source="taskflow")
-
-                    def _undo() -> None:
-                        if task_id and taskflow.delete_task(task_id):
-                            show_toast(f"Removed: {title}", kind="info")
-
-                    show_toast(f"Added to to-do list: {title}", kind="info",
-                              action_label="Undo" if task_id else "",
-                              action_cb=_undo if task_id else None)
-                except Exception as exc:
-                    log_error("taskflow", f"_confirm_task unhandled exception: {exc}")
-                    show_toast("Error adding task — check app.log.", kind="warn")
-
-            threading.Thread(target=_confirm_task, daemon=True).start()
-            return
-
         # Prime focus on target BEFORE closing preview — while we still own the foreground,
         # SetForegroundWindow is guaranteed to succeed. Closing first creates a vacuum where
         # Windows blocks the call (anti-focus-steal protection).
@@ -1803,7 +1693,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         _close()
 
     insert_btn = tk.Button(
-        btns, text=("Add to List" if task_mode else "Insert"), command=on_insert, width=10,
+        btns, text="Insert", command=on_insert, width=10,
         bg=accent, fg="#ffffff",
         activebackground=accent_hv, activeforeground="#ffffff",
         relief="flat", bd=0,
@@ -1881,9 +1771,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
                  fg=_FG2, font=_FONT_CHIP).pack(side=tk.LEFT)
         outer.pack(side=tk.LEFT, padx=(0, 6))
 
-    _chip(chip_row, "↵",       "Add to List" if task_mode else "Insert", accent=True, key_color=accent)
-    if not task_mode:
-        _chip(chip_row, "Ctrl+↵", "Insert & Send")
+    _chip(chip_row, "↵",       "Insert", accent=True, key_color=accent)
+    _chip(chip_row, "Ctrl+↵", "Insert & Send")
     _chip(chip_row, "Esc",     "Cancel")
     _chip(chip_row, "Ctrl+R",  "Re-record")
     _chip(chip_row, "Shift+↵", "Newline")
@@ -2048,7 +1937,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     winfx.apply_rounded_region(win, radius=12)
     _play_entrance(win, 1.0, dy=_px(14), duration_ms=200)
     if not empty:
-        target_border = accent if task_mode else _border_colour(confidence)
+        target_border = _border_colour(confidence)
         winfx.ease_color(entry, "highlightbackground", _BORDER, target_border,
                          duration_ms=260, steps=10)
 
@@ -2140,68 +2029,6 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
         _dismiss_cancel_ref[0] = _dismiss_cancel
         _dismiss_start()
-
-
-def _open_agent_confirm(desc: str, confirm_cb) -> None:
-    """Modal confirm gate for agent actions. Runs on the tkinter thread."""
-    win = tk.Toplevel(_root)
-    win.title("Agent Command")
-    win.configure(bg=_BG)
-    win.resizable(False, False)
-    win.attributes("-topmost", True)
-    win.attributes("-alpha", 0.0)
-    winfx.apply_rounded_region(win, radius=12)
-
-    # Accent top bar (orange for agent)
-    accent_bar = tk.Frame(win, bg="#f97316", height=3)
-    accent_bar.pack(fill=tk.X, side=tk.TOP)
-
-    body = tk.Frame(win, bg=_BG)
-    body.pack(fill=tk.BOTH, expand=True, padx=24, pady=(18, 14))
-
-    tk.Label(body, text="Run this command?", bg=_BG, fg=_FG,
-             font=(_FONT_FAM_DISPLAY, 13, "bold")).pack(anchor="w")
-
-    tk.Label(body, text=desc, bg=_BG2, fg=_FG,
-             font=_FONT_BODY, wraplength=380, justify="left",
-             padx=12, pady=8).pack(fill=tk.X, pady=(10, 0))
-
-    hint = tk.Label(body, text="Enter to run  ·  Esc to cancel",
-                    bg=_BG, fg=_FG3, font=_FONT_HINT)
-    hint.pack(anchor="w", pady=(8, 0))
-
-    btns = tk.Frame(body, bg=_BG)
-    btns.pack(fill=tk.X, pady=(14, 0))
-
-    def do_run():
-        win.destroy()
-        if confirm_cb:
-            threading.Thread(target=confirm_cb, daemon=True).start()
-
-    def do_cancel():
-        win.destroy()
-
-    tk.Button(btns, text="Cancel", command=do_cancel,
-              bg=_BG2, fg=_FG2, activebackground=_BG3, activeforeground=_FG,
-              relief="flat", bd=0, font=_FONT_BTN, padx=12, pady=6,
-              cursor="hand2").pack(side=tk.RIGHT, padx=(6, 0))
-    tk.Button(btns, text="Run", command=do_run,
-              bg="#f97316", fg="#ffffff", activebackground="#ea6900",
-              activeforeground="#ffffff", relief="flat", bd=0,
-              font=_FONT_BTN, padx=16, pady=6, cursor="hand2").pack(side=tk.RIGHT)
-
-    win.bind("<Return>", lambda _: do_run())
-    win.bind("<Escape>", lambda _: do_cancel())
-
-    win.update_idletasks()
-    sw = win.winfo_screenwidth()
-    sh = win.winfo_screenheight()
-    w  = win.winfo_reqwidth()
-    h  = win.winfo_reqheight()
-    win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
-
-    winfx.fade_in(win, target=0.97, duration_ms=150)
-    win.focus_force()
 
 
 # ---------------------------------------------------------------------------
@@ -2602,92 +2429,12 @@ def _open_settings() -> None:
             rb.pack(side=tk.LEFT, padx=(0, 16))
         return p
 
-    def build_agent() -> tk.Frame:
-        p = tk.Frame(pages_holder, bg=_BG)
-        _h2(p, "Agent Command Mode").pack(fill=tk.X, padx=22, pady=(18, 6))
-        _note(p, "Voice command execution via local LLM. Enable to launch LM Studio "
-                 "and load the model. Disable to unload it and free VRAM.").pack(
-            fill=tk.X, padx=22, pady=(0, 12))
-
-        agent_cmd_var = tk.BooleanVar(value=bool(cfg.get("agent_command_mode_enabled", False)))
-        state["agent_cmd_var"] = agent_cmd_var
-        _toggle_row(p, "Enable Agent Command Mode", agent_cmd_var,
-                    sub="Launches LM Studio on enable; unloads model on disable.")
-
-        _note(p, "Hotkey: Ctrl+Shift+C — hold to record a command, release to classify and confirm.").pack(
-            fill=tk.X, padx=22, pady=(12, 0))
-        _note(p, "Supported commands: open Chrome, search for X, run git status, type Hello.").pack(
-            fill=tk.X, padx=22, pady=(4, 0))
-
-        _label(p, "Model (shared with Vibe Mode)").pack(fill=tk.X, padx=22, pady=(16, 2))
-        model_var_agent = tk.StringVar(value=cfg.get("lmstudio_model", "qwen/qwen3-8b"))
-        state["lmstudio_model_var"] = model_var_agent
-        _entry(p, model_var_agent).pack(fill=tk.X, padx=22)
-        _note(p, "Must be installed in LM Studio. Smaller models (1B–3B) work well for command classification.").pack(
-            fill=tk.X, padx=22, pady=(2, 0))
-        return p
-
-    def build_todo() -> tk.Frame:
-        p = tk.Frame(pages_holder, bg=_BG)
-        _h2(p, "To-Do List").pack(fill=tk.X, padx=22, pady=(18, 6))
-        _note(p, "Voice capture into TaskFlow. Phrases are checked at the start "
-                 "(or end) of each sentence, so they work mid-conversation too.").pack(
-            fill=tk.X, padx=22, pady=(0, 12))
-
-        taskflow_var = tk.BooleanVar(value=bool(cfg.get("taskflow_enabled", True)))
-        state["taskflow_var"] = taskflow_var
-        _toggle_row(p, "Enable TaskFlow capture", taskflow_var,
-                    sub="Also gates the read-back and mark-done voice commands below.")
-
-        voice_confirm_var = tk.BooleanVar(value=bool(cfg.get("taskflow_voice_confirm", False)))
-        state["voice_confirm_var"] = voice_confirm_var
-        _toggle_row(p, "Speak confirmations", voice_confirm_var,
-                    sub="Use Windows text-to-speech to confirm tasks added/completed, "
-                        "for when you're not looking at the screen.")
-
-        default_project_var = tk.StringVar(value=cfg.get("taskflow_default_project", ""))
-        state["default_project_var"] = default_project_var
-        _label(p, "Default project (TaskFlow project name, optional)").pack(
-            fill=tk.X, padx=22, pady=(14, 2))
-        _entry(p, default_project_var).pack(fill=tk.X, padx=22)
-        _note(p, "Used when a task isn't routed to a project by saying "
-                 "'...to my <Project> list'.").pack(fill=tk.X, padx=22, pady=(2, 0))
-
-        _label(p, "Leading trigger phrases — one per line, checked at the start "
-                  "of a sentence").pack(fill=tk.X, padx=22, pady=(14, 2))
-        leading_txt = _text_area(p, 4)
-        leading_txt.insert("1.0", "\n".join(cfg.get("taskflow_trigger_phrases", [])))
-        leading_txt.pack(fill=tk.X, padx=22)
-        state["taskflow_leading_txt"] = leading_txt
-
-        _label(p, "Trailing trigger phrases — one per line, checked at the end "
-                  "of a sentence (e.g. 'buy milk, add that to my list')").pack(
-            fill=tk.X, padx=22, pady=(14, 2))
-        trailing_txt = _text_area(p, 3)
-        trailing_txt.insert("1.0", "\n".join(cfg.get("taskflow_trailing_trigger_phrases", [])))
-        trailing_txt.pack(fill=tk.X, padx=22)
-        state["taskflow_trailing_txt"] = trailing_txt
-
-        _label(p, "Read-back phrases — one per line (e.g. \"what's on my to-do list\")").pack(
-            fill=tk.X, padx=22, pady=(14, 2))
-        readback_txt = _text_area(p, 3)
-        readback_txt.insert("1.0", "\n".join(cfg.get("taskflow_readback_phrases", [])))
-        readback_txt.pack(fill=tk.X, padx=22)
-        state["taskflow_readback_txt"] = readback_txt
-
-        _note(p, "Mark-done ('mark X as done') is always on while TaskFlow capture "
-                 "is enabled — no separate phrase list needed.").pack(
-            fill=tk.X, padx=22, pady=(8, 0))
-        return p
-
     PAGE_DEFS = [
         ("Audio",          build_audio),
         ("Hotkey",         build_hotkey),
         ("Transcription",  build_transcription),
         ("Behaviour",      build_behaviour),
         ("Appearance",     build_appearance),
-        ("Agent Commands", build_agent),
-        ("To-Do List",     build_todo),
     ]
 
     # ── Build sidebar items ────────────────────────────────────────────────
@@ -2815,21 +2562,7 @@ def _open_settings() -> None:
             "custom_vocabulary":           vocab,
             "input_device":                mic_idx,
             "history_paused":              state["history_paused_var"].get(),
-            "agent_command_mode_enabled":  state["agent_cmd_var"].get(),
-            "lmstudio_model":              state["lmstudio_model_var"].get().strip() or "qwen/qwen3-8b",
             "theme":                       state["theme_var"].get(),
-            "taskflow_enabled":            state["taskflow_var"].get(),
-            "taskflow_voice_confirm":      state["voice_confirm_var"].get(),
-            "taskflow_default_project":    state["default_project_var"].get().strip(),
-            "taskflow_trigger_phrases":    [l.strip() for l in
-                                             state["taskflow_leading_txt"].get("1.0", "end-1c").splitlines()
-                                             if l.strip()],
-            "taskflow_trailing_trigger_phrases": [l.strip() for l in
-                                                   state["taskflow_trailing_txt"].get("1.0", "end-1c").splitlines()
-                                                   if l.strip()],
-            "taskflow_readback_phrases":   [l.strip() for l in
-                                             state["taskflow_readback_txt"].get("1.0", "end-1c").splitlines()
-                                             if l.strip()],
         })
 
         try:

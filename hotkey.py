@@ -15,7 +15,7 @@ _paused              = False
 _press_time: float   = 0.0
 _hotkey_mode         = "hold"   # "hold" | "toggle" | "auto"
 _toggle_armed        = False    # True once all mods went down together (toggle mode)
-_external_recording  = False    # True when agent/rewrite mode started the recording
+_external_recording  = False    # True when something other than the hold hotkey started the recording
 
 _MIN_HOLD_MS = 300  # ms — ignore releases faster than this
 
@@ -66,7 +66,7 @@ def set_paused(val: bool) -> None:
 
 
 def set_external_recording(active: bool) -> None:
-    """Prevent hold-mode stop logic while agent/rewrite recording is active."""
+    """Prevent hold-mode stop logic while an externally started recording runs."""
     global _external_recording
     _external_recording = active
 

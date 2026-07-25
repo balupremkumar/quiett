@@ -72,54 +72,17 @@
   "electron_paste_method": "ctrl_v",
   "paste_mode": "auto",
   "hotkey_mode": "hold",
-  "agent_hotkey": "ctrl+shift+c",
-  "agent_mode_enabled": true,
-  "agent_command_mode_enabled": false,
-  "agent_trigger_phrases": [
-    "hey computer",
-    "computer run",
-    "computer open"
-  ],
   "api_server_enabled": true,
   "api_server_port": 8090,
-  "lmstudio_model": "qwen2.5-1.5b-instruct",
   "silence_threshold": 0.01,
   "preview_auto_dismiss_seconds": 0,
   "auto_paste_threshold": 0.0,
   "history_paused": false,
-  "taskflow_enabled": true,
-  "taskflow_trigger_phrases": [
-    "add this to TaskFlow",
-    "add to my tasks",
-    "add a task"
-  ],
-  "taskflow_trailing_trigger_phrases": [
-    "add that to TaskFlow",
-    "add that to my tasks",
-    "add that as a task"
-  ],
-  "taskflow_direct_capture_modifiers": [
-    "ctrl",
-    "shift",
-    "alt"
-  ],
-  "taskflow_readback_phrases": [
-    "what's on my to-do list",
-    "what's on my list",
-    "read my tasks",
-    "what are my tasks"
-  ],
-  "taskflow_default_project": "",
-  "taskflow_voice_confirm": false,
   "vad_silence_mode": false,
   "theme": "light",
   "animations": true,
   "badge_animation": "waveform",
   "sound_volume": 100,
-  "snippets": {
-    "insert my email": "you@example.com"
-  },
-  "repaste_hotkey": "ctrl+shift+space",
   "live_preview_enabled": true,
   "retain_audio": true,
   "retain_audio_max_files": 200,
@@ -135,7 +98,6 @@
     "w": 980,
     "h": 660
   },
-  "fitness_lmstudio_enabled": false,
   "panel_position": {
     "\\\\.\\DISPLAY1": {
       "x": 1410,
