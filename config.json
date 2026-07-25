@@ -81,7 +81,7 @@
   "vad_silence_mode": false,
   "theme": "light",
   "animations": true,
-  "badge_animation": "waveform",
+  "badge_animation": "pulse",
   "sound_volume": 100,
   "live_preview_enabled": true,
   "retain_audio": true,
@@ -103,5 +103,11 @@
       "x": 1410,
       "y": 843
     }
-  }
+  },
+  "dashboard_scale": "100",
+  "incognito": false,
+  "redact_patterns": [],
+  "study_mode": false,
+  "study_speed": 0.95,
+  "study_pause_scale": 1.0
 }
