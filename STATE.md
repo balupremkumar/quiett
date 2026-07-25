@@ -33,8 +33,9 @@ P0 results so far: PyTorch/ROCm path FAILS latency for both engines (ROCm 7.13 a
 2026-07-25 (later still): Fitness Pal divert removed too, on Balu's call. Deleted fitness.py, lmstudio_boot.py and their tests; stripped the food-log branch, fitness_* and lmstudio_model config, the tray "Fitness Pal (LM Studio)" toggle, and the whole LM Studio half of health.py and the dashboard status dot. LM Studio is now unused by this app. 93 tests pass. Handover written to D:\Dev\ai\handovers\voice-dictation-to-local-fitness-pal.md.
 
 ## Next steps
-- [ ] Balu to answer the open questions in STUDY_MODE_PLAN.md (4 in the doc) plus the merge/verify decision before more is built.
-- [ ] Merge flightdeck/pi9oo2 (read-aloud pace fix + speed control) into main, restart the app, click through More → Read-aloud Speed and speak a long selection.
+- [x] 2026-07-25: merged to main, committed 7446f43 + 65edfd6, pushed (4a64704..65edfd6), app restarted on it (PID 11356).
+- [ ] Balu's hands-on pass on the new build: tray Study Mode toggle, More → Read-aloud Speed (it edits whichever mode is live), dashboard Settings → Read-aloud section renders, and a real Ctrl+Shift+S over a study passage in both modes.
+- [ ] Balu to answer the 3 questions still open at the end of STUDY_MODE_PLAN.md before P3 (transport controls) is considered.
 - [ ] LATER, when Balu asks (he builds the app first): fitness.py + trigger phrases ("food log" etc.) posting raw transcripts to local-fitness-pal on 127.0.0.1:8091 — taskflow.py pattern, spec in that project's ARCHITECTURE.md §4. Voice-dictation stays otherwise uninvolved in that project.
 - [ ] Balu hands-on checks, batches 2-4: dictate once (waveform, badge status row, hover stop/cancel, slide+fade, WPM footer, countdown bar + pin), drag the panel header and reopen, tray right-click (grouped menu, Recent Dictations, Pause submenu, More → Microphone), tray left-click opens dashboard, history chips/pin/bulk select, >30s recording confirm.
 - [x] Ruled 2026-07-11: drag wins over fixed position; VERSION stays 0.1.0; Win11-only; pin emoji stays; popup stack decision waits for Balu's real-use test.
