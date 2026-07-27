@@ -65,6 +65,10 @@ _cfg_lock = threading.Lock()
 
 _UNDO_PHRASES = {"scratch that", "undo that", "undo last insert"}
 
+# Foreground window captured at hotkey-down, used as the paste target when the
+# one at hotkey-up is unusable (our own badge/panel had focus).
+_recording_target: dict = {"hwnd": 0}
+
 _HOT_RELOAD_INTERVAL = 30  # seconds
 
 
@@ -360,9 +364,17 @@ def main() -> None:
         # Incognito (item 86): single gate for both the transcript and the
         # raw audio — nothing from this dictation reaches disk.
         incognito = cfg.get("incognito", False)
-        audio_file = _save_recording(chunks, cfg) if text.strip() and not incognito else None
-        if text.strip() and not cfg.get("history_paused", False) and not incognito:
-            history.save(text.strip(), audio=audio_file)
+
+        def _persist() -> None:
+            """Write the WAV and the history entry, then tell an open dashboard
+            to refresh. Deliberately off the critical path: a 100-second
+            dictation is a ~3 MB WAV plus an fsync, and doing that before the
+            panel appears was a visible stall between speaking and seeing the
+            text."""
+            audio_file = _save_recording(chunks, cfg) if text.strip() and not incognito else None
+            if text.strip() and not cfg.get("history_paused", False) and not incognito:
+                history.save(text.strip(), audio=audio_file)
+                dashboard.notify_change("history")
 
         # Per-app auto-paste ("auto_paste": true in per_app_context) skips the
         # preview entirely for trusted apps; the global confidence threshold
@@ -372,6 +384,7 @@ def main() -> None:
         if text.strip() and (app_auto or (threshold > 0.0 and confidence is not None
                                           and confidence >= threshold)):
             inject.inject_text(text.strip(), hwnd)
+            threading.Thread(target=_persist, daemon=True).start()
             return
 
         preview.show(
@@ -384,11 +397,22 @@ def main() -> None:
             raw=raw_text,
             incognito=incognito,
         )
+        threading.Thread(target=_persist, daemon=True).start()
 
     def _on_audio_stop(chunks: list) -> None:
         hotkey.set_external_recording(False)  # release hold-mode suppression
         inject.flush_hotkey_modifiers_async()  # un-stick modifiers in a focused RDP session
+        # Target resolution, best evidence first: whoever is in front now, else
+        # whoever was in front when the hotkey went down. The second case is
+        # real — our own badge or a leftover preview panel holding focus at
+        # release used to mean "no paste target" and the dictation only ever
+        # reached the clipboard (app.log 2026-07-27 18:46:17).
         hwnd = inject.capture_foreground()
+        if not hwnd:
+            fallback = _recording_target.get("hwnd", 0)
+            if inject.is_usable_target(fallback):
+                hwnd = fallback
+                log("main", f"paste target fell back to the hotkey-down window hwnd={hwnd}")
         duration = (sum(len(c) for c in chunks) / audio.SAMPLE_RATE) if chunks else 0.0
 
         tray.set_state("processing")
@@ -441,6 +465,10 @@ def main() -> None:
                 preview.set_partial_text(txt)
 
     def _on_recording_start() -> None:
+        # Capture before anything of ours can take focus (closing the panel,
+        # raising the badge) — at hotkey-down the app the user is dictating
+        # into is by definition in front.
+        _recording_target["hwnd"] = inject.capture_foreground(quiet=True)
         preview.close_current_preview()
         # No unconditional edge flash here — the badge's own entrance animation
         # is the "hotkey registered" signal; flash_screen_edge is now only a

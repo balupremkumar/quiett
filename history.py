@@ -1,7 +1,10 @@
+import contextlib
 import json
+import msvcrt
 import os
 import re
 import threading
+import time
 from datetime import datetime, timedelta
 
 from logger import warn as log_warn
@@ -9,10 +12,48 @@ from logger import warn as log_warn
 HISTORY_FILE = "history.json"
 _CONFIG_FILE = "config.json"
 _RECORDINGS_DIR = "recordings"
+_LOCK_FILE = "history.lock"
 MAX_ENTRIES = 100  # default cap; overridden by config.json's history_max_entries
 _REDACTED = "▊▊▊"
 
 _lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def transaction():
+    """Guard a read-modify-write of history.json across threads and processes.
+
+    The dashboard runs in its own process, so a delete or a pin there and a
+    dictation saved by the main app can interleave: both read the same list,
+    both write it back, and one of the two changes vanishes. The file lock
+    makes the pair serialise. Never blocks forever — after ~2.5s it proceeds
+    anyway, on the grounds that losing one edit beats hanging the UI."""
+    with _lock:
+        handle = None
+        locked = False
+        try:
+            handle = open(_LOCK_FILE, "a+b")
+            for _ in range(50):
+                try:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        except OSError as exc:  # read-only dir, AV lock — degrade, don't crash
+            log_warn("history", f"file lock unavailable: {exc}")
+        try:
+            yield
+        finally:
+            if handle is not None:
+                if locked:
+                    try:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+                handle.close()
 
 
 def _redact(text: str, patterns: list) -> str:
@@ -32,7 +73,7 @@ def _redact(text: str, patterns: list) -> str:
 
 
 def save(text: str, source: str | None = None, audio: str | None = None) -> None:
-    with _lock:
+    with transaction():
         cfg = _read_cfg()
         text = _redact(text, cfg.get("redact_patterns", []))
         entries = _load()
@@ -53,16 +94,20 @@ def load() -> list:
 
 
 def clear() -> None:
-    with _lock:
+    with transaction():
         _write([])
 
 
-def set_pinned(index: int, pinned: bool) -> bool:
+def set_pinned(index: int, pinned: bool, stamp: str = "") -> bool:
     """Pin/unpin the entry at index (as returned by get_history). Pinned
-    entries are exempt from the entry cap and from audio auto-delete."""
-    with _lock:
+    entries are exempt from the entry cap and from audio auto-delete.
+
+    stamp is the entry's timestamp; when given it decides which row is meant,
+    since a dictation arriving in between shifts every index down one."""
+    with transaction():
         entries = _load()
-        if not (0 <= index < len(entries)):
+        index = resolve_index(entries, index, stamp)
+        if index < 0:
             return False
         if pinned:
             entries[index]["pinned"] = True
@@ -72,10 +117,27 @@ def set_pinned(index: int, pinned: bool) -> bool:
         return True
 
 
+def resolve_index(entries: list, idx: int, stamp: str) -> int:
+    """Map a row a UI is showing onto its position in the list now.
+
+    New dictations are inserted at the front, so any index held by an open
+    window goes stale the moment the user speaks, and acting on it would hit
+    the wrong dictation. Timestamps carry microseconds, so they identify a row
+    exactly. Returns -1 when the row is gone."""
+    if not stamp:
+        return idx if 0 <= idx < len(entries) else -1
+    if 0 <= idx < len(entries) and entries[idx].get("timestamp") == stamp:
+        return idx
+    for i, entry in enumerate(entries):
+        if entry.get("timestamp") == stamp:
+            return i
+    return -1
+
+
 def purge() -> None:
     """Enforce the configured entry cap and recording-age retention. Safe to
     call repeatedly (idempotent); pinned entries are exempt from both."""
-    with _lock:
+    with transaction():
         entries = _load()
         cfg = _read_cfg()
         entries = _enforce_cap(entries, _cap_from_cfg(cfg))

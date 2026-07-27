@@ -125,3 +125,48 @@ class TestCaptureForeground:
         monkeypatch.setattr(inject, "_user32", self._fake_user32(99999))
         monkeypatch.setattr(inject, "_get_exe_name", lambda h: "notepad.exe")
         assert inject.capture_foreground() == 4242
+
+    def test_quiet_capture_does_not_warn(self, monkeypatch):
+        """The hotkey-down capture is speculative — our own window in front
+        there is normal and must not log a paste-target warning."""
+        import os
+        warnings = []
+        monkeypatch.setattr(inject, "warn", lambda *a: warnings.append(a))
+        _win32gui.GetForegroundWindow.return_value = 4242
+        monkeypatch.setattr(inject, "_user32", self._fake_user32(os.getpid()))
+        assert inject.capture_foreground(quiet=True) == 0
+        assert warnings == []
+        assert inject.capture_foreground() == 0
+        assert warnings  # the real capture still reports it
+
+
+class TestIsUsableTarget:
+    """Guards the hotkey-down fallback target: a remembered hwnd is only
+    reused while it is still a live, visible window that isn't ours."""
+
+    def test_zero_is_not_usable(self):
+        assert inject.is_usable_target(0) is False
+
+    def test_live_foreign_window_is_usable(self, monkeypatch):
+        _win32gui.IsWindow.return_value = True
+        _win32gui.IsWindowVisible.return_value = True
+        monkeypatch.setattr(inject, "_is_own_window", lambda h: False)
+        assert inject.is_usable_target(4242) is True
+
+    def test_closed_window_is_not_usable(self, monkeypatch):
+        _win32gui.IsWindow.return_value = False
+        _win32gui.IsWindowVisible.return_value = True
+        monkeypatch.setattr(inject, "_is_own_window", lambda h: False)
+        assert inject.is_usable_target(4242) is False
+
+    def test_hidden_window_is_not_usable(self, monkeypatch):
+        _win32gui.IsWindow.return_value = True
+        _win32gui.IsWindowVisible.return_value = False
+        monkeypatch.setattr(inject, "_is_own_window", lambda h: False)
+        assert inject.is_usable_target(4242) is False
+
+    def test_own_window_is_not_usable(self, monkeypatch):
+        _win32gui.IsWindow.return_value = True
+        _win32gui.IsWindowVisible.return_value = True
+        monkeypatch.setattr(inject, "_is_own_window", lambda h: True)
+        assert inject.is_usable_target(4242) is False

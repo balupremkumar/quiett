@@ -163,3 +163,130 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 98. [ ] Reduce-transparency setting honoured: disable acrylic when Windows says so. (L/S)
 99. [ ] Deferred model load: boot instantly, load whisper on first hotkey hold with a "warming up" pill state. (M/M)
 100. [ ] Idle resource respect: auto-unload whisper after N idle minutes, footprint shown in diagnostics. (M/M)
+
+## Smoother, faster, more accurate — third batch (2026-07-27)
+
+Scope guard: dictation in, read-aloud out. Nothing here reintroduces agent mode, TaskFlow or the fitness divert.
+Grounded in the 2026-07-27 corpus pass (100 real dictations, 200 recordings) and the window/insert bugs found the same day.
+Impact H/M/L, Effort S/M/L.
+
+### Accuracy — dictionary and the model
+
+101. [ ] Correction learning from panel edits: when the text is edited before inserting, diff it against the transcript and offer the substitution as a `corrections` entry. (H/M)
+102. [ ] Dictionary page shows each correction's hit count and last-fired date, so dead entries can be culled. (M/S)
+103. [ ] Bulk-import vocabulary from a project's own files (README, CLAUDE.md, config keys) to seed domain terms per app. (H/M)
+104. [ ] Per-app initial_prompt already exists in `per_app_context`; expose it in Settings instead of hand-editing config.json. (M/S)
+105. [ ] Warn when initial_prompt plus vocabulary exceeds Whisper's 224-token prompt budget — silently truncated today. (H/S)
+106. [ ] Confidence-weighted correction suggestions: surface the lowest-probability words from the response as dictionary candidates. (H/M)
+107. [ ] "Re-transcribe with corrections" on a history entry, using its stored WAV and the current dictionary. (H/M)
+108. [ ] Batch re-transcribe all retained recordings after a dictionary change, and report what changed. (M/M)
+109. [ ] Homophone pass for NZ place and company names (Christchurch, Selwyn, Harcourt, Kove) driven by the vocabulary, not one-off corrections. (M/M)
+110. [ ] Flag likely mistranscriptions at dictation time: unknown capitalised tokens, mid-word splits, words with no dictionary entry. (H/M)
+111. [ ] Keep the raw transcript in history alongside the cleaned one, so post-processing changes can be replayed over past dictations. (H/S)
+112. [ ] Spoken spelling mode: "spell it, K O V E" inserts the letters as a word. (M/M)
+113. [ ] Number formatting policy setting: prose ("one solution") vs data ("1 solution"), instead of hardcoded rules. (M/S)
+114. [ ] Currency and unit handling: "twenty dollars fifty" to $20.50, "five k" to 5k. (M/M)
+115. [ ] Recognise dictated file paths and keep them intact ("D drive dev AI projects"). (M/M)
+116. [ ] Auto-capitalise known product names anywhere in the sentence, from the vocabulary list. (M/S) — single-word terms landed 2026-07-27; widen to multi-word terms.
+117. [ ] Sentence-level confidence in the panel: dim any sentence below a threshold so it gets read before inserting. (H/M)
+118. [ ] Language-model rescoring pass over the n-best whisper output using the vocabulary. (H/L)
+119. [ ] Compare large-v3-turbo against large-v3 on the 200-recording corpus and record the WER difference before changing the default. (M/M)
+120. [ ] Build a permanent regression corpus: 20 recordings plus their agreed correct text, run as a scored test. (H/M)
+121. [ ] Track per-session accuracy: corrections applied per 1000 words, trending over time, on the Diagnostics page. (M/M)
+122. [ ] Strip the trailing "..." and stray quote marks Whisper adds when a recording ends mid-breath. (M/S)
+123. [ ] Handle mid-sentence self-corrections better ("go to the settings, no, the diagnostics page"). (M/M)
+124. [ ] Configurable auto-punctuation strength: as-spoken, light, or full. (M/M)
+125. [ ] Dictating into code contexts (VS Code, terminal) with punctuation and casing rules that suit code, not prose. (M/M)
+
+### Speed and responsiveness
+
+126. [ ] Stream the final transcription as it decodes rather than waiting for the whole response, so the panel fills progressively. (H/M)
+127. [ ] Keep whisper-server warm with a periodic no-op so the first dictation after an idle hour isn't slower. (M/S)
+128. [ ] Show time-to-text in the panel footer (release to panel), so regressions are visible in normal use. (M/S)
+129. [ ] Pre-open the clipboard and resolve the paste target while transcription is still running. (M/S)
+130. [ ] Reuse the partial-transcription buffer instead of re-encoding the whole recording to WAV at stop. (M/M)
+131. [ ] Replace the fixed settle sleeps in inject.py with focus polling, cutting 150-400ms off every insert. (H/M)
+132. [ ] Adaptive partial cadence driven by measured server latency rather than the current fixed backoff constants. (M/M)
+133. [ ] Page in the model weights on first use so startup stops competing with the hotkey hook. (M/M)
+134. [ ] Profile the Tk panel build; cache the fonts, gradients and images rebuilt on every show. (M/M)
+135. [ ] Log the gap between hotkey release and the audio-stop callback; it is invisible today. (M/S)
+
+### Insert reliability
+
+136. [ ] Target picker in the panel: choose which window to insert into when the captured one is gone or wrong. (H/M)
+137. [ ] Remember the last five insert targets and offer them as a fallback list. (M/M)
+138. [ ] Retry a failed insert once automatically before falling back to the clipboard. (H/S)
+139. [ ] Make the clipboard fallback loud: a persistent toast with a "Paste now" action that re-attempts the insert. (H/S)
+140. [ ] Verify the insert landed by reading back the target's text length where the control allows it. (M/L)
+141. [ ] Per-app insert method learning: record which method worked per exe and prefer it next time. (H/M)
+142. [ ] Detect a UAC-elevated target before recording, not at insert time, while there is still time to switch windows. (M/S)
+143. [ ] Queue an insert when the target is busy (modal open, app not responding) and retry when it settles. (M/M)
+144. [ ] Per-app insert history so "scratch that" still works after switching windows. (M/M)
+145. [ ] Confirm-before-insert for windows never dictated into before. (L/S)
+
+### The dashboard window
+
+146. [ ] Keyboard shortcut to summon the dashboard from anywhere, mirroring the tray click. (M/S)
+147. [ ] Remember which page was open and restore it, instead of always honouring the launch argument. (M/S)
+148. [ ] Live-refresh Home stats and Diagnostics the same way History now refreshes. (M/S)
+149. [ ] Show a "new dictations since you opened this" pill instead of re-rendering under the user mid-scroll. (M/S)
+150. [ ] Close the dashboard subprocess when the main app exits; today it outlives its parent. (H/S)
+151. [ ] Restart the dashboard automatically if its process dies while the window was open. (L/M)
+152. [ ] Undo for history delete, single and bulk, for ten seconds after the action. (H/S)
+153. [ ] Cross-process file lock landed for history.json; config.json has the identical two-writer race. (H/S)
+154. [ ] Optimistic UI on pin and delete: update the row immediately, roll back if the call fails. (M/S)
+155. [ ] Virtualised history list so 500+ entries stay smooth. (M/M)
+156. [ ] Full-text search across all retained recordings' transcripts, not just the capped history. (M/M)
+157. [ ] Date-range filter and a calendar heatmap of dictation volume. (L/M)
+158. [ ] Per-entry "insert into last app" action from history. (M/S)
+159. [ ] Export the whole history as one file, not just the current selection. (M/S)
+160. [ ] Warn before Clear All when pinned entries would be lost. (M/S)
+
+### Preview panel
+
+161. [ ] Show which app the text will land in, with its icon, and make it clickable to change target. (H/M)
+162. [ ] Hold the panel for a beat after insert in an "inserted" state instead of vanishing. (M/S)
+163. [ ] Word-level confidence shading in the panel body, using the probabilities already returned. (M/M)
+164. [ ] Inline dictionary add: select a word in the panel, press a key, and it becomes a vocabulary entry. (H/M)
+165. [ ] Panel remembers its size per monitor as well as its position. (L/S)
+166. [ ] Append mode: hold the hotkey again within N seconds to add to the open panel instead of replacing it. (H/M)
+167. [ ] Quick actions on the panel: insert as bullet list, as quote, as lowercase. (M/M)
+168. [ ] Escape-to-dismiss should offer to keep the text on the clipboard rather than dropping it. (H/S)
+169. [ ] Auto-dismiss countdown pauses on hover or keypress. (M/S)
+170. [ ] Multi-monitor: place the panel on the target window's monitor, not the cursor's, when they differ. (M/S)
+
+### Read-aloud and study mode
+
+171. [ ] Transport controls while speaking: pause, resume, skip sentence, restart (STUDY_MODE_PLAN P3). (H/M)
+172. [ ] Progress indicator showing position in the passage during a long read. (M/S)
+173. [ ] Highlight the sentence being spoken in the source app where the API allows it. (L/L)
+174. [ ] Read from the clipboard as well as the selection, for apps that block selection copying. (M/S)
+175. [ ] Queue multiple selections to read back to back. (L/M)
+176. [ ] Per-app read-aloud speed, so a PDF reads slower than a chat message. (L/S)
+177. [ ] Warm the TTS server on selection, before the hotkey, when read-aloud is enabled. (M/M)
+178. [ ] Cache synthesised audio by text hash so re-reading the same passage is instant. (M/M)
+179. [ ] Study mode: pause length per structure type in Settings, not one global scale. (M/S)
+180. [ ] Study mode: spell out acronyms and numbers on first occurrence. (M/M)
+
+### Diagnostics, safety and packaging
+
+181. [ ] Startup self-check reporting whisper-server, mic, hotkey hook and disk space in one toast if anything is wrong. (H/S)
+182. [ ] Log rotation for app.log with a size cap; it grows unbounded today. (H/S)
+183. [ ] Crash reporter: catch unhandled exceptions in every thread and write a diagnosable bundle. (H/M)
+184. [ ] Watchdog that restarts whisper-server if inference fails twice in a row. (H/M)
+185. [ ] Disk-space guard before retaining audio, with a clear message instead of a silent failure. (M/S)
+186. [ ] Config schema validation with per-key error messages surfaced in Settings, not silently clamped. (M/M)
+187. [ ] Back up config.json and history.json on every write, keeping the last five. (H/S)
+188. [ ] Encrypt retained recordings and history at rest, given they hold work conversations. (M/L)
+189. [ ] Redact patterns should apply to the panel and the clipboard too, not only what is written to history. (H/S)
+190. [ ] Per-app incognito: never retain anything dictated into a named app. (M/S)
+191. [ ] First-run wizard: mic pick, hotkey test, one practice dictation, vocabulary seeding. (H/M)
+192. [ ] Installer and signed binary (PRODUCTION_PLAN P5-P11), blocked on the product name. (H/L)
+193. [ ] Auto-update check with a manual apply step. (M/M)
+194. [ ] Settings search box; the page is long enough now that scanning it is the slow part. (M/S)
+195. [ ] Import and export the whole profile (config, dictionary, voice reference) as one file. (M/S)
+196. [ ] Portable mode: keep all state next to the exe so it runs from a USB stick. (L/M)
+197. [ ] Local-only usage stats shown as a weekly summary. (L/M)
+198. [ ] Health page listing the last ten dictations with duration, inference time and confidence, for spotting drift. (M/S)
+199. [ ] Document the hotkey conflicts VoiceDictate has with common apps, and detect them at startup. (M/M)
+200. [ ] Prune the recordings directory by total size as well as file count; 200 long dictations is several GB. (H/S)
