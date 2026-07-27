@@ -281,7 +281,7 @@ def run(
                       f"conf={confidence} chars={len(raw)} words={len(words)}")
 
     all_rules = {**(profile_rules or {}), **(corrections or {})}
-    text = _postprocess(raw, filler_words, all_rules)
+    text = _postprocess(raw, filler_words, all_rules, custom_vocabulary)
     return (text if text else None), confidence, (words or None), (raw or None)
 
 
@@ -359,7 +359,40 @@ def _build_prompt(initial_prompt: str | None, vocab: list | None) -> str | None:
     return " ".join(parts) if parts else None
 
 
-def _postprocess(text: str, filler_words: list, profile_rules: dict) -> str:
+def _rejoin_vocabulary_splits(text: str, vocab: list | None) -> str:
+    """Repair a vocabulary term Whisper broke apart, and canonicalise its
+    spelling while we're there.
+
+    Whisper splits unfamiliar compounds mid-word: "Share Point", "MyF
+    itnessPal", "Wai kato", "Cop ilot", "Data verse" all shipped in real
+    dictations. Rather than collecting one correction per casualty, match each
+    single-word vocabulary term letter by letter with optional spaces and
+    rewrite it back to the spelling the user configured — which also turns
+    "dataverse" into "Dataverse" for free. Terms shorter than six letters are
+    skipped: they produce too many accidental matches."""
+    if not vocab:
+        return text
+    for term in vocab:
+        canonical = str(term).strip()
+        if len(canonical) < 6 or not canonical.isalnum():
+            continue
+        pattern = r"\b" + r"[ ]?".join(re.escape(c) for c in canonical) + r"\b"
+
+        def _repl(m: re.Match, canonical=canonical) -> str:
+            # Two spaces is already a stretch ("Peg as us"); beyond that the
+            # match is more likely to be a coincidence than a split word.
+            return canonical if m.group(0).count(" ") <= 2 else m.group(0)
+
+        text = re.sub(pattern, _repl, text, flags=re.IGNORECASE)
+    return text
+
+
+def _postprocess(text: str, filler_words: list, profile_rules: dict,
+                 vocabulary: list | None = None) -> str:
+    text = _strip_nonspeech_tags(text)
+    text = _drop_hallucinated_transcript(text)
+    text = _collapse_repeated_sentences(text)
+    text = _strip_turn_dashes(text)
     text = _strip_fillers(text, filler_words)
     # Spoken punctuation first, so "dot dot dot" isn't eaten as a stutter
     text = _apply_spoken_punctuation(text)
@@ -367,13 +400,101 @@ def _postprocess(text: str, filler_words: list, profile_rules: dict) -> str:
     text = _apply_self_corrections(text)
     text = _collapse_acronyms(text)
     text = _apply_case_commands(text)
+    text = _rejoin_vocabulary_splits(text, vocabulary)
     text = _apply_profile(text, profile_rules)
     text = _words_to_digits(text)
     text = _cleanup_whitespace_around_punct(text)
+    text = _join_split_hyphens(text)
     text = _fix_uptalk_questions(text)
     if not text:
         return text
     return text[0].upper() + text[1:] + " "
+
+
+# Whisper narrates non-speech instead of returning nothing: a breath or a
+# silent tail comes back as "*sad music*", "[BLANK_AUDIO]" or "(upbeat music)".
+# Real dictations of Balu's have shipped with these in them.
+_NONSPEECH_TAG = re.compile(
+    r"""(?x)
+    \*[^*\n]{1,40}\*            # *sad music*
+    | \[[^\]\n]{1,40}\]         # [BLANK_AUDIO], [MUSIC]
+    | \([^)\n]*                 # (upbeat music) — only sound-ish parentheticals,
+      (?:music|silence|laugh|applause|noise|sound|blank|inaudible)
+      [^)\n]*\)
+    | [♪♫♩][^\n]*?[♪♫♩]   # ♪ ... ♪
+    """,
+    re.IGNORECASE,
+)
+
+
+def _strip_nonspeech_tags(text: str) -> str:
+    """Drop Whisper's non-speech annotations. Parentheses are only removed when
+    they name a sound, so a genuine aside the user dictated survives."""
+    return " ".join(_NONSPEECH_TAG.sub(" ", text).split())
+
+
+# Whisper's stock hallucinations on silence or breath — artefacts of its
+# YouTube training data. One real recording of Balu's came back as "*sad music*"
+# and, re-run, as "Thank you.". Only ever dropped when the phrase IS the whole
+# transcript: mid-dictation these are perfectly normal words.
+_HALLUCINATED_WHOLE = {
+    "thank you", "thanks for watching", "thank you for watching",
+    "please subscribe", "subscribe to my channel", "bye", "you",
+    "amara.org", "subtitles by the amara.org community",
+}
+
+
+def _drop_hallucinated_transcript(text: str) -> str:
+    stripped = text.strip().strip(".!?,").lower()
+    if stripped in _HALLUCINATED_WHOLE:
+        return ""
+    return text
+
+
+def _strip_turn_dashes(text: str) -> str:
+    """Drop the leading dash Whisper puts in front of a new speaker turn.
+
+    Subtitle-style transcripts mark speaker changes with "- "; on a solo
+    dictation it just shows up as a stray dash at the start of the text, or
+    after a pause mid-dictation ("...get it all. - Would it be faster..."). Runs
+    before spoken punctuation, so a dash the user actually asked for is safe."""
+    text = re.sub(r"^\s*-\s+", "", text)
+    return re.sub(r"(?<=[.!?])\s+-\s+(?=[A-Z])", " ", text)
+
+
+_MAX_SENTENCE_REPEATS = 2
+
+
+def _collapse_repeated_sentences(text: str) -> str:
+    """Collapse a sentence that repeats back-to-back more than twice.
+
+    Whisper's decoder can fall into a repetition loop on a long recording: one
+    real dictation came back with "Shouldn't we be building everything from the
+    Power Platform directory?" twelve times in a row. Nobody says the same
+    sentence three times running, so anything past the second copy is the
+    model looping, not the user."""
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    out: list[str] = []
+    run = 0
+    for part in parts:
+        key = part.strip().lower()
+        if out and key and key == out[-1].strip().lower():
+            run += 1
+            if run >= _MAX_SENTENCE_REPEATS:
+                continue
+        else:
+            run = 0
+        out.append(part)
+    return " ".join(p for p in out if p)
+
+
+def _join_split_hyphens(text: str) -> str:
+    """Rejoin a hyphenated word Whisper split across the hyphen: "front -end",
+    "co- authoring", "pop -ups". Only when the space is on one side — a hyphen
+    spaced on both sides is punctuation, not a broken word."""
+    text = re.sub(r"(?<=\w)\s+-(?=\w)", "-", text)
+    text = re.sub(r"(?<=\w)-\s+(?=\w)", "-", text)
+    return text
 
 
 def _apply_profile(text: str, rules: dict) -> str:
@@ -480,12 +601,19 @@ def _cleanup_whitespace_around_punct(text: str) -> str:
     text = re.sub(r"^,+\s*", "", text)
     # Join a stray space before a contraction suffix: "that 's" -> "that's", "I 'm" -> "I'm"
     text = re.sub(r"\s+'(s|t|re|ll|ve|m|d)\b", r"'\1", text, flags=re.IGNORECASE)
-    # Protect decimal points (digit.digit) and ellipses so the spacing rule
-    # below won't split "4.8" into "4. 8" or "..." into ". . ."
+    # Protect ellipses, and any dot or comma that sits *inside* a token, from
+    # the "space after punctuation" rule below. Without this it turned
+    # "make.powerapps.com" into "make. powerapps. com", "kove.nz" into
+    # "kove. nz", "anime.js" into "anime. js" and "2,600" into "2, 600" — all
+    # seen in real dictations. A genuine sentence break is always followed by
+    # a capital or a space in Whisper's output, so requiring a lowercase or
+    # digit on the right keeps "...done.Next..." splitting as it should.
     text = re.sub(r"\.{3}", "\x01", text)
-    text = re.sub(r"(?<=\d)\.(?=\d)", "\x00", text)
+    text = re.sub(r"(?<=\w)\.(?=[a-z0-9])", "\x00", text)
+    text = re.sub(r"(?<=\d),(?=\d)", "\x02", text)
     text = re.sub(r"([,.;:!?])(?=\S)", r"\1 ", text)
     text = text.replace("\x00", ".")
+    text = text.replace("\x02", ",")
     text = text.replace("\x01", "...")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
@@ -542,9 +670,15 @@ def _words_to_digits(text: str) -> str:
             return
         val = _parse_number_words(buf)
         words = [t for t in buf if not t.isspace()]
-        keep_as_word = (
-            len(words) == 1
-            and words[0].lower().strip("-,") in ("one", "two")
+        single = words[0].lower().strip("-,") if len(words) == 1 else ""
+        # A bare "one" stays a word. In dictated prose it is nearly always
+        # part of a phrase, not a count — "in one solution", "a good one",
+        # "do one about SharePoint", "more than one phase", "maybe one a day"
+        # all came back as "1" and read as typos. Inside a larger number
+        # ("twenty one", "one hundred") it still digitises, because there
+        # `words` holds more than this token.
+        keep_as_word = single == "one" or (
+            single == "two"
             and (last_word() in _PRONOUN_STOP_PREV
                  or (next_tok or "").lower().strip("-,.") in _PRONOUN_NEXT)
         )

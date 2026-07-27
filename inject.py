@@ -566,28 +566,47 @@ def configure(restore_delay_ms: int, per_app_paste: dict | None = None,
         _paste_mode = paste_mode
 
 
-def capture_foreground() -> int:
-    """Foreground hwnd to paste into later, or 0 when the foreground window is
-    one of our own surfaces (tray icon message window, preview panel, dashboard
-    subprocess) — typing a dictation back into those loses it (seen 2026-07-12:
-    498 chars typed into the hidden pystray window)."""
+def _is_own_window(hwnd: int) -> bool:
+    """True for our own surfaces: tray icon message window, preview panel,
+    badge, and the dashboard subprocess. Typing a dictation into one of those
+    loses it (seen 2026-07-12: 498 chars typed into the hidden pystray
+    window)."""
+    pid = wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if pid.value == os.getpid():
+        return True
+    # The dashboard runs as a separate python subprocess with this exact title.
+    try:
+        title = win32gui.GetWindowText(hwnd)
+    except Exception:
+        title = ""
+    return title == "VoiceDictate" and _get_exe_name(hwnd).startswith("python")
+
+
+def capture_foreground(quiet: bool = False) -> int:
+    """Foreground hwnd to paste into later, or 0 when it is one of our own
+    windows. quiet=True suppresses the log line for speculative captures (the
+    one taken at hotkey-down), where our own window in front is normal and the
+    hotkey-up capture will usually resolve it anyway."""
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
         return 0
-    pid = wintypes.DWORD()
-    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    own = pid.value == os.getpid()
-    if not own:
-        # The dashboard runs as a separate python subprocess with this exact title.
-        try:
-            title = win32gui.GetWindowText(hwnd)
-        except Exception:
-            title = ""
-        own = title == "VoiceDictate" and _get_exe_name(hwnd).startswith("python")
-    if own:
-        warn("inject", f"foreground is our own window (class='{_get_class(hwnd)}') — no paste target")
+    if _is_own_window(hwnd):
+        if not quiet:
+            warn("inject", f"foreground is our own window (class='{_get_class(hwnd)}') — no paste target")
         return 0
     return hwnd
+
+
+def is_usable_target(hwnd: int) -> bool:
+    """Still a live, visible, non-ours window worth pasting into."""
+    if not hwnd:
+        return False
+    try:
+        return bool(win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd)
+                    and not _is_own_window(hwnd))
+    except Exception:
+        return False
 
 
 def _get_class(hwnd: int) -> str:
@@ -973,6 +992,7 @@ def inject_text(text: str, hwnd: int) -> None:
 
     if not hwnd or not win32gui.IsWindow(hwnd):
         # No usable target — never drop the text; leave it on the clipboard.
+        warn("inject", f"no paste target (hwnd={hwnd}) — {len(text)} chars left on the clipboard")
         if _clipboard_set_text(text):
             _notify_info(f"No target window — copied to clipboard ({len(text)} chars), press Ctrl+V to paste")
         else:

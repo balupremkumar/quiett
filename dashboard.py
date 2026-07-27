@@ -8,9 +8,11 @@ panel (preview.py) is unchanged — it still appears near the cursor.
 from __future__ import annotations
 
 import base64
+import ctypes
 import io
 import json
 import os
+import socket
 import struct
 import subprocess
 import sys
@@ -55,21 +57,61 @@ _AUTOSTART_TASK = "VoiceDictate"
 _THIS_FILE = os.path.abspath(__file__)
 _PROJECT_DIR = os.path.dirname(_THIS_FILE)
 
+# Control channel. The running dashboard binds this loopback port; the bind
+# doubling as the single-instance lock is the point — an in-process _proc
+# handle can't see a window left over from a previous main.py run, which is
+# how duplicate dashboards used to appear. Anyone who fails to bind is a
+# second instance and simply hands its request to the first.
+_CONTROL_PORT_DEFAULT = 8093
+
+
+def _control_port() -> int:
+    try:
+        return int(_read_cfg().get("dashboard_control_port", _CONTROL_PORT_DEFAULT))
+    except (TypeError, ValueError):
+        return _CONTROL_PORT_DEFAULT
+
+
+def _send_control(payload: dict, timeout: float = 1.5) -> bool:
+    """Hand a command to the running dashboard. False = nobody is listening."""
+    try:
+        with socket.create_connection(("127.0.0.1", _control_port()), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+            return sock.recv(32).startswith(b"ok")
+    except OSError:
+        return False
+
 
 def open_window(page: str = "home") -> None:
-    """Launch the dashboard subprocess, or ignore if already running.
+    """Show the dashboard on `page`: raise and refresh the existing window if
+    one is up, otherwise launch the subprocess.
 
     Must not be named `open`: a module-level `open` shadows the builtin for
     every function here and silently broke all config reads/writes."""
     global _proc
     with _proc_lock:
+        if _send_control({"cmd": "show", "page": page}):
+            return
+        # Nothing listening. A live _proc here means one is still booting (its
+        # control port isn't bound yet) — don't stack a second window on top.
         if _proc is not None and _proc.poll() is None:
-            return  # window is already open
+            return
         _proc = subprocess.Popen(
             [sys.executable, _THIS_FILE, page],
             cwd=_PROJECT_DIR,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
+
+
+def notify_change(what: str = "history") -> None:
+    """Tell an open dashboard its data changed, so the page it is showing
+    refreshes in place. Fire-and-forget: never blocks the caller (this runs on
+    the transcription path) and never raises if no dashboard is running."""
+    threading.Thread(
+        target=lambda: _send_control({"cmd": "refresh", "what": what}, timeout=0.8),
+        daemon=True,
+    ).start()
 
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
@@ -114,7 +156,7 @@ _KNOWN_CONFIG_KEYS = frozenset({
     "retain_audio_max_files", "retain_audio_min_seconds", "voice_profile_max_samples",
     "badge_animation", "incognito", "redact_patterns",
     "theme", "animations", "sound_volume", "history_max_entries",
-    "recording_retention_days", "dashboard_scale",
+    "recording_retention_days", "dashboard_scale", "dashboard_control_port",
     "tts_enabled", "tts_speed", "tts_max_chunk_chars", "tts_reference",
     "study_mode", "study_speed", "study_pause_scale",
 })
@@ -350,6 +392,104 @@ def _save_window_geom(win) -> None:
         pass
 
 
+def _own_main_hwnd() -> int:
+    """Top-level window of this process titled VoiceDictate — the webview host.
+    pywebview doesn't expose the native handle on every backend, and we need a
+    real hwnd to steal foreground properly."""
+    import win32gui
+    import win32process
+
+    found = []
+
+    def _enum(hwnd, _):
+        if not win32gui.IsWindowVisible(hwnd):
+            return True
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        except Exception:
+            return True
+        if pid == os.getpid() and win32gui.GetWindowText(hwnd) == "VoiceDictate":
+            found.append(hwnd)
+            return False
+        return True
+
+    try:
+        win32gui.EnumWindows(_enum, None)
+    except Exception:
+        pass
+    return found[0] if found else 0
+
+
+def _raise_self() -> None:
+    """Restore + foreground our own window. SetForegroundWindow alone is
+    refused when another process owns the foreground, so attach to that
+    thread's input queue first (same dance inject.py does for paste targets)."""
+    hwnd = _own_main_hwnd()
+    if not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    cur_thread = kernel32.GetCurrentThreadId()
+    fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+    attached = bool(fg_thread) and fg_thread != cur_thread
+    if attached:
+        user32.AttachThreadInput(fg_thread, cur_thread, True)
+    try:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        user32.BringWindowToTop(hwnd)
+        try:
+            user32.SwitchToThisWindow(hwnd, True)
+        except Exception:
+            pass
+    finally:
+        if attached:
+            user32.AttachThreadInput(fg_thread, cur_thread, False)
+
+
+_VALID_PAGES = ("home", "history", "dictionary", "settings", "diagnostics", "about")
+
+
+def _serve_control(srv: "socket.socket", window, ready: threading.Event) -> None:
+    """Handle show/refresh/ping from other instances and from the main app.
+
+    Runs on a daemon thread for the life of the window. Every command waits for
+    the page to be interactive first, otherwise evaluate_js lands before the
+    script block exists and is silently lost."""
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            return
+        with conn:
+            try:
+                conn.settimeout(2.0)
+                raw = conn.recv(4096).decode("utf-8").strip()
+                msg = json.loads(raw) if raw else {}
+                cmd = msg.get("cmd", "")
+                if cmd == "show":
+                    page = msg.get("page", "home")
+                    if page not in _VALID_PAGES:
+                        page = "home"
+                    if ready.wait(timeout=10):
+                        window.evaluate_js(f"navigateTo('{page}')")
+                    _raise_self()
+                elif cmd == "refresh":
+                    what = str(msg.get("what", "history"))[:32].replace("'", "")
+                    if ready.wait(timeout=10):
+                        window.evaluate_js(f"onExternalRefresh('{what}')")
+                elif cmd != "ping":
+                    conn.sendall(b"err\n")
+                    continue
+                conn.sendall(b"ok\n")
+            except Exception:
+                try:
+                    conn.sendall(b"err\n")
+                except OSError:
+                    pass
+
+
 def _apply_titlebar_theme(dark: bool) -> None:
     """Match the Win11 titlebar to the app theme (DWMWA_USE_IMMERSIVE_DARK_MODE);
     otherwise a light app under a dark Windows theme keeps a dark titlebar."""
@@ -432,7 +572,7 @@ class DashboardAPI:
                 ts_date = ""
                 day_label = ""
             result.append({
-                "index": i, "text": text,
+                "index": i, "text": text, "ts": ts,
                 "words": len(text.split()),
                 "label": label, "ts_date": ts_date, "source": source,
                 "day_label": day_label, "pinned": bool(e.get("pinned")),
@@ -440,35 +580,59 @@ class DashboardAPI:
             })
         return result
 
-    def delete_history_entry(self, idx: int) -> bool:
+    def get_history_stamp(self) -> str:
+        """Cheap change token for history.json (mtime + size). The page polls
+        this as the backstop for the push refresh, so a dictation still shows
+        up if the notify never lands (main app restarted, port taken)."""
         try:
-            entries = hist._load()
-            if 0 <= idx < len(entries):
-                entries.pop(idx)
+            st = os.stat(hist.HISTORY_FILE)
+            return f"{st.st_mtime_ns}:{st.st_size}"
+        except OSError:
+            return "0:0"
+
+    def delete_history_entry(self, idx: int, stamp: str = "") -> bool:
+        try:
+            with hist.transaction():
+                entries = hist._load()
+                real = hist.resolve_index(entries, int(idx), stamp)
+                if real < 0:
+                    return False
+                entries.pop(real)
                 hist._write(entries)
                 return True
         except Exception:
-            pass
-        return False
+            return False
 
-    def delete_history_entries(self, indices: list) -> int:
+    def delete_history_entries(self, indices: list, stamps: list | None = None) -> int:
         try:
-            entries = hist._load()
-            drop = {int(i) for i in indices}
-            keep = [e for i, e in enumerate(entries) if i not in drop]
-            removed = len(entries) - len(keep)
-            hist._write(keep)
-            return removed
+            with hist.transaction():
+                entries = hist._load()
+                drop = set()
+                for pos, i in enumerate(indices):
+                    stamp = stamps[pos] if stamps and pos < len(stamps) else ""
+                    real = hist.resolve_index(entries, int(i), stamp)
+                    if real >= 0:
+                        drop.add(real)
+                keep = [e for i, e in enumerate(entries) if i not in drop]
+                removed = len(entries) - len(keep)
+                hist._write(keep)
+                return removed
         except Exception:
             return 0
 
-    def export_history_entries(self, indices: list, fmt: str = "md") -> dict:
+    def export_history_entries(self, indices: list, fmt: str = "md",
+                               stamps: list | None = None) -> dict:
         """Item 39 — format is one of "md" / "txt" / "srt" / "vtt". Unknown
         values fall back to Markdown rather than erroring."""
         try:
             spec = _EXPORT_FORMATS.get(fmt, _EXPORT_FORMATS["md"])
             entries = hist.load()
-            chosen = [entries[i] for i in indices if 0 <= i < len(entries)]
+            chosen = []
+            for pos, i in enumerate(indices):
+                stamp = stamps[pos] if stamps and pos < len(stamps) else ""
+                real = hist.resolve_index(entries, int(i), stamp)
+                if real >= 0:
+                    chosen.append(entries[real])
             if not chosen:
                 return {"ok": False, "error": "No entries to export."}
             chosen.sort(key=lambda e: e.get("timestamp", ""))
@@ -503,9 +667,9 @@ class DashboardAPI:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def set_pinned(self, index: int, pinned: bool) -> bool:
+    def set_pinned(self, index: int, pinned: bool, stamp: str = "") -> bool:
         try:
-            return hist.set_pinned(int(index), bool(pinned))
+            return hist.set_pinned(int(index), bool(pinned), stamp)
         except Exception:
             return False
 
@@ -516,20 +680,21 @@ class DashboardAPI:
         except Exception:
             return False
 
-    def _audio_path_for_index(self, index: int) -> "str | None":
+    def _audio_path_for_index(self, index: int, stamp: str = "") -> "str | None":
         entries = hist.load()
-        if not (0 <= index < len(entries)):
+        index = hist.resolve_index(entries, index, stamp)
+        if index < 0:
             return None
         audio_name = entries[index].get("audio")
         if not audio_name:
             return None
         return os.path.join("recordings", audio_name)
 
-    def play_history_audio(self, index: int) -> dict:
+    def play_history_audio(self, index: int, stamp: str = "") -> dict:
         """Item 38. winsound.PlaySound with SND_ASYNC replaces whatever it
         was already playing, so this naturally enforces "only one plays"."""
         try:
-            path = self._audio_path_for_index(int(index))
+            path = self._audio_path_for_index(int(index), stamp)
             if path is None:
                 return {"ok": False, "error": "No recording for this entry."}
             if not os.path.exists(path):
@@ -546,11 +711,11 @@ class DashboardAPI:
             pass
         return {"ok": True}
 
-    def get_waveform(self, index: int) -> dict:
+    def get_waveform(self, index: int, stamp: str = "") -> dict:
         """Item 88 — cached in-memory by filename so re-opening a row (or
         re-filtering History) doesn't re-decode the WAV every time."""
         try:
-            path = self._audio_path_for_index(int(index))
+            path = self._audio_path_for_index(int(index), stamp)
             if path is None:
                 return {"ok": False}
             if not os.path.exists(path):
@@ -1640,6 +1805,32 @@ function navigateTo(page) {
   else if (page === 'about') loadAbout();
 }
 
+// ── Live refresh ───────────────────────────────────────────────────────────
+// Called by the main app over the control channel the moment a dictation is
+// saved, and by the poll below as a backstop. Refreshes whatever page is on
+// screen in place, keeping scroll position, search and selection intact.
+let _histStamp = '';
+let _refreshPending = false;
+
+async function onExternalRefresh(what) {
+  if (what !== 'history' && what !== 'all') return;
+  if (_selectMode) { _refreshPending = true; return; }  // don't move rows out from under a bulk selection
+  try {
+    if (_currentPage === 'history') await loadHistory(true);
+    else if (_currentPage === 'home') await loadHome();
+    _histStamp = await window.pywebview.api.get_history_stamp();
+  } catch (e) { console.error('refresh error:', e); }
+}
+
+async function pollHistory() {
+  if (_currentPage !== 'history' && _currentPage !== 'home') return;
+  try {
+    const stamp = await window.pywebview.api.get_history_stamp();
+    if (_histStamp && stamp !== _histStamp) await onExternalRefresh('history');
+    _histStamp = stamp;
+  } catch (e) {}
+}
+
 // ── Theme ──────────────────────────────────────────────────────────────────
 function resolveTheme(t) {
   return t === 'system'
@@ -1704,11 +1895,15 @@ async function loadHome() {
 // ── History page ──────────────────────────────────────────────────────────
 let _histQuery = '';
 
-async function loadHistory() {
+async function loadHistory(quiet) {
   const el = document.getElementById('historyList');
-  el.innerHTML = '<div class="empty">Loading…</div>';
+  // quiet = live refresh of an already-populated list: no Loading flash, and
+  // the reader keeps their place in the list.
+  const scroll = quiet ? el.scrollTop : 0;
+  if (!quiet) el.innerHTML = '<div class="empty">Loading…</div>';
   _histAll = await window.pywebview.api.get_history(500);
   renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
+  if (quiet && scroll) el.scrollTop = scroll;
 }
 
 function filterEntries(items, q, srcFilter) {
@@ -1809,7 +2004,7 @@ async function toggleAudioPlay(idx) {
   }
   if (wasPlaying) return; // this click was the stop toggle
   try {
-    const res = await window.pywebview.api.play_history_audio(idx);
+    const res = await window.pywebview.api.play_history_audio(idx, stampFor(idx));
     if (res && res.ok) {
       _playingIdx = idx;
       setPlayButtonState(idx, true);
@@ -1861,7 +2056,7 @@ function observeWaveThumbs() {
 async function loadWaveThumb(el) {
   const idx = parseInt(el.dataset.idx, 10);
   try {
-    const res = await window.pywebview.api.get_waveform(idx);
+    const res = await window.pywebview.api.get_waveform(idx, stampFor(idx));
     if (res && res.ok && res.data) {
       el.style.backgroundImage = `url(${res.data})`;
     } else {
@@ -1889,8 +2084,16 @@ function setSourceFilter(src) {
   renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
 }
 
+// Row identity. A dictation landing while History is open shifts every index
+// down by one, so the index alone would delete or pin the neighbouring entry;
+// the timestamp says which row was actually clicked.
+function stampFor(idx) {
+  const e = _histAll.find(x => x.index === idx);
+  return (e && e.ts) || '';
+}
+
 async function togglePin(idx, newVal) {
-  const ok = await window.pywebview.api.set_pinned(idx, newVal);
+  const ok = await window.pywebview.api.set_pinned(idx, newVal, stampFor(idx));
   if (!ok) return;
   const e = _histAll.find(x => x.index === idx);
   if (e) e.pinned = newVal;
@@ -1898,7 +2101,7 @@ async function togglePin(idx, newVal) {
 }
 
 async function deleteHistory(idx) {
-  await window.pywebview.api.delete_history_entry(idx);
+  await window.pywebview.api.delete_history_entry(idx, stampFor(idx));
   _histAll = _histAll.filter(e => e.index !== idx);
   _selectedIdx.delete(idx);
   renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
@@ -1919,6 +2122,9 @@ function toggleSelectMode() {
   document.getElementById('bulkBar').style.display = _selectMode ? 'flex' : 'none';
   if (!_selectMode) _selectedIdx.clear();
   renderHistory(filterEntries(_histAll, _histQuery, _histSourceFilter));
+  // Dictations that landed while a selection was open apply now that the
+  // indices are no longer being pointed at.
+  if (!_selectMode && _refreshPending) { _refreshPending = false; onExternalRefresh('history'); }
 }
 
 function toggleSelect(idx, checked) {
@@ -1945,7 +2151,7 @@ async function deleteSelected() {
   if (pinnedCount) msg = `${pinnedCount} of the selected entries are pinned. ` + msg;
   if (!confirm(msg)) return;
   const idxList = Array.from(_selectedIdx);
-  await window.pywebview.api.delete_history_entries(idxList);
+  await window.pywebview.api.delete_history_entries(idxList, idxList.map(stampFor));
   _selectedIdx.clear();
   await loadHistory();
 }
@@ -1955,7 +2161,7 @@ async function exportSelected() {
   const idxList = Array.from(_selectedIdx);
   const fmt = document.getElementById('exportFormatSel').value;
   try {
-    const res = await window.pywebview.api.export_history_entries(idxList, fmt);
+    const res = await window.pywebview.api.export_history_entries(idxList, fmt, idxList.map(stampFor));
     if (res && res.ok) {
       showToast(res.fallback ? 'Exported to ' + res.path : 'Exported to ' + res.path);
     } else if (res && res.cancelled) {
@@ -2539,6 +2745,8 @@ window.addEventListener('pywebviewready', async function () {
     sf.addEventListener('change', autoSave);
     refreshBackendStatus();
     setInterval(refreshBackendStatus, 15000);
+    _histStamp = await window.pywebview.api.get_history_stamp();
+    setInterval(pollHistory, 4000);
     if (_INIT_PAGE === 'home') {
       await loadHome();
     } else {
@@ -2565,6 +2773,19 @@ if __name__ == "__main__":
     except Exception:
         pass
     _page = sys.argv[1] if len(sys.argv) > 1 else "home"
+
+    # Single instance. Binding the control port is the lock: if it's taken,
+    # a dashboard is already up — hand it the page and quit rather than
+    # opening a second window over the top of it.
+    _srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _srv.bind(("127.0.0.1", _control_port()))
+        _srv.listen(8)
+    except OSError:
+        _srv.close()
+        _send_control({"cmd": "show", "page": _page})
+        sys.exit(0)
+
     _theme_pref = _read_cfg().get("theme", "dark")
     if _theme_pref == "system":
         try:
@@ -2598,6 +2819,14 @@ if __name__ == "__main__":
         _win_kwargs.update(width=980, height=660)
     _w = webview.create_window(**_win_kwargs)
     _w.events.shown += lambda: _apply_titlebar_theme(_theme != "light")
+
+    # Page-interactive gate for the control channel. `loaded` fires when the
+    # document is ready; the JS api itself is up a beat later, so the handler
+    # tolerates a miss rather than assuming.
+    _js_ready = threading.Event()
+    _w.events.loaded += lambda: _js_ready.set()
+    threading.Thread(target=_serve_control, args=(_srv, _w, _js_ready),
+                     daemon=True).start()
     # Debounced geometry save on move/resize — avoids hammering config.json
     # while the user is mid-drag.
     _geom_timer: "threading.Timer | None" = None
