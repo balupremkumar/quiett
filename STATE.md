@@ -37,6 +37,9 @@ Accuracy pass over the real corpus (100 dictations, 200 recordings): several "Wh
 BACKLOG.md: 100 new items (101-200) across accuracy, speed, insert reliability, dashboard, panel, read-aloud and packaging.
 
 ## Next steps
+- [x] 2026-07-27: committed b616388, merged to main as f553d83, app restarted on it (PID 27336). NOT pushed to origin — ask Balu.
+- [ ] Balu's hands-on pass on the 2026-07-27 build: dictate once and watch the panel appear (should be quicker), dictate with the dashboard open on History (the row should appear without touching the window), tray → View History twice (one window, raised both times), and a dictation where our own panel still has focus at release (should insert, not fall back to the clipboard).
+- [ ] Five ambiguous mistranscriptions are listed under Open bugs waiting on Balu's ear before they become corrections.
 - [x] 2026-07-25: merged to main, committed 7446f43 + 65edfd6, pushed (4a64704..65edfd6), app restarted on it (PID 11356).
 - [ ] Balu's hands-on pass on the new build: tray Study Mode toggle, More → Read-aloud Speed (it edits whichever mode is live), dashboard Settings → Read-aloud section renders, and a real Ctrl+Shift+S over a study passage in both modes.
 - [ ] Balu to answer the 3 questions still open at the end of STUDY_MODE_PLAN.md before P3 (transport controls) is considered.
