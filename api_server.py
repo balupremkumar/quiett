@@ -10,9 +10,13 @@ POST /dictate                trigger a dictation capture programmatically
 GET  /diagnostics            whisper/hotkey/mic status for the dashboard's Diagnostics page
 POST /diagnostics/mic-probe  start a ~5s mic level test (409 while a real recording is active)
 GET  /diagnostics/mic-level  poll the live level of the running mic probe
+GET  /diag/sockets           this app's own open TCP sockets — the "0 bytes out" seal, measured
+POST /speak                  read text aloud via the cloned voice (tts_enabled gate, 2000 char cap)
 """
 
 import json
+import os
+import subprocess
 import threading
 import time
 
@@ -21,7 +25,9 @@ import sounddevice as sd
 from flask import Flask, jsonify, request
 
 import audio
+import dashboard
 import transcribe
+import tts
 from logger import log, warn
 
 _app = Flask(__name__)
@@ -242,6 +248,122 @@ def mic_level():
         "peak": peak,
         "current_rms": current_rms,
     })
+
+
+# ── Network isolation probe (QUIETT_UI_PLAN P7) ─────────────────────────────
+# The dashboard's "0 BYTES OUT" seal, made a measurement instead of a promise:
+# enumerate this app's own open TCP sockets via netstat, filtered to the PIDs
+# we actually own (no psutil dependency — netstat -ano is already how the
+# 2026-07-something health checks work elsewhere in this app).
+
+def _owned_pids() -> set:
+    """This process, plus whichever model-server children are currently
+    alive. A dead child's old PID is never included, so a stale entry can't
+    linger in the report after a server was reaped."""
+    pids = {os.getpid()}
+    for proc in (getattr(transcribe, "_proc", None),
+                 getattr(tts, "_proc", None),
+                 getattr(dashboard, "_proc", None)):
+        try:
+            if proc is not None and proc.poll() is None:
+                pids.add(proc.pid)
+        except Exception:
+            pass
+    return pids
+
+
+def _proc_label(pid: int) -> str:
+    if pid == os.getpid():
+        return "quiett"
+    try:
+        if getattr(transcribe, "_proc", None) is not None and pid == transcribe._proc.pid:
+            return "whisper-server"
+    except Exception:
+        pass
+    try:
+        if getattr(tts, "_proc", None) is not None and pid == tts._proc.pid:
+            return "tts-server"
+    except Exception:
+        pass
+    try:
+        if getattr(dashboard, "_proc", None) is not None and pid == dashboard._proc.pid:
+            return "dashboard"
+    except Exception:
+        pass
+    return "quiett"
+
+
+def _is_loopback_addr(addr: str) -> bool:
+    host = addr.rsplit(":", 1)[0].strip("[]")
+    return host in ("127.0.0.1", "::1", "0.0.0.0", "*", "") or host.startswith("127.")
+
+
+@_app.route("/diag/sockets", methods=["GET"])
+def diag_sockets():
+    pids = _owned_pids()
+    sockets: list = []
+    external = 0
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        out = result.stdout or ""
+    except Exception as exc:
+        warn("api", f"/diag/sockets netstat failed: {exc}")
+        return jsonify({"sockets": [], "external": 0})
+
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0] not in ("TCP", "TCPv6"):
+            continue
+        laddr, raddr, state, pid_s = parts[1], parts[2], parts[3], parts[4]
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            continue
+        if pid not in pids:
+            continue
+        sockets.append({"laddr": laddr, "proc": _proc_label(pid), "state": state})
+        if state == "ESTABLISHED" and not _is_loopback_addr(raddr):
+            external += 1
+
+    return jsonify({"sockets": sockets, "external": external})
+
+
+# ── Read-aloud on demand ─────────────────────────────────────────────────────
+
+_SPEAK_MAX_CHARS = 2000
+
+
+@_app.route("/speak", methods=["POST"])
+def speak():
+    try:
+        cfg = _get_config_fn() if _get_config_fn else {}
+    except Exception:
+        cfg = {}
+    if not cfg.get("tts_enabled", False):
+        return jsonify({"error": "tts_disabled"}), 403
+
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        data = {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "empty text"}), 400
+    if len(text) > _SPEAK_MAX_CHARS:
+        return jsonify({"error": f"text exceeds {_SPEAK_MAX_CHARS} characters"}), 400
+
+    def _worker() -> None:
+        try:
+            tts.speak(text)
+        except Exception as exc:
+            warn("api", f"/speak playback failed: {exc}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+    log("api", f"/speak: {len(text)} chars queued")
+    return jsonify({"status": "speaking"})
 
 
 def start() -> None:

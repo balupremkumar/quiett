@@ -82,6 +82,11 @@ def log_correction(raw_text: str, edited_text: str) -> list[tuple[str, str]]:
                     (whisper_out, correct_out),
                 ).fetchone()
                 if row and row[0] == MIN_OCCURRENCES:
+                    conn.execute(
+                        "UPDATE substitutions SET promoted_at=? "
+                        "WHERE whisper_out=? AND correct_out=?",
+                        (now, whisper_out, correct_out),
+                    )
                     promoted.append((whisper_out, correct_out))
     return promoted
 
@@ -116,6 +121,28 @@ def get_all_rules() -> list[dict]:
             "last_seen":   r[3],
             "active":      r[2] >= MIN_OCCURRENCES,
         }
+        for r in rows
+    ]
+
+
+def recent_promotions(days: int = 7) -> list[dict]:
+    """Rules promoted to auto-apply within the last `days` days, newest
+    first. Contract consumed verbatim by the dashboard's Dictionary "Learned
+    this week" feed (QUIETT_UI_PLAN P6):
+    {"raw": str, "fixed": str, "count": int, "promoted_at": iso8601 str}.
+    """
+    _ensure_init()
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute("""
+                SELECT whisper_out, correct_out, count, promoted_at
+                FROM substitutions
+                WHERE promoted_at IS NOT NULL AND promoted_at >= ?
+                ORDER BY promoted_at DESC
+            """, (cutoff,)).fetchall()
+    return [
+        {"raw": r[0], "fixed": r[1], "count": r[2], "promoted_at": r[3]}
         for r in rows
     ]
 
@@ -165,8 +192,38 @@ def _ensure_init() -> None:
                     PRIMARY KEY (whisper_out, correct_out)
                 );
             """)
+            _migrate_promoted_at(conn)
         _prune()
         _initialized = True
+
+
+def _migrate_promoted_at(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: add the promoted_at column (BACKLOG/QUIETT_UI_PLAN
+    P6) if it's missing, never touching an existing profile.db's rules.
+    Legacy rules that already crossed MIN_OCCURRENCES before this column
+    existed get a best-effort promoted_at, derived from the created_at of the
+    Nth correction that formed the rule — new rules get a real timestamp from
+    here on via log_correction()."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(substitutions)").fetchall()]
+    if "promoted_at" in cols:
+        return
+    conn.execute("ALTER TABLE substitutions ADD COLUMN promoted_at TEXT")
+    already_active = conn.execute(
+        "SELECT whisper_out, correct_out FROM substitutions WHERE count >= ?",
+        (MIN_OCCURRENCES,),
+    ).fetchall()
+    for whisper_out, correct_out in already_active:
+        nth = conn.execute("""
+            SELECT created_at FROM corrections
+            WHERE whisper_out=? AND user_edit=?
+            ORDER BY created_at ASC
+            LIMIT 1 OFFSET ?
+        """, (whisper_out, correct_out, MIN_OCCURRENCES - 1)).fetchone()
+        if nth:
+            conn.execute(
+                "UPDATE substitutions SET promoted_at=? WHERE whisper_out=? AND correct_out=?",
+                (nth[0], whisper_out, correct_out),
+            )
 
 
 def _prune() -> None:

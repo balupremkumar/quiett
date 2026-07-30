@@ -28,6 +28,7 @@ import chime
 import hotkey
 import inject
 import profile
+import theme
 import tray
 import widgets
 import winfx
@@ -78,23 +79,50 @@ _on_rerecord = None
 
 # Themes — dark / light / system. Palette lives in refreshable module globals:
 # refresh_theme() re-resolves them, new windows pick the change up on open.
+# QUIETT_UI_PLAN P4: every colour here now comes from theme.py's Tk-flat
+# tokens (theme.TK_DARK / theme.TK_LIGHT), not a second hand-maintained
+# palette — grounds -> bg/surface/elevated, hairlines -> line/line2,
+# ink -> text/mid/dim, the one accent -> ion everywhere the old palette used
+# its one blue (status dot, pin, waveform, countdown bar), recording -> rec,
+# transcribing/paused -> pause. No new theme.py tokens were needed: the
+# panel's error/warning literals (mic errors, low-confidence hints) reuse
+# rec/pause, since both are already alarm-red/amber semantically.
+
+
+def _blend(hex_a: str, hex_b: str, t: float) -> str:
+    """Small standalone blend used to build _THEMES below, ahead of the
+    fuller _hex_blend() (used elsewhere further down this file, once accent
+    colours are already resolved) — kept separate so _THEMES can be built at
+    the very top of the module without reordering the rest of the file."""
+    a = int(hex_a[1:3], 16), int(hex_a[3:5], 16), int(hex_a[5:7], 16)
+    b = int(hex_b[1:3], 16), int(hex_b[3:5], 16), int(hex_b[5:7], 16)
+    r = int(a[0] + (b[0] - a[0]) * t)
+    g = int(a[1] + (b[1] - a[1]) * t)
+    bl = int(a[2] + (b[2] - a[2]) * t)
+    return f"#{r:02x}{g:02x}{bl:02x}"
+
+
+def _rgb(hex_colour: str) -> tuple:
+    return (int(hex_colour[1:3], 16), int(hex_colour[3:5], 16), int(hex_colour[5:7], 16))
+
+
+def _flatten_theme(t: dict) -> dict:
+    """Map theme.py's Tk-flat tokens onto this module's legacy palette keys."""
+    ion_hv = _blend(t["ion"], "#ffffff", 0.22)
+    return {
+        "BG": t["bg"], "BG2": t["surface"], "BG3": t["elevated"],
+        "FG": t["text"], "FG2": t["mid"], "FG3": t["dim"],
+        "BLUE": t["ion"], "BLUE_HV": ion_hv,
+        "BORDER": t["line"], "BORDER2": t["line2"],
+        "TASK": t["ion"], "TASK_HV": ion_hv,
+        "MATCH_BG": _blend(t["bg"], t["ion"], 0.16), "MATCH_FG": t["text"],
+        "REC": t["rec"], "PAUSE": t["pause"],
+    }
+
+
 _THEMES = {
-    "dark": {
-        "BG": "#1a1a1d", "BG2": "#26262a", "BG3": "#2f2f34",
-        "FG": "#f3f4f6", "FG2": "#a1a1aa", "FG3": "#71717a",
-        "BLUE": "#3b82f6", "BLUE_HV": "#60a5fa",
-        "BORDER": "#3a3a40", "BORDER2": "#4a4a52",
-        "TASK": "#22c55e", "TASK_HV": "#4ade80",
-        "MATCH_BG": "#3b5274", "MATCH_FG": "#f3f4f6",
-    },
-    "light": {
-        "BG": "#f4f4f6", "BG2": "#eaeaee", "BG3": "#dedee4",
-        "FG": "#18181b", "FG2": "#52525b", "FG3": "#8e8e99",
-        "BLUE": "#2563eb", "BLUE_HV": "#3b82f6",
-        "BORDER": "#cbcbd2", "BORDER2": "#b9b9c2",
-        "TASK": "#16a34a", "TASK_HV": "#22c55e",
-        "MATCH_BG": "#bfdbfe", "MATCH_FG": "#1e3a8a",
-    },
+    "dark":  _flatten_theme(theme.TK_DARK),
+    "light": _flatten_theme(theme.TK_LIGHT),
 }
 
 
@@ -121,7 +149,7 @@ def _resolve_theme() -> str:
 
 def _apply_palette(name: str) -> None:
     global _THEME_NAME, _T, _BG, _BG2, _BG3, _FG, _FG2, _FG3, _BLUE, _BLUE_HV
-    global _BORDER, _BORDER2, _TASK, _TASK_HV, _MATCH_BG, _MATCH_FG
+    global _BORDER, _BORDER2, _TASK, _TASK_HV, _MATCH_BG, _MATCH_FG, _REC, _PAUSE
     _THEME_NAME = name
     _T = _THEMES.get(name, _THEMES["dark"])
     _BG      = _T["BG"]
@@ -138,6 +166,8 @@ def _apply_palette(name: str) -> None:
     _TASK_HV = _T["TASK_HV"]
     _MATCH_BG = _T["MATCH_BG"]
     _MATCH_FG = _T["MATCH_FG"]
+    _REC     = _T["REC"]      # recording state (theme.rec)
+    _PAUSE   = _T["PAUSE"]    # processing/warning state (theme.pause)
 
 
 def refresh_theme() -> bool:
@@ -165,6 +195,41 @@ def _animations_enabled() -> bool:
     return cfg_on and not winfx.reduce_motion()
 
 
+def _panel_acrylic_enabled() -> bool:
+    """Config kill-switch for the Win11 acrylic backdrop (QUIETT_UI_PLAN P4,
+    BACKLOG item 14), default on. Reading config.json directly matches the
+    other display-only toggles in this module (animations, badge_animation)."""
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            return bool(json.load(f).get("panel_acrylic", True))
+    except Exception:
+        return True
+
+
+def _learn_from_edits_enabled() -> bool:
+    """Dictionary auto-learn gate (QUIETT_UI_PLAN P6, config key
+    learn_from_edits, default on). When off, corrections stop being logged —
+    existing promoted rules keep applying via profile.get_active_rules(),
+    which this doesn't touch."""
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            return bool(json.load(f).get("learn_from_edits", True))
+    except Exception:
+        return True
+
+
+def _apply_backdrop(win) -> None:
+    """Best-effort acrylic behind a floating Toplevel — silent no-op on Win10
+    or when the config key is off; the solid _BG fill underneath is unaffected
+    either way, so this never regresses the always-worked solid look."""
+    if not _panel_acrylic_enabled():
+        return
+    try:
+        winfx.apply_backdrop(winfx._toplevel_hwnd(win))
+    except Exception:
+        pass
+
+
 def _play_entrance(win, target_alpha: float, dy: int = 14, duration_ms: int = 200) -> None:
     """Slide-up + fade-in entrance (item 18): small upward drift combined with
     the existing alpha fade, eased out. Honours the `animations` config key —
@@ -178,10 +243,14 @@ def _play_entrance(win, target_alpha: float, dy: int = 14, duration_ms: int = 20
             pass
 
 
-# Typography ladder — Segoe UI Variable with weight cascade
-# (falls back automatically to Segoe UI if Variable isn't installed)
-_FONT_FAM_TEXT    = "Segoe UI Variable Text"
-_FONT_FAM_DISPLAY = "Segoe UI Variable Display"
+# Typography ladder — sourced from theme.FONT_UI / FONT_DISPLAY / FONT_MONO,
+# each a (preferred, fallback) tuple. The real installed-font check happens
+# once in _tk_main() once a Tk interpreter exists to query; these module-level
+# defaults (first choice) are what's live until then, and match what almost
+# every machine actually has since Segoe UI Variable ships with Win11.
+_FONT_FAM_TEXT    = theme.FONT_UI[0]
+_FONT_FAM_DISPLAY = theme.FONT_DISPLAY[0]
+_FONT_FAM_MONO    = theme.FONT_MONO[0]
 _FONT_BODY  = (_FONT_FAM_TEXT,    11, "normal")
 _FONT_HINT  = (_FONT_FAM_TEXT,     9, "normal")
 _FONT_META  = (_FONT_FAM_TEXT,     9, "normal")
@@ -242,7 +311,7 @@ def show_toast(message: str, kind: str = "info", action_label: str = "",
                   "action_label": action_label, "action_cb": action_cb})
 
 
-def flash_screen_edge(colour: str = "#3b82f6") -> None:
+def flash_screen_edge(colour: str = _BLUE) -> None:
     """Quick screen-edge flash to confirm a hotkey press registered."""
     _flash_q.put(colour)
 
@@ -282,10 +351,26 @@ def set_partial_text(text: str) -> None:
 
 def _tk_main() -> None:
     global _root
+    global _FONT_FAM_TEXT, _FONT_FAM_DISPLAY, _FONT_FAM_MONO
+    global _FONT_BODY, _FONT_HINT, _FONT_META, _FONT_BTN, _FONT_CHIP
     _root = tk.Tk()
     try:
         # points-per-pixel ratio so point-sized fonts track the real DPI
         _root.tk.call("tk", "scaling", ctypes.windll.user32.GetDpiForSystem() / 72.0)
+    except Exception:
+        pass
+    try:
+        # Graceful fallback (QUIETT_UI_PLAN P4): prefer theme.py's first choice,
+        # drop to its fallback entry if this Windows install doesn't have it.
+        installed = set(tkfont.families(_root))
+        _FONT_FAM_TEXT    = next((f for f in theme.FONT_UI if f in installed), theme.FONT_UI[-1])
+        _FONT_FAM_DISPLAY = next((f for f in theme.FONT_DISPLAY if f in installed), theme.FONT_DISPLAY[-1])
+        _FONT_FAM_MONO    = next((f for f in theme.FONT_MONO if f in installed), theme.FONT_MONO[-1])
+        _FONT_BODY = (_FONT_FAM_TEXT,    11, "normal")
+        _FONT_HINT = (_FONT_FAM_TEXT,     9, "normal")
+        _FONT_META = (_FONT_FAM_MONO,     9, "normal")
+        _FONT_BTN  = (_FONT_FAM_DISPLAY, 10, "normal")
+        _FONT_CHIP = (_FONT_FAM_TEXT,     8, "normal")
     except Exception:
         pass
     _root.withdraw()
@@ -464,7 +549,7 @@ def _show_anchored_toast(t: dict) -> None:
     action_label = t.get("action_label", "")
     action_cb = t.get("action_cb")
 
-    accent = {"info": _BLUE, "warn": "#f59e0b", "error": "#ef4444"}.get(kind, _BLUE)
+    accent = {"info": _BLUE, "warn": _PAUSE, "error": _REC}.get(kind, _BLUE)
 
     if kind == "error":
         # Audible cue only for genuine errors (item 45/48) — warn/info stay
@@ -514,6 +599,7 @@ def _show_anchored_toast(t: dict) -> None:
     _toast_offset += h + 10
 
     winfx.apply_rounded_region(win, radius=10)
+    _apply_backdrop(win)
     winfx.fade_in(win, target=0.96, duration_ms=160)
 
     if kind in ("warn", "error"):
@@ -565,19 +651,26 @@ def _show_edge_flash(colour: str) -> None:
 # Status badge (recording / processing / feedback)
 # ---------------------------------------------------------------------------
 
-_BADGE_CFG = {
-    "recording":      {"accent": "#e03030", "logo_bg": (210,  30,  30), "status": "Recording…"},
-    "processing":     {"accent": "#c8a000", "logo_bg": (200, 160,   0), "status": "Processing…"},
-    "too_short":      {"accent": "#888888", "text": "Hold longer to record"},
-    "not_ready":      {"accent": "#888888", "text": "Model loading, please wait"},
-    # Designed error states (BACKLOG item 48) — red accent + a plain-English
-    # next step, never a raw exception. "error": True marks these for the
-    # audible cue in _handle_badge, distinct from the benign grey hints above.
-    "mic_error":      {"accent": "#ef4444", "error": True,
-                        "text": "No microphone found. Check Settings → Microphone"},
-    "model_error":    {"accent": "#ef4444", "error": True,
-                        "text": "Whisper couldn't start. Check Settings or app.log"},
-}
+def _badge_cfg(state: str) -> dict:
+    """Per-state badge config, theme-aware (QUIETT_UI_PLAN P4: recording ->
+    rec, transcribing/processing -> pause; the waveform bars themselves stay
+    ion regardless of state — see _draw_badge_frame). Built fresh per call so
+    a theme switch is picked up immediately, same as every other colour in
+    this module."""
+    cfgs = {
+        "recording":   {"accent": _REC, "logo_bg": _rgb(_REC), "status": "Recording…"},
+        "processing":  {"accent": _PAUSE, "logo_bg": _rgb(_PAUSE), "status": "Processing…"},
+        "too_short":   {"accent": _FG2, "text": "Hold longer to record"},
+        "not_ready":   {"accent": _FG2, "text": "Model loading, please wait"},
+        # Designed error states (BACKLOG item 48) — red accent + a plain-English
+        # next step, never a raw exception. "error": True marks these for the
+        # audible cue in _handle_badge, distinct from the benign grey hints above.
+        "mic_error":   {"accent": _REC, "error": True,
+                         "text": "No microphone found. Check Settings → Microphone"},
+        "model_error": {"accent": _REC, "error": True,
+                         "text": "Whisper couldn't start. Check Settings or app.log"},
+    }
+    return cfgs.get(state, cfgs["processing"])
 
 # Visual layout for the recording badge
 _BADGE_W       = _px(320)
@@ -675,7 +768,7 @@ def _badge_hover_set(visible: bool) -> None:
         return
     _badge_hover_visible = visible
     stop_target = _FG2 if visible else _BG
-    cancel_target = "#ef4444" if visible else _BG
+    cancel_target = _REC if visible else _BG
     if _badge_stop_lbl is not None:
         try:
             winfx.ease_color(_badge_stop_lbl, "fg", _badge_stop_lbl.cget("fg"),
@@ -840,6 +933,7 @@ def _build_recording_badge(cfg: dict) -> None:
     _badge_win.geometry(f"{w}x{h}+{sw - w - 20}+{sh - h - 60}")
 
     winfx.apply_rounded_region(_badge_win, radius=14)
+    _apply_backdrop(_badge_win)
     _play_entrance(_badge_win, 0.96, dy=_px(16), duration_ms=200)
 
 
@@ -886,6 +980,7 @@ def _build_text_badge(cfg: dict) -> None:
     _badge_win.geometry(f"{w}x{h}+{sw - w - 20}+{sh - h - 60}")
 
     winfx.apply_rounded_region(_badge_win, radius=10)
+    _apply_backdrop(_badge_win)
     _play_entrance(_badge_win, 0.94, dy=_px(16), duration_ms=200)
 
 
@@ -1069,8 +1164,12 @@ def _draw_badge_frame() -> None:
     if _badge_canvas is None:
         return
 
-    cfg = _BADGE_CFG.get(_badge_state or "recording", _BADGE_CFG["recording"])
-    accent = cfg["accent"]
+    cfg = _badge_cfg(_badge_state or "recording")
+    # The waveform itself is always ion (QUIETT_UI_PLAN P4) — cfg["accent"]
+    # (rec while recording, pause while processing) instead tints the logo
+    # pulse built at badge-open time, so the state read is still visible
+    # without recolouring the level meter people are actually watching.
+    accent = _BLUE
 
     try:
         canvas_h = _LOGO_SIZE
@@ -1087,7 +1186,7 @@ def _draw_badge_frame() -> None:
             timeout = audio.get_silence_timeout()
             is_silent_warn = timeout > 0 and silence > 1.5
             if is_silent_warn:
-                accent = "#c8a000"
+                accent = _PAUSE
 
             def norm(v: float) -> float:
                 v = min(1.0, v / 0.20)
@@ -1294,7 +1393,7 @@ def _handle_badge(cmd: str | None) -> None:
             winfx.fade_out_then_destroy(win, duration_ms=160)
         return
 
-    cfg = _BADGE_CFG.get(cmd, _BADGE_CFG["processing"])
+    cfg = _badge_cfg(cmd)
     needs_wave = cmd in ("recording", "processing")
 
     # Rebuild if widget type doesn't match the new state
@@ -1451,10 +1550,10 @@ def _border_colour(confidence: float | None) -> str:
     if confidence is None:
         return _BORDER
     if confidence >= 0.6:
-        return _BLUE       # confident — blue
+        return _BLUE       # confident — ion
     if confidence >= 0.3:
-        return "#c8a000"   # uncertain — amber
-    return "#cc4400"       # low confidence — orange-red
+        return _PAUSE      # uncertain — amber
+    return _REC            # low confidence — alarm red
 
 
 def _open_window(text: str, hwnd: int, empty: bool = False,
@@ -1562,8 +1661,8 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
     # Word-level confidence as underline (not foreground colour) — subtler, more pro
     if words and not empty:
-        entry.tag_configure("conf_low",    underline=True, underlinefg="#ef4444")
-        entry.tag_configure("conf_medium", underline=True, underlinefg="#f59e0b")
+        entry.tag_configure("conf_low",    underline=True, underlinefg=_REC)
+        entry.tag_configure("conf_medium", underline=True, underlinefg=_PAUSE)
         search_start = "1.0"
         for w in words:
             wtext = (w.get("text") or "").strip()
@@ -1583,10 +1682,10 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     if confidence is not None and not empty:
         if confidence < 0.3:
             hint_text = "Low confidence — review before inserting"
-            hint_fg = "#cc4400"
+            hint_fg = _REC
         elif confidence < 0.6:
             hint_text = "Check transcription before inserting"
-            hint_fg = "#c8a000"
+            hint_fg = _PAUSE
         else:
             hint_text = ""
             hint_fg = _FG2
@@ -1668,7 +1767,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         if not empty:
             side = "raw" if _showing_raw[0] else "cleaned"
             original = (_raw_originals[side] or "").rstrip()
-            if original != result:
+            if original != result and _learn_from_edits_enabled():
                 try:
                     promoted = profile.log_correction(original, result)
                 except Exception:
@@ -1935,6 +2034,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
     # ── Rounded corners + slide-up entrance ────────────────────────────────
     winfx.apply_rounded_region(win, radius=12)
+    _apply_backdrop(win)
     _play_entrance(win, 1.0, dy=_px(14), duration_ms=200)
     if not empty:
         target_border = _border_colour(confidence)
@@ -2074,7 +2174,7 @@ def _open_profile() -> None:
     txt.tag_configure("active",  foreground=_FG,       font=("Segoe UI", 10))
     txt.tag_configure("pending", foreground=_FG3,      font=("Segoe UI", 10))
     txt.tag_configure("count",   foreground=_FG3,      font=("Segoe UI", 9))
-    txt.tag_configure("del",     foreground="#cc4444",  font=("Segoe UI", 8), underline=True)
+    txt.tag_configure("del",     foreground=_REC,  font=("Segoe UI", 8), underline=True)
     txt.tag_configure("sep",     foreground=_BORDER)
     txt.tag_configure("empty",   foreground=_FG2,      font=("Segoe UI", 10))
 
@@ -2274,7 +2374,7 @@ def _open_settings() -> None:
         # Live meter (item 22)
         _label(p, "Live level").pack(fill=tk.X, padx=22, pady=(12, 2))
         meter = widgets.MicMeter(p, bg=_BG, idle=_BORDER,
-                                 active_lo="#22c55e", active_hi="#ef4444")
+                                 active_lo=_BLUE, active_hi=_REC)
         meter.pack(anchor="w", padx=22)
 
         def _on_mic_change(*_):
@@ -2509,7 +2609,7 @@ def _open_settings() -> None:
             paste_thresh = float(state["auto_paste_var"].get())
         except ValueError:
             err_var.set("Numeric fields must be numbers.")
-            err_lbl.config(fg="#ef4444")
+            err_lbl.config(fg=_REC)
             return
 
         fillers = [w.strip() for w in state["fillers_txt"].get("1.0", "end-1c").splitlines()
@@ -2570,16 +2670,16 @@ def _open_settings() -> None:
                 json.dump(new_cfg, f, indent=2, ensure_ascii=False)
             configure_position(state["pos_var"].get())
             err_var.set("Saved.")
-            err_lbl.config(fg="#22c55e")
+            err_lbl.config(fg=_BLUE)
             # Brief flash on the Save button itself — a tactile confirmation
             # beyond the footer text, since that's easy to miss.
             winfx.ease_color(
-                save_btn, "bg", _BLUE, "#22c55e", duration_ms=150, steps=6,
+                save_btn, "bg", _BLUE, _BLUE_HV, duration_ms=150, steps=6,
                 on_done=lambda: winfx.ease_color(
-                    save_btn, "bg", "#22c55e", _BLUE, duration_ms=300, steps=8))
+                    save_btn, "bg", _BLUE_HV, _BLUE, duration_ms=300, steps=8))
         except Exception as exc:
             err_var.set(f"Save failed: {exc}")
-            err_lbl.config(fg="#ef4444")
+            err_lbl.config(fg=_REC)
 
     def on_close() -> None:
         global _settings_open

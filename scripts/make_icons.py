@@ -18,7 +18,7 @@ sys.path.insert(0, _PROJ)
 import tray  # noqa: E402
 
 ASSETS = os.path.join(_PROJ, "assets")
-ICO_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+ICO_SIZES = [(s, s) for s in tray.ICO_SIZES]
 
 
 def verify_ico(path: str) -> bool:

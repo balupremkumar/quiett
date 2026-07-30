@@ -61,6 +61,26 @@ class TestValidateConfig:
         assert result["corrections"]         == {"gonna": "going to"}
 
 
+class TestPanelAcrylicConfig:
+    def test_default_on(self):
+        assert main._validate_config({})["panel_acrylic"] is True
+
+    def test_explicit_off_kept(self):
+        assert main._validate_config({"panel_acrylic": False})["panel_acrylic"] is False
+
+    def test_non_bool_coerced(self):
+        assert main._validate_config({"panel_acrylic": 0})["panel_acrylic"] is False
+        assert main._validate_config({"panel_acrylic": 1})["panel_acrylic"] is True
+
+
+class TestLearnFromEditsConfig:
+    def test_default_on(self):
+        assert main._validate_config({})["learn_from_edits"] is True
+
+    def test_explicit_off_kept(self):
+        assert main._validate_config({"learn_from_edits": False})["learn_from_edits"] is False
+
+
 class TestReadAloudConfig:
     def test_defaults_applied(self):
         result = main._validate_config({})

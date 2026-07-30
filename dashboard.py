@@ -21,9 +21,11 @@ import urllib.error
 import urllib.request
 import wave
 import winsound
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from PIL import Image, ImageDraw
+
+import theme
 
 # webview and history are only needed when running as __main__ (subprocess),
 # but importing them at module level is harmless and keeps DashboardAPI clean.
@@ -158,7 +160,7 @@ _KNOWN_CONFIG_KEYS = frozenset({
     "theme", "animations", "sound_volume", "history_max_entries",
     "recording_retention_days", "dashboard_scale", "dashboard_control_port",
     "tts_enabled", "tts_speed", "tts_max_chunk_chars", "tts_reference",
-    "study_mode", "study_speed", "study_pause_scale",
+    "study_mode", "study_speed", "study_pause_scale", "learn_from_edits",
 })
 
 _DIAG_API_BASE = "http://127.0.0.1:8090"
@@ -173,6 +175,27 @@ def _diag_api_get(path: str, timeout: float = 2.0) -> "dict | None":
             return json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None
+
+
+def _diag_api_post_json(path: str, payload: dict, timeout: float = 3.0) -> dict:
+    """POST a JSON body against api_server.py (the /speak endpoint for the
+    Voice page's Play sample button). Same never-raises contract as
+    _diag_api_post: always a dict with 'ok' plus either 'body' or 'error'."""
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(_DIAG_API_BASE + path, method="POST", data=data,
+                                      headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            return {"ok": True, "body": json.loads(raw) if raw else {}}
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            body = {}
+        return {"ok": False, "http_error": True, "status": exc.code, "body": body}
+    except Exception as exc:
+        return {"ok": False, "http_error": False, "error": str(exc)}
 
 
 def _diag_api_post(path: str, timeout: float = 2.0) -> dict:
@@ -330,6 +353,41 @@ def _render_waveform_png(path: str, buckets: int = 60,
 
 
 _waveform_cache: dict = {}  # filename -> data URI, in-memory only (item 88)
+_audio_duration_cache: dict = {}  # filename -> seconds, in-memory only
+
+
+def _entry_audio_seconds(entry: dict) -> "float | None":
+    """Real speaking duration for one history entry, read from its own wav.
+
+    History entries carry no stored wpm - the Home page's average pace is
+    derived honestly from actual recordings rather than invented, so an
+    entry with no audio (retention purged it, or incognito skipped it)
+    simply doesn't count toward the average."""
+    audio = entry.get("audio")
+    if not audio:
+        return None
+    cached = _audio_duration_cache.get(audio)
+    if cached is not None:
+        return cached
+    path = os.path.join("recordings", audio)
+    try:
+        with wave.open(path, "rb") as wf:
+            rate = wf.getframerate()
+            dur = wf.getnframes() / float(rate) if rate else None
+    except Exception:
+        dur = None
+    if dur:
+        _audio_duration_cache[audio] = dur
+    return dur
+
+
+# Fixed passage the Voice page's pause-plan visual and Play sample button use.
+# Same for every user, every session - this makes the plan reproducible against
+# the real narration.py segmenter, and "hear it" ambiguity-free.
+_STUDY_SAMPLE = (
+    "Study Mode reads the way a teacher speaks. Short sentences land first, then a "
+    "pause. Lists breathe: one, two, three. Headings get the longest beat of all."
+)
 
 
 def _day_group_label(d: "date", today: "date") -> str:
@@ -448,7 +506,8 @@ def _raise_self() -> None:
             user32.AttachThreadInput(fg_thread, cur_thread, False)
 
 
-_VALID_PAGES = ("home", "history", "dictionary", "settings", "diagnostics", "about")
+_VALID_PAGES = ("home", "dictation", "voice", "history", "dictionary",
+                "settings", "diagnostics", "about")
 
 
 def _serve_control(srv: "socket.socket", window, ready: threading.Event) -> None:
@@ -539,6 +598,157 @@ class DashboardAPI:
             "correction_count": len(cfg.get("corrections", {})),
             "vocab_count": len(cfg.get("custom_vocabulary", [])),
         }
+
+    def get_home_stats(self) -> dict:
+        """Home page (P3): words/day for the last 14 days, this-week total +
+        delta vs the prior week, average pace, time reclaimed, dictation
+        count, and the 3 most recent entries. All derived from history.json;
+        wpm has no other source of truth (see _entry_audio_seconds)."""
+        entries = hist.load()
+        today = date.today()
+
+        day_words = {(today - timedelta(days=13 - i)).isoformat(): 0 for i in range(14)}
+        for e in entries:
+            try:
+                d = datetime.fromisoformat(e.get("timestamp", "")).date()
+            except ValueError:
+                continue
+            key = d.isoformat()
+            if key in day_words:
+                day_words[key] += len(e.get("text", "").split())
+        ordered_days = sorted(day_words)
+        per_day = [day_words[k] for k in ordered_days]
+        day_labels = [date.fromisoformat(k).strftime("%a")[0] for k in ordered_days]
+
+        def _words_between(start_ago: int, end_ago: int) -> int:
+            lo = today - timedelta(days=end_ago)
+            hi = today - timedelta(days=start_ago)
+            total = 0
+            for e in entries:
+                try:
+                    d = datetime.fromisoformat(e.get("timestamp", "")).date()
+                except ValueError:
+                    continue
+                if lo <= d <= hi:
+                    total += len(e.get("text", "").split())
+            return total
+
+        words_this_week = _words_between(0, 6)
+        words_prior_week = _words_between(7, 13)
+        if words_prior_week > 0:
+            delta_pct = round((words_this_week - words_prior_week) / words_prior_week * 100)
+        else:
+            delta_pct = 100 if words_this_week > 0 else 0
+
+        wpms = []
+        reclaimed_minutes = 0.0
+        week_start = today - timedelta(days=6)
+        for e in entries:
+            try:
+                d = datetime.fromisoformat(e.get("timestamp", "")).date()
+            except ValueError:
+                continue
+            if d < week_start:
+                continue
+            words = len(e.get("text", "").split())
+            if not words:
+                continue
+            dur = _entry_audio_seconds(e)
+            if not dur:
+                continue
+            wpm = words / (dur / 60.0)
+            if wpm <= 0:
+                continue
+            wpms.append(wpm)
+            reclaimed_minutes += max(0.0, words / 40.0 - words / wpm)
+
+        avg_wpm = round(sum(wpms) / len(wpms)) if wpms else None
+        faster_than_typing = round(avg_wpm / 40.0, 1) if avg_wpm else None
+
+        recent = []
+        for e in entries[:3]:
+            text = e.get("text", "")
+            ts = e.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(ts)
+                label = dt.strftime("%I:%M %p").lstrip("0")
+            except ValueError:
+                label = ts
+            recent.append({
+                "text": text, "label": label,
+                "words": len(text.split()),
+                "source": e.get("source") or "",
+            })
+
+        return {
+            "has_history": bool(entries),
+            "words_this_week": words_this_week,
+            "delta_pct": delta_pct,
+            "avg_wpm": avg_wpm,
+            "faster_than_typing": faster_than_typing,
+            "reclaimed_minutes": round(reclaimed_minutes),
+            "dictation_count": len(entries),
+            "per_day": per_day,
+            "day_labels": day_labels,
+            "recent": recent,
+        }
+
+    def get_pause_plan(self) -> dict:
+        """Voice page (P6): the pause-plan visual is real narration.py output
+        on a fixed sample passage, not a faked shape - segment widths are the
+        actual segment character counts and pause bars are the actual planned
+        pause durations, at the user's own study speed/pause settings."""
+        try:
+            import narration
+            cfg = _read_cfg()
+            budget = int(cfg.get("tts_max_chunk_chars", 120) or 120)
+            base_speed = float(cfg.get("study_speed", 0.95))
+            pause_scale = float(cfg.get("study_pause_scale", 1.0))
+            segments = narration.plan(_STUDY_SAMPLE, budget=budget, base_speed=base_speed,
+                                       study=True, pause_scale=pause_scale)
+            return {
+                "ok": True,
+                "sample": _STUDY_SAMPLE,
+                "segments": [
+                    {"text": text, "chars": len(text), "pause": round(pause, 2),
+                     "speed": round(speed, 2)}
+                    for text, pause, speed in segments
+                ],
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def play_sample(self) -> dict:
+        """Voice page Play sample button. Speaks _STUDY_SAMPLE through the
+        main app's /speak endpoint (api_server.py, Agent B). Degrades to a
+        toast rather than a crash: connection failure means the app isn't
+        running, 403/404 means the endpoint exists but read-aloud is off."""
+        result = _diag_api_post_json("/speak", {"text": _STUDY_SAMPLE})
+        if result["ok"]:
+            return {"ok": True}
+        if result.get("http_error") and result.get("status") in (403, 404):
+            return {"ok": False, "reason": "off"}
+        return {"ok": False, "reason": "unreachable"}
+
+    def get_network_probe(self) -> dict:
+        """Diagnostics 'Network isolation' probe + the header seal's data
+        source (Agent B's /diag/sockets on api_server.py). {"reachable":
+        False} degrades to an honest unlit seal rather than a guess."""
+        data = _diag_api_get("/diag/sockets")
+        if data is None:
+            return {"reachable": False}
+        data["reachable"] = True
+        return data
+
+    def get_promotions(self) -> list:
+        """Dictionary 'Learned this week' feed (Agent B's profile.recent_promotions,
+        contract: [{"raw","fixed","count","promoted_at"}, ...]). Empty list,
+        never a crash, if that function isn't there yet or the DB is empty."""
+        try:
+            import profile
+            return profile.recent_promotions(days=7)
+        except Exception:
+            return []
 
     def get_backend_status(self) -> dict:
         """Live health for the Home status strip (BACKLOG item 48b). Both
@@ -673,7 +883,12 @@ class DashboardAPI:
         except Exception:
             return False
 
-    def clear_history(self) -> bool:
+    def clear_history(self, confirm: bool = False) -> bool:
+        # Destructive: refuses without the explicit confirm flag so that no
+        # argument-less call (tooling, introspection, a stray bridge call)
+        # can ever wipe the history.
+        if confirm is not True:
+            return False
         try:
             hist.clear()
             return True
@@ -737,6 +952,7 @@ class DashboardAPI:
         return {
             "corrections": cfg.get("corrections", {}),
             "vocabulary": cfg.get("custom_vocabulary", []),
+            "learn_from_edits": cfg.get("learn_from_edits", True),
         }
 
     def set_correction(self, original: str, replacement: str) -> bool:
@@ -941,25 +1157,15 @@ _HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <title>Quiett</title>
 <style>
-/* ── Variables ── */
+/* ── Quiett — ion glass identity. Tokens come from theme.py (single source
+   of truth shared with the Tk panel/badge and the tray); this file only
+   consumes them via css_vars(). ── */
 :root {
-  --bg:#202020; --bg-sb:#181818; --surf:#2c2c2c; --surf2:#383838;
-  --hov:#ffffff0d; --act:#ffffff18; --brd:#ffffff14; --brd2:#ffffff22;
-  --txt:#ffffff; --txt2:rgba(255,255,255,.78); --txt3:rgba(255,255,255,.5);
-  --acc:#60cdff; --acc-bg:rgba(96,205,255,.1); --acc-hov:rgba(96,205,255,.18);
-  --danger:#f85149; --success:#3fb950; --warn:#d29922;
-  --shad:0 2px 14px rgba(0,0,0,.45);
-  --r:8px; --r-sm:5px; --sbw:200px;
-  --font:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
-  --font-d:"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
+__ROOT_VARS_DARK__
+  --r:14px;
 }
-[data-theme=light]{
-  --bg:#ececef; --bg-sb:#e4e4e8; --surf:#f8f8fa; --surf2:#efeff2;
-  --hov:#0000000d; --act:#00000016; --brd:#00000026; --brd2:#00000044;
-  --txt:#1c1c1c; --txt2:rgba(0,0,0,.78); --txt3:rgba(0,0,0,.55);
-  --acc:#0067c0; --acc-bg:rgba(0,103,192,.08); --acc-hov:rgba(0,103,192,.14);
-  --danger:#cf222e; --success:#2da44e; --warn:#9a6700;
-  --shad:0 2px 10px rgba(0,0,0,.07);
+[data-theme=light] {
+__ROOT_VARS_LIGHT__
 }
 
 *{box-sizing:border-box;margin:0;padding:0}
@@ -970,753 +1176,725 @@ html,body{height:100vh;overflow:hidden}
 @media (prefers-reduced-motion: reduce) {
   *{transition:none!important;animation:none!important}
 }
-body{font-family:var(--font);background:var(--bg);color:var(--txt);-webkit-font-smoothing:antialiased}
+body{
+  font-family:var(--font);color:var(--text);font-size:13px;line-height:1.5;
+  background:__AURORA_DARK__, var(--void);
+  -webkit-font-smoothing:antialiased;
+}
+[data-theme=light] body{ background:__AURORA_LIGHT__, var(--void); }
+/* film grain */
+body::after{
+  content:"";position:fixed;inset:0;pointer-events:none;opacity:.3;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+input,select,textarea{font:inherit;color:inherit}
+::selection{background:rgba(125,232,255,.28)}
+:focus{outline:none}
+:focus-visible{outline:1px solid var(--ion);outline-offset:2px;border-radius:4px}
+::-webkit-scrollbar{width:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--hair2);border-radius:99px}
 
-/* ── Layout ── */
-.app{display:flex;height:100vh}
+.app{display:flex;flex-direction:column;height:100vh}
 
-/* ── Sidebar ── */
-.sidebar{width:var(--sbw);background:var(--bg-sb);display:flex;flex-direction:column;
-  padding:14px 8px;flex-shrink:0;border-right:1px solid var(--brd)}
-.logo{display:flex;align-items:center;gap:9px;padding:6px 8px 22px;
-  font-family:var(--font-d);font-size:14.5px;font-weight:600;color:var(--txt)}
-.logo svg{width:20px;height:20px;color:var(--acc);flex-shrink:0}
-.nav{flex:1;display:flex;flex-direction:column;gap:1px}
-.nav-item{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:var(--r-sm);
-  cursor:pointer;font-size:13px;color:var(--txt2);border:none;background:transparent;
-  width:100%;text-align:left;transition:background .1s,color .1s;font-family:var(--font)}
-.nav-item:hover{background:var(--hov);color:var(--txt)}
-.nav-item.active{background:var(--act);color:var(--txt);font-weight:500}
-.nav-item svg{width:15px;height:15px;flex-shrink:0}
-.sb-footer{margin-top:auto;padding:10px 4px 2px;display:flex;align-items:center;
-  justify-content:space-between}
-.sb-status{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--txt3)}
-.status-dot{width:6px;height:6px;border-radius:50%;background:var(--success)}
-.theme-btn{width:28px;height:28px;border-radius:5px;border:none;background:transparent;
-  cursor:pointer;color:var(--txt3);display:flex;align-items:center;justify-content:center;
-  transition:background .1s,color .1s}
-.theme-btn:hover{background:var(--hov);color:var(--txt)}
-.theme-btn svg{width:14px;height:14px}
+/* ── Titlebar / brand row (native window chrome stays — this is just the
+   brand strip inside the page) ── */
+.titlebar{display:flex;align-items:center;gap:12px;height:46px;padding:0 18px;flex:none;position:relative}
+.titlebar::after{content:"";position:absolute;left:18px;right:18px;bottom:0;height:1px;background:linear-gradient(90deg,transparent,var(--hair2) 20%,var(--hair2) 80%,transparent)}
+.brand{display:flex;align-items:center;gap:9px}
+.brand b{font-weight:500;font-size:13px;letter-spacing:.14em;text-transform:uppercase}
+.brand .dim2{color:var(--dim);font-weight:400}
+.ver{font-family:var(--mono);font-size:9px;letter-spacing:.12em;color:var(--dim);padding-left:10px}
+.tb-sp{flex:1}
+.seal{
+  display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:9px;letter-spacing:.16em;color:var(--mid);
+  border:1px solid var(--hair);border-radius:99px;padding:5px 13px;
+  background:linear-gradient(180deg,rgba(255,255,255,.03),transparent);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05);
+}
+.seal i{width:5px;height:5px;border-radius:50%;background:var(--dim);display:inline-block}
+.seal.lit i{background:var(--ion);box-shadow:0 0 8px var(--ion)}
+
+.body{display:flex;flex:1;min-height:0}
+
+/* ── Rail — no box, just light ── */
+.rail{width:204px;flex:none;padding:16px 10px 14px 12px;display:flex;flex-direction:column;gap:1px;overflow-y:auto;position:relative}
+.rail::after{content:"";position:absolute;top:20px;bottom:20px;right:0;width:1px;background:linear-gradient(180deg,transparent,var(--hair) 25%,var(--hair) 75%,transparent)}
+.rail-h{font-size:9px;font-weight:600;letter-spacing:.2em;color:var(--dim);padding:14px 10px 6px}
+.rail-h:first-child{padding-top:0}
+.nav{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border-radius:9px;color:var(--mid);font-weight:400;font-size:12.5px;text-align:left;position:relative;transition:color .15s}
+.nav svg{flex:none;opacity:.7}
+.nav:hover{color:var(--text);background:var(--glass)}
+.nav.active{color:var(--text);font-weight:500}
+.nav.active svg{opacity:1;color:var(--ion);filter:drop-shadow(0 0 6px rgba(125,232,255,.6))}
+.nav.active::before{content:"";position:absolute;left:-2px;top:50%;transform:translateY(-50%);width:2px;height:16px;border-radius:2px;background:var(--ion);box-shadow:0 0 10px var(--ion)}
+.rail-foot{margin-top:auto;padding:12px 10px 0}
+.rail-foot p{font-size:10.5px;color:var(--dim);line-height:1.8}
+.rail-foot .about-link{margin-top:8px;display:block;font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--dim)}
+.rail-foot .about-link:hover{color:var(--mid)}
+.key{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:500;color:var(--text);background:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,.03));border:1px solid var(--hair2);border-radius:5px;padding:1px 7px;vertical-align:1px;box-shadow:0 2px 0 rgba(0,0,0,.35)}
+[data-theme=light] .key{box-shadow:0 2px 0 rgba(0,0,0,.08)}
+.plus{color:var(--dim)}
 
 /* ── Main ── */
-.main{flex:1;overflow:hidden;display:flex;flex-direction:column}
-.page{display:none;flex-direction:column;height:100%;overflow-y:auto}
-.page.active{display:flex;animation:fadeIn .15s ease}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.page{flex:1;min-height:0;overflow-y:auto;padding:26px 32px 32px;display:none}
+.page.active{display:block;animation:fadeIn .15s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
+.ph{margin-bottom:22px;display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.22em;color:var(--ion);margin-bottom:9px;display:flex;align-items:center;gap:10px}
+.eyebrow.neutral{color:var(--dim)}
+.ph h1{font-family:var(--font-d);font-size:24px;font-weight:300;letter-spacing:-.01em}
+.ph p{color:var(--mid);font-size:12.5px;margin-top:5px;max-width:560px}
+.ph-actions{display:flex;gap:8px;align-items:center;flex:none}
 
-/* ── Page header ── */
-.ph{padding:26px 30px 18px;display:flex;align-items:flex-start;
-  justify-content:space-between;flex-shrink:0}
-.ph h1{font-family:var(--font-d);font-size:21px;font-weight:600;line-height:1.2}
-.ph .sub{font-size:12px;color:var(--txt3);margin-top:2px}
-.ph-actions{display:flex;gap:8px;align-items:center}
+/* ── The voice line — status strip along the bottom ── */
+.voiceline{flex:none;display:flex;align-items:center;gap:14px;height:34px;padding:0 20px;position:relative;font-family:var(--mono);font-size:9px;letter-spacing:.14em;color:var(--dim)}
+.voiceline::before{content:"";position:absolute;left:18px;right:18px;top:0;height:1px;background:linear-gradient(90deg,transparent,var(--hair2) 20%,var(--hair2) 80%,transparent)}
+.vl-wave{width:60px;height:14px;flex:none}
+.vl-wave polyline{fill:none;stroke:var(--ion);stroke-width:1.4;stroke-linecap:round;filter:drop-shadow(0 0 4px rgba(125,232,255,.7))}
+.vl-sp{flex:1}
+.vl-keys{letter-spacing:.05em}
 
-/* ── Stat cards ── */
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;
-  padding:0 30px 22px;flex-shrink:0}
-.stat-card{background:var(--surf);border:1px solid var(--brd);border-radius:var(--r);
-  padding:14px 16px;box-shadow:var(--shad);transition:border-color .15s}
-.stat-card:hover{border-color:var(--brd2)}
-.stat-lbl{font-size:9.5px;font-weight:700;letter-spacing:.6px;color:var(--txt3);
-  text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:5px}
-.stat-lbl svg{width:11px;height:11px}
-.stat-val{font-family:var(--font-d);font-size:25px;font-weight:700;
-  color:var(--txt);letter-spacing:-.5px}
+/* ── Planes replace cards: light from above, no full border ── */
+.plane{
+  background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.012));
+  border-radius:var(--r-card);padding:20px 22px;position:relative;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 20px 40px -24px rgba(0,0,0,.5);
+}
+[data-theme=light] .plane{box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 12px 30px -20px rgba(20,40,70,.15)}
+.plane h3{font-size:13px;font-weight:500;letter-spacing:.01em}
+.sub{font-size:11.5px;color:var(--mid)}
+.row{display:flex;align-items:center;gap:12px}
+.sp{flex:1}
+.grid{display:grid;gap:16px}
 
-/* ── Section title ── */
-.sec-hdr{display:flex;align-items:center;justify-content:space-between;
-  padding:0 30px 10px;flex-shrink:0}
-.sec-hdr h2{font-size:13px;font-weight:600;color:var(--txt2)}
-.link-btn{font-size:12px;color:var(--acc);background:none;border:none;cursor:pointer;
-  padding:2px 6px;border-radius:4px;font-family:var(--font);transition:background .1s}
-.link-btn:hover{background:var(--acc-bg)}
+/* ── Buttons ── */
+.btn{
+  display:inline-flex;align-items:center;gap:8px;font-weight:500;font-size:12px;letter-spacing:.02em;
+  padding:8px 16px;border-radius:99px;border:1px solid var(--hair2);color:var(--text);
+  background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.02));
+  transition:all .16s ease;
+}
+[data-theme=light] .btn{background:linear-gradient(180deg,rgba(255,255,255,.9),rgba(255,255,255,.6))}
+.btn:hover{border-color:rgba(125,232,255,.4);box-shadow:0 0 26px -8px rgba(125,232,255,.5)}
+.btn:active{transform:scale(.98)}
+.btn.primary{border-color:rgba(125,232,255,.45);background:linear-gradient(180deg,rgba(125,232,255,.14),rgba(63,140,255,.06));box-shadow:0 0 30px -10px rgba(125,232,255,.5),inset 0 1px 0 rgba(255,255,255,.14)}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--mid);padding:7px 11px}
+.btn.ghost:hover{color:var(--text);box-shadow:none;background:var(--glass)}
+.btn.danger{border-color:rgba(255,107,94,.3);color:var(--rec)}
+.btn.danger:hover{box-shadow:0 0 26px -8px rgba(255,107,94,.5);border-color:rgba(255,107,94,.5)}
+.btn:disabled{opacity:.45;cursor:not-allowed;pointer-events:none}
+.tri{color:var(--ion);font-size:9px}
 
-/* ── Activity / History list ── */
-.list-wrap{padding:0 30px;flex:1;overflow-y:auto}
-.day-hdr{font-size:10.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;
-  color:var(--txt3);padding:14px 12px 6px}
-.day-hdr:first-child{padding-top:4px}
-.list-item{padding:9px 12px;border-radius:var(--r-sm);cursor:default;
-  transition:background .1s;position:relative;display:flex;flex-direction:column;
-  gap:2px;border-bottom:1px solid var(--brd)}
-.list-item:last-child{border-bottom:none}
-.list-item:hover{background:var(--hov)}
-.li-text{font-size:12.5px;color:var(--txt);overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap;padding-right:96px;-webkit-user-select:text;user-select:text}
-.li-meta{font-size:11px;color:var(--txt3);display:flex;align-items:center;gap:5px}
-.wave-thumb{width:60px;height:20px;background-color:var(--surf2);background-repeat:no-repeat;
-  background-position:center;background-size:contain;border-radius:3px;flex-shrink:0}
-.src-badge{font-size:9px;padding:1px 5px;border-radius:8px;background:var(--acc-bg);
-  color:var(--acc);font-weight:700;text-transform:uppercase}
-.li-acts{position:absolute;right:10px;top:50%;transform:translateY(-50%);
-  display:none;gap:4px}
-.list-item:hover .li-acts{display:flex}
-.ia{width:26px;height:26px;display:flex;align-items:center;justify-content:center;
-  background:var(--surf2);border:1px solid var(--brd);border-radius:4px;
-  cursor:pointer;color:var(--txt2);transition:all .1s}
-.ia:hover{background:var(--hov);color:var(--txt)}
-.ia.del:hover{background:rgba(248,81,73,.15);color:var(--danger);border-color:var(--danger)}
-.ia svg{width:12px;height:12px}
-.ia.pin.on{color:var(--acc)}
-.ia.play.on{color:var(--acc);border-color:var(--acc)}
-.empty{text-align:center;padding:48px 32px;color:var(--txt3);font-size:13px}
-/* Designed empty states — first-use onboarding, not just a blank message
-   (BACKLOG item 49). Distinct from the plain .empty above, which still
-   covers "Loading…" and the search/filter-empty case. */
-.empty-state{text-align:center;padding:40px 28px;color:var(--txt3)}
-.empty-state .es-icon{color:var(--txt3);opacity:.6;margin-bottom:10px;
-  display:flex;justify-content:center}
-.empty-state .es-icon svg{width:30px;height:30px}
-.empty-state .es-title{font-size:13px;font-weight:600;color:var(--txt2);margin-bottom:3px}
-.empty-state .es-sub{font-size:12px;color:var(--txt3)}
-.list-item.pinned{background:var(--acc-bg)}
-.pin-badge{display:inline-flex;color:var(--acc)}
-.pin-badge svg{width:10px;height:10px}
-mark{background:var(--acc-bg);color:inherit;border-radius:2px;padding:0 1px}
+/* ── Toggle — hairline capsule ── */
+.tog{position:relative;width:38px;height:21px;border-radius:99px;background:rgba(255,255,255,.05);border:1px solid var(--hair2);flex:none;transition:all .18s ease;cursor:pointer}
+[data-theme=light] .tog{background:rgba(0,0,0,.05)}
+.tog::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:var(--dim);transition:all .18s ease}
+.tog.on{border-color:rgba(125,232,255,.5);background:rgba(125,232,255,.10);box-shadow:0 0 16px -4px rgba(125,232,255,.5)}
+.tog.on::after{left:19px;background:var(--ion);box-shadow:0 0 8px var(--ion)}
 
-/* ── Search ── */
-.search-wrap{padding:14px 30px 10px;flex-shrink:0;position:relative}
-.search-icon{position:absolute;left:42px;top:50%;transform:translateY(-50%);
-  width:14px;height:14px;color:var(--txt3);pointer-events:none}
-.search-in{width:100%;padding:8px 12px 8px 34px;background:var(--surf);
-  border:1px solid var(--brd);border-radius:var(--r-sm);color:var(--txt);
-  font-family:var(--font);font-size:12.5px;outline:none}
-.search-in:focus{border-color:var(--acc)}
-.search-in::placeholder{color:var(--txt3)}
+/* ── Segmented ── */
+.seg{display:inline-flex;border:1px solid var(--hair);border-radius:99px;padding:3px;gap:2px;background:rgba(0,0,0,.2)}
+[data-theme=light] .seg{background:rgba(0,0,0,.04)}
+.seg button{font-size:11px;font-weight:500;color:var(--dim);padding:5px 12px;border-radius:99px;letter-spacing:.02em}
+.seg button.on{background:linear-gradient(180deg,rgba(125,232,255,.16),rgba(63,140,255,.07));color:var(--text);box-shadow:inset 0 1px 0 rgba(255,255,255,.1)}
 
-/* ── Filter chips ── */
-.chip-row{display:flex;gap:6px;padding:0 30px 12px;flex-shrink:0;flex-wrap:wrap}
-.chip{padding:5px 12px;border-radius:14px;border:1px solid var(--brd);background:var(--surf);
-  color:var(--txt2);font-size:11.5px;font-weight:500;cursor:pointer;transition:all .12s;
-  font-family:var(--font)}
-.chip:hover{background:var(--hov);color:var(--txt)}
-.chip.active{background:var(--acc-bg);border-color:var(--acc);color:var(--acc)}
+/* ── Slider ── */
+.slider{-webkit-appearance:none;appearance:none;width:100%;height:2px;border-radius:99px;background:rgba(255,255,255,.1);outline-offset:8px}
+[data-theme=light] .slider{background:rgba(0,0,0,.1)}
+.slider::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--ion);box-shadow:0 0 10px rgba(125,232,255,.8);cursor:grab;border:none}
 
-/* ── Bulk select ── */
-.bulk-bar{display:flex;align-items:center;gap:14px;padding:8px 30px;flex-shrink:0;
-  background:var(--surf2);border-bottom:1px solid var(--brd);font-size:12px;color:var(--txt2)}
-.bulk-all{display:flex;align-items:center;gap:6px;cursor:pointer}
-.bulk-all input{accent-color:var(--acc);cursor:pointer}
-.bulk-count{color:var(--txt3)}
-.bulk-acts{margin-left:auto;display:flex;gap:8px}
-.li-check{display:none;position:absolute;left:10px;top:50%;transform:translateY(-50%);
-  accent-color:var(--acc);cursor:pointer}
-.list-wrap.select-mode .li-check{display:block}
-.list-wrap.select-mode .list-item{padding-left:34px}
-.list-wrap.select-mode .li-acts{display:none !important}
+/* ── Inputs ── */
+.input,select.input,textarea.input{background:rgba(0,0,0,.25);border:1px solid var(--hair);border-radius:10px;padding:8px 13px;font-size:12.5px;color:var(--text);width:100%}
+[data-theme=light] .input,[data-theme=light] select.input,[data-theme=light] textarea.input{background:rgba(0,0,0,.03)}
+.input::placeholder{color:var(--dim)}
+.input:focus{outline:none;border-color:rgba(125,232,255,.45);box-shadow:0 0 0 3px rgba(125,232,255,.08)}
+select.input option{background:#0B0F17;color:var(--text)}
+textarea.input{resize:vertical;min-height:56px;font-family:var(--font)}
+.n-in{width:80px;text-align:right}
+.t-in{width:220px}
+.t-in.wide{width:100%}
 
-/* ── Toast ── */
-.dash-toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%) translateY(8px);
-  background:var(--surf2);border:1px solid var(--brd);border-radius:var(--r-sm);
-  padding:8px 16px;font-size:12px;color:var(--txt);box-shadow:var(--shad);opacity:0;
-  pointer-events:none;transition:opacity .2s,transform .2s;z-index:50}
-.dash-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-
-/* ── Dictionary page ── */
-.dict-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;
-  padding:0 30px 30px;flex:1;overflow-y:auto;align-content:start}
-.dict-sec{background:var(--surf);border:1px solid var(--brd);border-radius:var(--r);
-  padding:16px;box-shadow:var(--shad);display:flex;flex-direction:column;gap:10px}
-.dict-sec-ttl{font-size:11px;font-weight:700;color:var(--txt3);text-transform:uppercase;
-  letter-spacing:.5px}
-.corr-item{display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:4px;
-  transition:background .1s}
-.corr-item:hover{background:var(--hov)}
-.corr-from{color:var(--txt2);font-size:12px;flex:1;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
-.corr-arr{color:var(--txt3);font-size:11px;flex-shrink:0}
-.corr-to{color:var(--txt);font-size:12px;font-weight:500;flex:1;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
-.corr-del{display:none;width:20px;height:20px;border-radius:3px;background:none;
-  border:none;cursor:pointer;color:var(--txt3);align-items:center;justify-content:center;
-  transition:all .1s;flex-shrink:0}
-.corr-item:hover .corr-del{display:flex}
-.corr-del:hover{color:var(--danger);background:rgba(248,81,73,.12)}
-.corr-del svg{width:10px;height:10px}
-.vocab-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:20px}
-.vchip{display:flex;align-items:center;gap:4px;padding:3px 8px 3px 10px;
-  background:var(--acc-bg);border:1px solid rgba(96,205,255,.15);border-radius:12px;
-  font-size:11.5px;color:var(--acc)}
-[data-theme=light] .vchip{border-color:rgba(0,103,192,.2)}
-.vdel{background:none;border:none;cursor:pointer;color:var(--acc);opacity:.6;
-  padding:0;display:flex;align-items:center;transition:opacity .1s}
-.vdel:hover{opacity:1}
-.vdel svg{width:9px;height:9px}
-.add-row{display:flex;gap:6px;margin-top:4px}
-.add-row-2{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-top:4px}
-.add-in{flex:1;padding:6px 9px;background:var(--surf2);border:1px solid var(--brd);
-  border-radius:var(--r-sm);color:var(--txt);font-family:var(--font);
-  font-size:12px;outline:none}
-.add-in:focus{border-color:var(--acc)}
-.btn{padding:6px 14px;border-radius:var(--r-sm);border:none;cursor:pointer;
-  font-family:var(--font);font-size:12px;font-weight:500;transition:all .12s}
-.btn-p{background:var(--acc);color:#000}
-[data-theme=light] .btn-p{color:#fff}
-.btn-p:hover{opacity:.85}
-.btn-s{background:var(--surf2);color:var(--txt);border:1px solid var(--brd)}
-.btn-s:hover{background:var(--act)}
-.btn-danger{background:rgba(248,81,73,.12);color:var(--danger);
-  border:1px solid rgba(248,81,73,.3)}
-.btn-danger:hover{background:rgba(248,81,73,.22)}
-
-/* ── Settings ── */
-.settings-scroll{padding:0 30px 30px;flex:1;overflow-y:auto}
-.s-sec{background:var(--surf);border:1px solid var(--brd);border-radius:var(--r);
-  overflow:hidden;box-shadow:var(--shad);margin-bottom:16px}
-.s-sec:last-child{margin-bottom:0}
-.s-sec-ttl{padding:11px 16px;font-size:11px;font-weight:700;color:var(--txt3);
-  text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--brd);
-  background:var(--surf2);display:flex;align-items:center;justify-content:space-between}
-.sec-reset-btn{font-size:10px;font-weight:600;letter-spacing:.3px;text-transform:none;
-  color:var(--acc);background:none;border:none;cursor:pointer;padding:2px 6px;
-  border-radius:4px;font-family:var(--font);transition:background .1s}
-.sec-reset-btn:hover{background:var(--acc-bg)}
-.s-row{display:flex;align-items:center;padding:11px 16px;gap:14px;
-  border-bottom:1px solid var(--brd);min-height:44px}
-.s-row:last-child{border-bottom:none}
-.s-row.col{flex-direction:column;align-items:flex-start;gap:7px}
-.s-lbl{flex:1}
-.s-lbl-t{font-size:13px;color:var(--txt);font-weight:500}
-.s-lbl-s{font-size:11px;color:var(--txt3);margin-top:1px}
-/* toggle */
-.tog{width:38px;height:21px;background:var(--surf2);border:1px solid var(--brd);
-  border-radius:11px;cursor:pointer;position:relative;transition:background .15s,border-color .15s;
-  flex-shrink:0}
-.tog.on{background:var(--acc);border-color:var(--acc)}
-.tog-k{width:15px;height:15px;background:var(--txt3);border-radius:50%;
-  position:absolute;top:2px;left:2px;transition:transform .15s,background .15s;
-  box-shadow:0 1px 3px rgba(0,0,0,.3)}
-.tog.on .tog-k{transform:translateX(17px);background:#000}
-[data-theme=light] .tog.on .tog-k{background:#fff}
-/* inputs */
-.n-in,.t-in,.sel-in{padding:6px 9px;background:var(--surf2);border:1px solid var(--brd);
-  border-radius:var(--r-sm);color:var(--txt);font-family:var(--font);
-  font-size:12.5px;outline:none}
-.n-in{width:78px;text-align:right}
-.t-in{width:200px}
-.t-in.wide{width:300px}
-.sel-in{padding-right:26px;cursor:pointer;-webkit-appearance:none;appearance:none;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%23888'%3E%3Cpath fill-rule='evenodd' d='M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z' clip-rule='evenodd'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 7px center;background-size:13px}
-.n-in:focus,.t-in:focus,.sel-in:focus,.add-in:focus{border-color:var(--acc)}
-.range-row{display:flex;align-items:center;gap:8px}
-.range-in{width:140px;accent-color:var(--acc);cursor:pointer}
-.range-val{font-size:11px;color:var(--txt3);width:32px;text-align:right}
-.ta-in{width:100%;padding:7px 9px;background:var(--surf2);border:1px solid var(--brd);
-  border-radius:var(--r-sm);color:var(--txt);font-family:var(--font);
-  font-size:12px;outline:none;resize:vertical;min-height:56px}
-.ta-in:focus{border-color:var(--acc)}
-select option{background:var(--surf2);color:var(--txt)}
-.save-bar{padding:14px 30px;display:flex;justify-content:flex-end;gap:10px;
-  align-items:center;border-top:1px solid var(--brd);flex-shrink:0;background:var(--bg)}
-.save-ok{font-size:12px;color:var(--success);opacity:0;transition:opacity .3s}
+/* ── Setting rows ── */
+.srow{display:flex;align-items:center;gap:16px;padding:14px 0}
+.srow.col{flex-direction:column;align-items:flex-start;gap:8px}
+.srow + .srow{border-top:1px solid var(--hair)}
+.srow .lbl{font-size:12.5px;font-weight:500}
+.srow .desc{font-size:11px;color:var(--dim);margin-top:2px;max-width:440px}
+.range-row{display:flex;align-items:center;gap:10px;width:260px}
+.range-val{font-size:11px;color:var(--mid);width:46px;text-align:right;flex:none;font-family:var(--mono)}
+.s-sec-ttl{display:flex;align-items:center;justify-content:space-between;font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.2em;color:var(--dim);padding-bottom:8px}
+.sec-reset-btn{font-family:var(--font);font-size:10.5px;font-weight:500;letter-spacing:normal;text-transform:none;color:var(--ion);background:none;border:none;cursor:pointer;padding:2px 6px;border-radius:4px}
+.sec-reset-btn:hover{background:var(--ion-soft)}
+.save-ok{font-size:11.5px;color:var(--ion);opacity:0;transition:opacity .3s}
 .save-ok.show{opacity:1}
 
+/* ── Chips / mono / tables / notices ── */
+.chip{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;border:1px solid var(--hair);border-radius:99px;padding:5px 12px;color:var(--mid)}
+.mono{font-family:var(--mono);font-size:11px}
+.arrow{color:var(--ion);opacity:.7}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;font-family:var(--mono);font-size:8.5px;font-weight:500;letter-spacing:.18em;color:var(--dim);padding:0 8px 9px}
+td{padding:9px 8px;border-top:1px solid var(--hair);color:var(--mid)}
+td:first-child{color:var(--text)}
+.notice{display:flex;gap:11px;align-items:flex-start;border:1px solid var(--hair);border-radius:12px;padding:12px 15px;font-size:11.5px;color:var(--mid);background:rgba(0,0,0,.15)}
+[data-theme=light] .notice{background:rgba(0,0,0,.03)}
+.notice b{color:var(--text);font-weight:500}
+.notice .tick{color:var(--ion)}
+.keys{display:flex;align-items:center;gap:8px}
+
+/* ── Home ── */
+.hero{display:flex;align-items:flex-end;gap:32px;margin:4px 0 20px}
+.hero .big{font-family:var(--font-d);font-size:58px;font-weight:200;letter-spacing:-.03em;line-height:.95;background:linear-gradient(180deg,var(--text) 30%,rgba(140,180,230,.6));-webkit-background-clip:text;background-clip:text;color:transparent}
+[data-theme=light] .hero .big{background:linear-gradient(180deg,var(--text) 30%,rgba(20,60,110,.55));-webkit-background-clip:text;background-clip:text}
+.hero .cap{font-family:var(--mono);font-size:9px;letter-spacing:.24em;color:var(--dim);margin-bottom:9px}
+.hero .delta{font-size:11.5px;color:var(--ion);margin-top:7px;letter-spacing:.04em}
+.hero .delta.flat{color:var(--dim)}
+.metric-row{display:flex;gap:0;margin-bottom:24px;flex-wrap:wrap}
+.metric{padding:0 28px;border-left:1px solid var(--hair)}
+.metric:first-child{padding-left:0;border-left:none}
+.metric .v{font-family:var(--font-d);font-size:21px;font-weight:300;letter-spacing:-.01em}
+.metric .v small{font-size:11px;color:var(--mid);font-weight:400;margin-left:2px}
+.metric .k{font-family:var(--mono);font-size:8.5px;letter-spacing:.2em;color:var(--dim);margin-top:3px}
+.rhythm{display:flex;align-items:flex-end;height:48px;margin:0 0 7px}
+.rhythm .rcell{flex:1;display:flex;align-items:flex-end;justify-content:center;height:100%}
+.rhythm i{width:4px;border-radius:99px;background:linear-gradient(180deg,rgba(125,232,255,.9),rgba(63,140,255,.28));min-height:5px;opacity:.5;display:block}
+.rhythm i.hi{opacity:1;width:5px;box-shadow:0 0 12px rgba(125,232,255,.6)}
+.rhythm-lbl{display:flex;font-family:var(--mono);font-size:8px;letter-spacing:.1em;color:var(--dim);margin-bottom:24px}
+.rhythm-lbl span{flex:1;text-align:center}
+.h-cols{grid-template-columns:1.55fr 1fr}
+.h-cols.single{grid-template-columns:1fr;max-width:560px}
+.recent .item{display:flex;gap:13px;align-items:flex-start;padding:12px 0}
+.recent .item + .item{border-top:1px solid var(--hair)}
+.glyph{flex:none;width:28px;height:28px;border-radius:9px;display:grid;place-items:center;font-family:var(--mono);font-size:8.5px;color:var(--mid);border:1px solid var(--hair);background:linear-gradient(180deg,rgba(255,255,255,.04),transparent)}
+.recent .txt{font-size:12px;color:var(--text);opacity:.92;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.recent .meta{font-family:var(--mono);font-size:9px;letter-spacing:.06em;color:var(--dim);margin-top:4px}
+.edu{display:flex;flex-direction:column;gap:9px}
+.edu.hero-edu h3{font-family:var(--font-d);font-size:21px;font-weight:300;letter-spacing:-.01em}
+.edu .keys{margin:7px 0 2px}
+.edu .key{font-size:12px;padding:5px 12px}
+
+/* ── Voice ── */
+.voice-hero{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.orb{flex:none;width:56px;height:56px;border-radius:50%;position:relative;
+  background:radial-gradient(circle at 34% 30%,rgba(125,232,255,.5),rgba(63,140,255,.16) 55%,transparent 75%);
+  box-shadow:0 0 34px -6px rgba(125,232,255,.4),inset 0 0 18px rgba(125,232,255,.18);
+  border:1px solid rgba(125,232,255,.3)}
+.orb::after{content:"";position:absolute;inset:11px;border-radius:50%;border:1px solid rgba(125,232,255,.25);animation:orb 3.2s ease-in-out infinite}
+@keyframes orb{0%,100%{transform:scale(.92);opacity:.5}50%{transform:scale(1.05);opacity:1}}
+.pauseplan{display:flex;align-items:center;gap:0;height:48px;margin-top:14px;overflow-x:auto}
+.pp-seg{height:3px;border-radius:99px;background:linear-gradient(90deg,rgba(125,232,255,.9),rgba(63,140,255,.7));position:relative;transition:all .3s;min-width:8px}
+.pp-seg.played{box-shadow:0 0 14px rgba(125,232,255,.8);height:5px}
+.pp-gap{flex:none;display:flex;align-items:center;justify-content:center}
+.pp-gap i{width:3px;border-radius:99px;background:var(--pause);opacity:.85;box-shadow:0 0 8px rgba(255,184,107,.45);display:block}
+.legend{display:flex;gap:20px;font-family:var(--mono);font-size:8.5px;letter-spacing:.12em;color:var(--dim);margin-top:12px}
+.legend i{display:inline-block;width:14px;height:3px;border-radius:99px;margin-right:6px;vertical-align:2px}
+
+/* ── History ── */
+.search-wrap{position:relative}
+.search-icon{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:13px;height:13px;color:var(--dim);pointer-events:none}
+.search-in{padding-left:34px!important}
+.bulk-bar{display:flex;align-items:center;gap:14px;padding:9px 0;font-size:11.5px;color:var(--mid)}
+.bulk-all{display:flex;align-items:center;gap:6px;cursor:pointer}
+.bulk-all input{accent-color:var(--ion);cursor:pointer}
+.bulk-acts{margin-left:auto;display:flex;gap:8px;align-items:center}
+.dayh{font-family:var(--mono);font-size:9px;font-weight:500;letter-spacing:.22em;color:var(--dim);padding:18px 4px 7px}
+.dayh:first-child{padding-top:2px}
+.hrow{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:11px}
+.hrow:hover,.hrow:focus-within{background:var(--glass)}
+.hrow.pinned{background:var(--ion-soft)}
+.hrow .txt{flex:1;min-width:0;font-size:12px;color:var(--text);opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hrow .t{font-family:var(--mono);font-size:9px;letter-spacing:.05em;color:var(--dim);flex:none}
+.hrow .act{display:flex;gap:2px;opacity:0;transition:opacity .12s;flex:none}
+.hrow:hover .act,.hrow:focus-within .act{opacity:1}
+.wave-thumb{width:50px;height:18px;background-color:rgba(255,255,255,.04);background-repeat:no-repeat;background-position:center;background-size:contain;border-radius:3px;flex:none}
+[data-theme=light] .wave-thumb{background-color:rgba(0,0,0,.05)}
+.iby{width:26px;height:26px;display:grid;place-items:center;border-radius:7px;color:var(--mid);font-size:11px;flex:none}
+.iby:hover{background:var(--glass2);color:var(--text)}
+.iby.pin.on{color:var(--pause);opacity:1}
+.iby.on{color:var(--ion)}
+.iby svg{width:12px;height:12px}
+#historyList .li-check{display:none;flex:none;accent-color:var(--ion);cursor:pointer}
+#historyList.select-mode .li-check{display:block}
+#historyList.select-mode .act{display:none!important}
+mark{background:var(--ion-soft);color:inherit;border-radius:2px;padding:0 1px}
+.empty{text-align:center;padding:40px 0;color:var(--dim);font-size:12px}
+.empty-state{display:flex;flex-direction:column;align-items:center;gap:11px;padding:56px 0;color:var(--mid);text-align:center}
+.empty-state .es-icon{opacity:.4;display:flex;justify-content:center}
+.empty-state .es-icon svg{width:30px;height:30px}
+.empty-state .es-title{font-size:13px;color:var(--text);font-weight:500}
+.empty-state .es-sub{font-size:11.5px;color:var(--dim);max-width:300px}
+
+/* ── Dictionary ── */
+.vchip{display:inline-flex;align-items:center;gap:6px;font-size:11px;border:1px solid var(--hair);border-radius:99px;padding:4px 6px 4px 11px;color:var(--text)}
+.vchip .x{color:var(--dim);cursor:pointer}
+.vchip .x:hover{color:var(--rec)}
+.corr-row{display:flex;align-items:center;gap:8px;padding:8px 0}
+.corr-row + .corr-row{border-top:1px solid var(--hair)}
+
 /* ── Diagnostics ── */
-.diag-row{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt);padding:3px 0}
-.diag-row .status-dot{width:8px;height:8px;flex-shrink:0;transition:background .15s}
-.diag-sub{font-size:11.5px;color:var(--txt3);padding:2px 0 2px 16px}
-.mic-meter-wrap{margin:10px 0 12px}
-.mic-meter{position:relative;height:10px;border-radius:5px;background:var(--surf2);
-  border:1px solid var(--brd);overflow:visible}
-.mic-meter-fill{position:absolute;left:0;top:0;bottom:0;width:0%;border-radius:5px;
-  background:var(--acc);transition:width .1s linear}
-.mic-meter-peak{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--warn);
-  left:0%;display:none}
-.diag-hint{font-size:12px;color:var(--txt3);margin-bottom:4px}
+.probe{display:flex;align-items:center;gap:13px;padding:11px 0;font-size:12px}
+.probe + .probe{border-top:1px solid var(--hair)}
+.probe .st{flex:none;width:14px;text-align:center;color:var(--ion);font-size:11px;text-shadow:0 0 8px rgba(125,232,255,.7)}
+.probe .st.bad{color:var(--rec);text-shadow:none}
+.probe .st.warm{color:var(--pause);text-shadow:none}
+.probe .val{margin-left:auto;font-family:var(--mono);font-size:10px;letter-spacing:.03em;color:var(--mid);text-align:right}
+.sock-well{font-family:var(--mono);font-size:10.5px;color:var(--mid);background:rgba(0,0,0,.25);border:1px solid var(--hair);border-radius:10px;padding:11px 13px;max-height:140px;overflow-y:auto}
+[data-theme=light] .sock-well{background:rgba(0,0,0,.03)}
+.sock-well div{padding:2px 0}
+.sock-well .sock-app{color:var(--text)}
+.mic-meter{position:relative;height:8px;border-radius:5px;background:rgba(255,255,255,.06);border:1px solid var(--hair);overflow:visible;margin:10px 0 12px}
+[data-theme=light] .mic-meter{background:rgba(0,0,0,.05)}
+.mic-meter-fill{position:absolute;left:0;top:0;bottom:0;width:0%;border-radius:5px;background:var(--ion);box-shadow:0 0 8px rgba(125,232,255,.6);transition:width .1s linear}
+.mic-meter-peak{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--pause);left:0%;display:none}
 
-/* ── Keyboard focus (BACKLOG item 80) ── */
-:focus{outline:none}
-:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:3px}
-.tog:focus-visible{outline-offset:3px}
-/* Reveal hover-only action buttons when a keyboard user tabs into them,
-   not just on mouse hover. */
-.list-item:focus-within .li-acts{display:flex}
-.corr-item:focus-within .corr-del{display:flex}
-
-/* ── Scrollbar ── */
-::-webkit-scrollbar{width:5px}
-::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--surf2);border-radius:3px}
-::-webkit-scrollbar-thumb:hover{background:var(--brd2)}
+/* ── Toast ── */
+.dash-toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%) translateY(8px);background:rgba(8,11,18,.92);border:1px solid var(--hair2);border-radius:99px;padding:9px 20px;font-size:12px;color:var(--text);box-shadow:0 20px 50px -12px rgba(0,0,0,.8);opacity:0;pointer-events:none;transition:all .22s ease;z-index:80}
+[data-theme=light] .dash-toast{background:rgba(255,255,255,.96)}
+.dash-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 </style>
 </head>
 <body>
 <div class="app">
 
-<!-- ── Sidebar ─────────────────────────────────────────────── -->
-<aside class="sidebar">
-  <div class="logo">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="9" y="2" width="6" height="12" rx="3"/>
-      <path d="M5 10a7 7 0 0014 0"/><line x1="12" y1="17" x2="12" y2="22"/>
-      <line x1="8" y1="22" x2="16" y2="22"/>
-    </svg>
-    Quiett
-  </div>
-  <nav class="nav">
-    <button class="nav-item active" data-page="home" onclick="navigateTo('home')">
-      <svg viewBox="0 0 20 20" fill="currentColor"><path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/></svg>
-      Home
-    </button>
-    <button class="nav-item" data-page="history" onclick="navigateTo('history')">
-      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clip-rule="evenodd"/></svg>
-      History
-    </button>
-    <button class="nav-item" data-page="dictionary" onclick="navigateTo('dictionary')">
-      <svg viewBox="0 0 20 20" fill="currentColor"><path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z"/></svg>
-      Dictionary
-    </button>
-    <button class="nav-item" data-page="settings" onclick="navigateTo('settings')">
-      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
-      Settings
-    </button>
-    <button class="nav-item" data-page="diagnostics" onclick="navigateTo('diagnostics')">
-      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/></svg>
-      Diagnostics
-    </button>
-    <button class="nav-item" data-page="about" onclick="navigateTo('about')">
-      <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
-      About
-    </button>
-  </nav>
-  <div class="sb-footer">
-    <div class="sb-status">
-      <div class="status-dot" id="statusDot"></div>
-      <span id="statusTxt">Ready</span>
-    </div>
-    <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle theme">
-      <svg id="themeIcon" viewBox="0 0 20 20" fill="currentColor">
-        <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/>
+  <!-- ── Titlebar / brand row (native window chrome, no fake buttons) ── -->
+  <div class="titlebar">
+    <span class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+        <defs><linearGradient id="lg" x1="4" y1="2" x2="20" y2="22"><stop stop-color="#7DE8FF"/><stop offset="1" stop-color="#3F8CFF"/></linearGradient></defs>
+        <rect x="8.4" y="2.6" width="7.2" height="11.4" rx="3.6" fill="url(#lg)"/>
+        <path d="M5.6 10.4a6.4 6.4 0 0 0 12.8 0" stroke="url(#lg)" stroke-width="1.7" stroke-linecap="round" fill="none"/>
+        <path d="M12 17v4.4M9.6 21.4h4.8" stroke="url(#lg)" stroke-width="1.7" stroke-linecap="round"/>
       </svg>
-    </button>
+      <b>QUIE<span class="dim2">TT</span></b>
+      <span class="ver" id="verTag">0.1.0</span>
+    </span>
+    <span class="tb-sp"></span>
+    <span class="seal" id="seal" title="Checking network isolation…"><i></i>LOCAL ONLY</span>
   </div>
-</aside>
 
-<!-- ── Main ─────────────────────────────────────────────────── -->
-<main class="main">
+  <div class="body">
+    <!-- ── Rail ── -->
+    <nav class="rail">
+      <div class="rail-h">DICTATE</div>
+      <button class="nav active" data-page="home" onclick="navigateTo('home')">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 10.2 10 4l7 6.2V17h-4.6v-4.4H7.6V17H3v-6.8Z"/></svg>Home</button>
+      <button class="nav" data-page="dictation" onclick="navigateTo('dictation')">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="7.2" y="2.5" width="5.6" height="9" rx="2.8"/><path d="M4.5 9.5a5.5 5.5 0 0 0 11 0M10 15v2.5"/></svg>Dictation</button>
+      <button class="nav" data-page="voice" onclick="navigateTo('voice')">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3.5 8v4M6.75 5.5v9M10 3.5v13M13.25 6.5v7M16.5 8.5v3"/></svg>Voice</button>
+      <button class="nav" data-page="dictionary" onclick="navigateTo('dictionary')">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 3.5h9.5A2.5 2.5 0 0 1 16 6v10.5H6.5A2.5 2.5 0 0 1 4 14V3.5Z"/><path d="M4 13.5A2.5 2.5 0 0 1 6.5 11H16"/></svg>Dictionary</button>
+      <button class="nav" data-page="history" onclick="navigateTo('history')">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="10" cy="10" r="7"/><path d="M10 6v4.2l2.8 1.7"/></svg>History</button>
+      <div class="rail-h">SYSTEM</div>
+      <button class="nav" data-page="diagnostics" onclick="navigateTo('diagnostics')">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 10h3l2-5 3.5 10 2-5h4.5"/></svg>Diagnostics</button>
+      <button class="nav" data-page="settings" onclick="navigateTo('settings')">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="10" cy="10" r="2.6"/><path d="M10 3.5v2M10 14.5v2M3.5 10h2M14.5 10h2M5.4 5.4l1.5 1.5M13.1 13.1l1.5 1.5M5.4 14.6l1.5-1.5M13.1 6.9l1.5-1.5"/></svg>Settings</button>
+      <div class="rail-foot">
+        <p>Hold <span class="key">Ctrl</span> <span class="plus">+</span> <span class="key">Alt</span> anywhere.<br>Release, and the words land where your cursor is.</p>
+        <a class="about-link" href="#" onclick="navigateTo('about');return false" role="button">About Quiett</a>
+      </div>
+    </nav>
 
-<!-- Home -->
-<div class="page active" id="page-home">
-  <div class="ph">
-    <div>
-      <h1>Home</h1>
-      <div class="sub">Your usage at a glance.</div>
-    </div>
-  </div>
-  <div class="stats" id="statsGrid">
-    <div class="stat-card">
-      <div class="stat-lbl">
-        <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd"/></svg>
-        WORDS TODAY
-      </div>
-      <div class="stat-val" id="s-tw">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-lbl">
-        <svg viewBox="0 0 20 20" fill="currentColor"><path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z"/></svg>
-        TOTAL WORDS
-      </div>
-      <div class="stat-val" id="s-ttl">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-lbl">
-        <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clip-rule="evenodd"/></svg>
-        TODAY'S RECS
-      </div>
-      <div class="stat-val" id="s-tr">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-lbl">
-        <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clip-rule="evenodd"/></svg>
-        ALL TIME
-      </div>
-      <div class="stat-val" id="s-at">—</div>
-    </div>
-  </div>
-  <div class="sec-hdr">
-    <h2>Recent Activity</h2>
-    <button class="link-btn" onclick="navigateTo('history')">View All</button>
-  </div>
-  <div class="list-wrap" id="activityList"><div class="empty">Loading…</div></div>
-</div>
+    <!-- ── Main ── -->
+    <div class="main">
 
-<!-- History -->
-<div class="page" id="page-history">
-  <div class="ph">
-    <div><h1>History</h1><div class="sub">Your recent dictations.</div></div>
-    <div class="ph-actions">
-      <button class="btn btn-s" id="selectModeBtn" onclick="toggleSelectMode()">Select</button>
-      <button class="btn btn-danger" onclick="confirmClear()">Clear All</button>
-    </div>
-  </div>
-  <div class="search-wrap">
-    <svg class="search-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"/></svg>
-    <input class="search-in" id="histSearch" placeholder="Search dictations or app…" oninput="onHistSearchInput(this.value)">
-  </div>
-  <div class="chip-row" id="sourceChips">
-    <button class="chip active" data-src="all" onclick="setSourceFilter('all')">All</button>
-    <button class="chip" data-src="" onclick="setSourceFilter('')">Dictation</button>
-  </div>
-  <div class="bulk-bar" id="bulkBar" style="display:none">
-    <label class="bulk-all"><input type="checkbox" id="selectAllChk" onchange="selectAllToggle(this.checked)"> Select all</label>
-    <span class="bulk-count" id="bulkCount">0 selected</span>
-    <div class="bulk-acts">
-      <select class="sel-in" id="exportFormatSel" style="width:auto" aria-label="Export format">
-        <option value="md">Markdown (.md)</option>
-        <option value="txt">Plain text (.txt)</option>
-        <option value="srt">SRT subtitles (.srt)</option>
-        <option value="vtt">VTT subtitles (.vtt)</option>
-      </select>
-      <button class="btn btn-s" onclick="exportSelected()">Export</button>
-      <button class="btn btn-danger" onclick="deleteSelected()">Delete</button>
-    </div>
-  </div>
-  <div class="list-wrap" id="historyList"><div class="empty">Loading…</div></div>
-</div>
-
-<!-- Dictionary -->
-<div class="page" id="page-dictionary">
-  <div class="ph">
-    <div><h1>Dictionary</h1><div class="sub">Corrections and custom vocabulary.</div></div>
-  </div>
-  <div class="dict-grid">
-    <!-- Corrections -->
-    <div class="dict-sec">
-      <div class="dict-sec-ttl">Corrections</div>
-      <div id="corrList"><div class="empty" style="padding:16px 0">Loading…</div></div>
-      <div class="add-row-2" style="margin-top:8px">
-        <input class="add-in" id="corrFrom" placeholder="Heard (e.g. Selvin)">
-        <input class="add-in" id="corrTo" placeholder="Replace with (e.g. Selwyn)">
-        <button class="btn btn-p" onclick="addCorrection()">Add</button>
-      </div>
-    </div>
-    <!-- Vocabulary -->
-    <div class="dict-sec">
-      <div class="dict-sec-ttl">Custom Vocabulary</div>
-      <div class="vocab-chips" id="vocabList"></div>
-      <div class="add-row" style="margin-top:8px">
-        <input class="add-in" id="vocabWord" placeholder="New word or phrase…" onkeydown="if(event.key==='Enter')addVocab()">
-        <button class="btn btn-p" onclick="addVocab()">Add</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Settings -->
-<div class="page" id="page-settings">
-  <div class="ph"><div><h1>Settings</h1><div class="sub">Configure your dictation preferences.</div></div></div>
-  <div class="settings-scroll" id="settingsForm">
-
-    <div class="s-sec">
-      <div class="s-sec-ttl">Appearance<button class="sec-reset-btn" onclick="resetSection('appearance')">Reset section</button></div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Theme</div><div class="s-lbl-s">Dark or light interface</div></div>
-        <select class="sel-in" data-key="theme" onchange="applyThemeFromSelect(this.value)">
-          <option value="dark">Dark</option>
-          <option value="light">Light</option>
-          <option value="system">Follow Windows</option>
-        </select>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Dashboard scale</div><div class="s-lbl-s">Resizes this window's interface. The floating preview panel is unaffected</div></div>
-        <select class="sel-in" data-key="dashboard_scale" onchange="applyScaleFromSelect(this.value)">
-          <option value="90">90%</option>
-          <option value="100" selected>100%</option>
-          <option value="110">110%</option>
-          <option value="125">125%</option>
-        </select>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Recording animation</div><div class="s-lbl-s">Style of the pill's motion while you speak</div></div>
-        <select class="sel-in" data-key="badge_animation">
-          <option value="waveform">Waveform</option>
-          <option value="pulse">Pulse</option>
-          <option value="bars">Bars</option>
-        </select>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Preview Position</div><div class="s-lbl-s">Where the transcription panel appears</div></div>
-        <select class="sel-in" data-key="preview_position">
-          <option value="cursor">Near cursor</option>
-          <option value="top-right">Top right</option>
-          <option value="bottom-right">Bottom right</option>
-          <option value="top-left">Top left</option>
-          <option value="bottom-left">Bottom left</option>
-          <option value="center">Centre</option>
-        </select>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Auto-dismiss (seconds)</div><div class="s-lbl-s">0 = never auto-dismiss</div></div>
-        <input class="n-in" type="number" data-key="preview_auto_dismiss_seconds" min="0" max="30" step="0.5">
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Animations</div><div class="s-lbl-s">Popup slide/fade motion. Also off automatically when Windows' own "Show animations" setting is off</div></div>
-        <div class="tog" data-key="animations" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
-             role="switch" aria-checked="false" aria-label="Animations" tabindex="0"><div class="tog-k"></div></div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Sound volume</div><div class="s-lbl-s">Record/stop/success/error chimes. 0 = mute</div></div>
-        <div class="range-row">
-          <input class="range-in" type="range" id="soundVolumeRange" data-key="sound_volume" data-type="int"
-                 min="0" max="100" step="5"
-                 oninput="document.getElementById('soundVolumeLbl').textContent=this.value+'%'">
-          <span id="soundVolumeLbl" class="range-val">100%</span>
+      <!-- Home -->
+      <section class="page active" id="page-home">
+        <div class="eyebrow" id="homeEyebrow">THIS WEEK</div>
+        <div id="homeHero"></div>
+        <div class="metric-row" id="homeMetrics"></div>
+        <div class="rhythm" id="rhythm" aria-label="Words per day, last 14 days"></div>
+        <div class="rhythm-lbl" id="rhythmLbl"></div>
+        <div class="grid h-cols" id="homeGrid">
+          <div class="plane recent">
+            <div class="row" style="margin-bottom:2px"><h3>Recent</h3><span class="sp"></span><button class="btn ghost" onclick="navigateTo('history')">View all</button></div>
+            <div id="homeRecent"></div>
+          </div>
+          <div class="plane edu" id="homeEdu">
+            <h3>Dictate anywhere</h3>
+            <p class="sub">No app to open. No window to switch to.</p>
+            <div class="keys"><span class="key">Ctrl</span><span class="plus">+</span><span class="key">Alt</span><span style="color:var(--dim);font-size:11px;letter-spacing:.04em">&nbsp;hold · speak · release</span></div>
+            <p class="sub">Hear anything back in your own cloned voice with <span class="key">Ctrl</span><span class="plus">+</span><span class="key">Shift</span><span class="plus">+</span><span class="key">S</span></p>
+            <div style="margin-top:auto;padding-top:12px"><button class="btn primary" onclick="navigateTo('history')">Open History</button></div>
+          </div>
         </div>
-      </div>
-    </div>
+      </section>
 
-    <div class="s-sec">
-      <div class="s-sec-ttl">Audio<button class="sec-reset-btn" onclick="resetSection('audio')">Reset section</button></div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Input Device</div><div class="s-lbl-s">Microphone used for recording</div></div>
-        <select class="sel-in" data-key="input_device" id="micSelect">
-          <option value="">System default</option>
-        </select>
-      </div>
-    </div>
-
-    <div class="s-sec">
-      <div class="s-sec-ttl">Recording<button class="sec-reset-btn" onclick="resetSection('recording')">Reset section</button></div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Min duration (s)</div><div class="s-lbl-s">Ignore recordings shorter than this</div></div>
-        <input class="n-in" type="number" data-key="min_record_seconds" min="0.1" max="5" step="0.1">
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Max duration (s)</div><div class="s-lbl-s">Auto-stop after this many seconds</div></div>
-        <input class="n-in" type="number" data-key="max_record_seconds" min="5" max="300" step="5">
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Silence auto-stop</div><div class="s-lbl-s">Stops recording automatically after this much silence. Slow speakers or people who pause mid-sentence should raise it. 0 = never auto-stop</div></div>
-        <div class="range-row">
-          <input class="range-in" type="range" id="silenceAutoStopRange" data-key="silence_auto_stop_seconds"
-                 min="0" max="10" step="0.5"
-                 oninput="document.getElementById('silenceAutoStopLbl').textContent=silenceAutoStopLabel(this.value)">
-          <span id="silenceAutoStopLbl" class="range-val" style="width:44px">3.0s</span>
+      <!-- Dictation -->
+      <section class="page" id="page-dictation">
+        <div class="ph"><div><div class="eyebrow neutral">CAPTURE</div><h1>Dictation</h1><p>The hotkey, the microphone, and what happens on release.</p></div></div>
+        <div class="plane" style="margin-bottom:16px">
+          <div class="srow" style="padding-top:2px">
+            <div><div class="lbl">Push-to-talk hotkey</div><div class="desc">Hold to record, release to transcribe.</div></div>
+            <span class="sp"></span>
+            <span class="keys"><span class="key">Ctrl</span><span class="plus">+</span><span class="key">Alt</span></span>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Microphone</div><div class="desc">Which input device Quiett records from.</div></div>
+            <span class="sp"></span>
+            <select class="input" style="max-width:260px" data-key="input_device" id="micSelect">
+              <option value="">System default</option>
+            </select>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Silence auto-stop</div><div class="desc">Stops recording after this much quiet. 0 = never auto-stop.</div></div>
+            <span class="sp"></span>
+            <div class="range-row"><input type="range" class="slider" id="silenceAutoStopRange" data-key="silence_auto_stop_seconds" min="0" max="10" step="0.5" oninput="document.getElementById('silenceAutoStopLbl').textContent=silenceAutoStopLabel(this.value)"><span class="range-val" id="silenceAutoStopLbl">3.0s</span></div>
+          </div>
         </div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">VAD filter</div><div class="s-lbl-s">Strip silence via voice activity detection</div></div>
-        <div class="tog" data-key="vad_filter" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
-             role="switch" aria-checked="false" aria-label="VAD filter" tabindex="0"><div class="tog-k"></div></div>
-      </div>
-    </div>
-
-    <div class="s-sec">
-      <div class="s-sec-ttl">Read-aloud<button class="sec-reset-btn" onclick="resetSection('readaloud')">Reset section</button></div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Enable read-aloud</div><div class="s-lbl-s">Ctrl+Shift+S speaks the highlighted text in your cloned voice. The voice server only starts on first use and unloads when idle</div></div>
-        <div class="tog" data-key="tts_enabled" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
-             role="switch" aria-checked="false" aria-label="Enable read-aloud" tabindex="0"><div class="tog-k"></div></div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Speed</div><div class="s-lbl-s">Playback rate for normal read-aloud. Pitch is preserved, so slower still sounds like you</div></div>
-        <div class="range-row">
-          <input class="range-in" type="range" id="ttsSpeedRange" data-key="tts_speed"
-                 min="0.5" max="2" step="0.05"
-                 oninput="document.getElementById('ttsSpeedLbl').textContent=Number(this.value).toFixed(2)+'x'">
-          <span id="ttsSpeedLbl" class="range-val" style="width:52px">1.00x</span>
+        <div class="plane">
+          <div class="srow" style="padding-top:2px">
+            <div><div class="lbl">Clipboard-only mode</div><div class="desc">Copy to clipboard instead of auto-pasting.</div></div>
+            <span class="sp"></span>
+            <div class="tog" role="switch" aria-checked="false" data-key="_paste_clipboard_only" aria-label="Clipboard-only mode" tabindex="0" onclick="togClick(this)" onkeydown="togKeydown(event,this)"></div>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Incognito mode</div><div class="desc">No history, no audio kept, nothing written to disk.</div></div>
+            <span class="sp"></span>
+            <div class="tog" role="switch" aria-checked="false" data-key="incognito" aria-label="Incognito mode" tabindex="0" onclick="togClick(this)" onkeydown="togKeydown(event,this)"></div>
+          </div>
+          <div class="srow col">
+            <div><div class="lbl">Redaction patterns</div><div class="desc">One regular expression per line. Matches are replaced with ▊▊▊ before an entry is stored, this only affects saved history, never the pasted text.</div></div>
+            <textarea class="input" data-key="redact_patterns" data-type="lines" rows="3" placeholder="\\d{3}-\\d{2}-\\d{4}"></textarea>
+          </div>
         </div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Study mode</div><div class="s-lbl-s">Same hotkey, teacher-style delivery: pauses land on sentences, paragraphs, lists and headings instead of running flat</div></div>
-        <div class="tog" data-key="study_mode" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
-             role="switch" aria-checked="false" aria-label="Study mode" tabindex="0"><div class="tog-k"></div></div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Study speed</div><div class="s-lbl-s">Rate used while study mode is on, kept separate so it does not overwrite the speed above</div></div>
-        <div class="range-row">
-          <input class="range-in" type="range" id="studySpeedRange" data-key="study_speed"
-                 min="0.5" max="2" step="0.05"
-                 oninput="document.getElementById('studySpeedLbl').textContent=Number(this.value).toFixed(2)+'x'">
-          <span id="studySpeedLbl" class="range-val" style="width:52px">0.95x</span>
+      </section>
+
+      <!-- Voice -->
+      <section class="page" id="page-voice">
+        <div class="ph"><div><div class="eyebrow neutral">READ ALOUD</div><h1>Voice</h1><p>Select text anywhere, press <span class="key">Ctrl</span> <span class="key">Shift</span> <span class="key">S</span>, and hear it in your own voice.</p></div></div>
+        <div class="plane" style="margin-bottom:16px">
+          <div class="voice-hero" style="margin-bottom:14px">
+            <div class="orb" aria-hidden="true"></div>
+            <div style="flex:1;min-width:220px">
+              <h3>Your voice, cloned locally</h3>
+              <p class="sub" style="margin-top:4px">Synthesised on your own GPU. The model never leaves this machine.</p>
+            </div>
+            <button class="btn" id="playSampleBtn" onclick="playSample()"><span class="tri">▶</span>Play sample</button>
+          </div>
+          <div class="srow" style="border-top:1px solid var(--hair);padding-top:14px">
+            <div><div class="lbl">Enable read-aloud</div><div class="desc">Ctrl+Shift+S speaks the highlighted text. The voice server starts on first use and unloads when idle.</div></div>
+            <span class="sp"></span>
+            <div class="tog" role="switch" aria-checked="false" data-key="tts_enabled" aria-label="Enable read-aloud" tabindex="0" onclick="togClick(this)" onkeydown="togKeydown(event,this)"></div>
+          </div>
         </div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Study pause length</div><div class="s-lbl-s">Scales every study-mode pause. Raise it to leave more thinking room between sentences</div></div>
-        <div class="range-row">
-          <input class="range-in" type="range" id="studyPauseRange" data-key="study_pause_scale"
-                 min="0" max="3" step="0.1"
-                 oninput="document.getElementById('studyPauseLbl').textContent=Number(this.value).toFixed(1)+'x'">
-          <span id="studyPauseLbl" class="range-val" style="width:52px">1.0x</span>
+        <div class="grid" style="grid-template-columns:1fr 1fr;margin-bottom:16px">
+          <div class="plane">
+            <div class="lbl" style="font-size:12.5px;font-weight:500">Reading speed</div>
+            <div class="desc" style="font-size:11px;color:var(--dim);margin:2px 0 13px">Pitch stays yours at every speed.</div>
+            <div class="range-row" style="width:100%"><input type="range" class="slider" id="ttsSpeedRange" data-key="tts_speed" min="0.5" max="2" step="0.05" oninput="document.getElementById('ttsSpeedLbl').textContent=Number(this.value).toFixed(2)+'x'"><span class="range-val" id="ttsSpeedLbl">1.00x</span></div>
+          </div>
+          <div class="plane">
+            <div class="row">
+              <div><div class="lbl" style="font-size:12.5px;font-weight:500">Study Mode</div><div class="desc" style="font-size:11px;color:var(--dim);margin-top:2px">Slower, teacher-style delivery that breathes at sentences, lists and headings.</div></div>
+              <span class="sp"></span>
+              <div class="tog" role="switch" aria-checked="false" data-key="study_mode" aria-label="Study mode" tabindex="0" onclick="togClick(this)" onkeydown="togKeydown(event,this)"></div>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
+        <div class="grid" style="grid-template-columns:1fr 1fr;margin-bottom:16px">
+          <div class="plane">
+            <div class="lbl" style="font-size:12.5px;font-weight:500">Study speed</div>
+            <div class="desc" style="font-size:11px;color:var(--dim);margin:2px 0 13px">Kept separate so it never overwrites the speed above.</div>
+            <div class="range-row" style="width:100%"><input type="range" class="slider" id="studySpeedRange" data-key="study_speed" min="0.5" max="2" step="0.05" oninput="document.getElementById('studySpeedLbl').textContent=Number(this.value).toFixed(2)+'x'"><span class="range-val" id="studySpeedLbl">0.95x</span></div>
+          </div>
+          <div class="plane">
+            <div class="lbl" style="font-size:12.5px;font-weight:500">Study pause length</div>
+            <div class="desc" style="font-size:11px;color:var(--dim);margin:2px 0 13px">Scales every study-mode pause.</div>
+            <div class="range-row" style="width:100%"><input type="range" class="slider" id="studyPauseRange" data-key="study_pause_scale" min="0" max="3" step="0.1" oninput="document.getElementById('studyPauseLbl').textContent=Number(this.value).toFixed(1)+'x'"><span class="range-val" id="studyPauseLbl">1.0x</span></div>
+          </div>
+        </div>
+        <div class="plane">
+          <div class="row"><h3>How Study Mode reads a passage</h3><span class="sp"></span><button class="btn" id="playStudyBtn" onclick="playStudyPlan()"><span class="tri">▶</span>Play the plan</button></div>
+          <p class="sub" id="pausePlanSub" style="margin-top:4px">Loading the real plan from narration.py…</p>
+          <div class="pauseplan" id="pauseplan" aria-label="Study mode segment plan"></div>
+          <div class="legend"><span><i style="background:var(--ion)"></i>SPOKEN</span><span><i style="background:var(--pause)"></i>PAUSE, SCALED TO STRUCTURE</span></div>
+        </div>
+      </section>
 
-    <div class="s-sec">
-      <div class="s-sec-ttl">Transcription<button class="sec-reset-btn" onclick="resetSection('transcription')">Reset section</button></div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Language</div><div class="s-lbl-s">ISO code, e.g. en, fr, de</div></div>
-        <input class="t-in" type="text" data-key="language" maxlength="10">
-      </div>
-      <div class="s-row col">
-        <div class="s-lbl"><div class="s-lbl-t">Filler words</div><div class="s-lbl-s">Comma-separated words to remove (e.g. um, uh, like)</div></div>
-        <input class="t-in wide" type="text" data-key="filler_words" data-type="array">
-      </div>
-      <div class="s-row col">
-        <div class="s-lbl"><div class="s-lbl-t">Initial prompt</div><div class="s-lbl-s">Primes Whisper with context (vocabulary, style)</div></div>
-        <textarea class="ta-in" data-key="initial_prompt" rows="3"></textarea>
-      </div>
-    </div>
+      <!-- Dictionary -->
+      <section class="page" id="page-dictionary">
+        <div class="ph"><div><div class="eyebrow neutral">ACCURACY</div><h1>Dictionary</h1><p>The words that are yours: names, clients, jargon. Whisper learns to spell them your way.</p></div></div>
+        <div class="plane" style="margin-bottom:16px">
+          <div class="srow" style="padding-top:2px">
+            <div><div class="lbl">Learn from my edits</div><div class="desc">Fix the same word three times and it becomes a correction on its own.</div></div>
+            <span class="sp"></span>
+            <div class="tog" role="switch" aria-checked="true" data-key="learn_from_edits" aria-label="Learn from edits" tabindex="0" onclick="togClick(this)" onkeydown="togKeydown(event,this)"></div>
+          </div>
+          <div style="padding-top:16px">
+            <div class="row" style="margin-bottom:10px"><h3 id="vocabCount">Vocabulary</h3><span class="sp"></span></div>
+            <div class="row" style="flex-wrap:wrap;gap:8px" id="vocabList"></div>
+            <div class="row" style="gap:8px;margin-top:12px">
+              <input class="input" id="vocabWord" placeholder="New word or phrase…" style="max-width:280px" onkeydown="if(event.key==='Enter')addVocab()">
+              <button class="btn" style="flex:none" onclick="addVocab()">+ Add term</button>
+            </div>
+          </div>
+        </div>
+        <div class="grid" style="grid-template-columns:1.4fr 1fr">
+          <div class="plane">
+            <h3 style="margin-bottom:10px">Corrections</h3>
+            <div id="corrList"></div>
+            <div class="row" style="gap:8px;margin-top:12px">
+              <input class="input" id="corrFrom" placeholder="Heard (e.g. Selvin)">
+              <input class="input" id="corrTo" placeholder="Replace with (e.g. Selwyn)">
+              <button class="btn" style="flex:none" onclick="addCorrection()">Add</button>
+            </div>
+          </div>
+          <div class="plane">
+            <h3>Learned this week</h3>
+            <p class="sub" style="margin:2px 0 10px">Promoted automatically from your edits.</p>
+            <div id="learnedList"></div>
+          </div>
+        </div>
+      </section>
 
-    <div class="s-sec">
-      <div class="s-sec-ttl">Paste<button class="sec-reset-btn" onclick="resetSection('paste')">Reset section</button></div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Clipboard-only mode</div><div class="s-lbl-s">Copy to clipboard instead of auto-pasting</div></div>
-        <div class="tog" data-key="_paste_clipboard_only" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
-             role="switch" aria-checked="false" aria-label="Clipboard-only mode" tabindex="0"><div class="tog-k"></div></div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Clipboard restore delay (ms)</div><div class="s-lbl-s">How long before restoring your previous clipboard</div></div>
-        <input class="n-in" type="number" data-key="clipboard_restore_delay_ms" min="50" max="1000" step="50" data-type="int">
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Electron / VS Code paste</div><div class="s-lbl-s">Method for Electron apps</div></div>
-        <select class="sel-in" data-key="electron_paste_method">
-          <option value="ctrl_v">Clipboard + Ctrl+V</option>
-          <option value="type">Unicode typing</option>
-        </select>
-      </div>
-    </div>
+      <!-- History -->
+      <section class="page" id="page-history">
+        <div class="ph">
+          <div><div class="eyebrow neutral">ARCHIVE</div><h1>History</h1><p>Every dictation, searchable. Stored here, and nowhere else.</p></div>
+          <div class="ph-actions">
+            <button class="btn ghost" id="selectModeBtn" onclick="toggleSelectMode()">Select</button>
+            <button class="btn danger" onclick="confirmClear()">Clear all</button>
+          </div>
+        </div>
+        <div class="row" style="margin-bottom:12px;gap:10px">
+          <div class="search-wrap" style="flex:1;max-width:340px">
+            <svg class="search-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"/></svg>
+            <input class="input search-in" id="histSearch" placeholder="Search text or target app…" oninput="onHistSearchInput(this.value)" aria-label="Search history">
+          </div>
+        </div>
+        <div class="bulk-bar" id="bulkBar" style="display:none">
+          <label class="bulk-all"><input type="checkbox" id="selectAllChk" onchange="selectAllToggle(this.checked)"> Select all</label>
+          <span id="bulkCount">0 selected</span>
+          <div class="bulk-acts">
+            <select class="input" id="exportFormatSel" style="width:auto" aria-label="Export format">
+              <option value="md">Markdown (.md)</option>
+              <option value="txt">Plain text (.txt)</option>
+              <option value="srt">SRT subtitles (.srt)</option>
+              <option value="vtt">WebVTT (.vtt)</option>
+            </select>
+            <button class="btn ghost" onclick="exportSelected()">Export</button>
+            <button class="btn danger" onclick="deleteSelected()">Delete</button>
+          </div>
+        </div>
+        <div id="historyList"><div class="empty">Loading…</div></div>
+      </section>
 
-    <div class="s-sec">
-      <div class="s-sec-ttl">History<button class="sec-reset-btn" onclick="resetSection('history')">Reset section</button></div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Keep history</div><div class="s-lbl-s">Older entries are trimmed past this count. Pinned entries are never trimmed.</div></div>
-        <select class="sel-in" data-key="history_max_entries">
-          <option value="50">50 entries</option>
-          <option value="100" selected>100 entries</option>
-          <option value="250">250 entries</option>
-          <option value="500">500 entries</option>
-        </select>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Auto-delete recordings</div><div class="s-lbl-s">Deletes saved audio older than this. Transcripts stay either way; pinned entries are exempt.</div></div>
-        <select class="sel-in" data-key="recording_retention_days">
-          <option value="0" selected>Never</option>
-          <option value="7">After 7 days</option>
-          <option value="30">After 30 days</option>
-          <option value="90">After 90 days</option>
-        </select>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Incognito mode</div><div class="s-lbl-s">While on, dictations aren't saved to history and audio isn't retained. Also toggleable from the tray icon.</div></div>
-        <div class="tog" data-key="incognito" onclick="togClick(this)" onkeydown="togKeydown(event,this)"
-             role="switch" aria-checked="false" aria-label="Incognito mode" tabindex="0"><div class="tog-k"></div></div>
-      </div>
-      <div class="s-row col">
-        <div class="s-lbl"><div class="s-lbl-t">Redact patterns</div><div class="s-lbl-s">One regular expression per line. Matches are replaced with ▊▊▊ before an entry is stored — this only affects saved history, never the pasted text.</div></div>
-        <textarea class="ta-in" data-key="redact_patterns" data-type="lines" rows="3" placeholder="\\d{3}-\\d{2}-\\d{4}"></textarea>
-      </div>
-    </div>
+      <!-- Diagnostics -->
+      <section class="page" id="page-diagnostics">
+        <div class="ph">
+          <div><div class="eyebrow neutral">SYSTEM</div><h1>Diagnostics</h1><p>Every moving part, checked in one click.</p></div>
+          <div class="ph-actions"><button class="btn" onclick="loadDiagnostics()">Refresh</button></div>
+        </div>
+        <div class="plane" style="margin-bottom:16px">
+          <div class="probe"><span class="st" id="diagWhisperSt">·</span><span id="diagWhisperTxt">Checking…</span><span class="val" id="diagWhisperVal"></span></div>
+          <div class="probe"><span class="st" id="diagHotkeySt">·</span><span id="diagHotkeyTxt">Checking…</span><span class="val" id="diagHotkeyVal"></span></div>
+          <div class="probe"><span class="st" id="diagMicSt">·</span><span id="diagMicTxt">Checking…</span><span class="val" id="diagMicVal"></span></div>
+          <div class="probe"><span class="st" id="diagNetSt">·</span>Network isolation<span class="val" id="diagNetVal">checking…</span></div>
+        </div>
+        <div class="plane" style="margin-bottom:16px">
+          <div class="sock-well" id="sockWell">Checking…</div>
+        </div>
+        <div class="notice" style="margin-bottom:16px"><span class="tick">●</span><span><b>Network isolation</b> is a real check, not a promise: the app lists its own open sockets. Dictation works with the cable out.</span></div>
+        <div class="plane">
+          <div class="row" style="margin-bottom:8px"><h3>Mic level test</h3></div>
+          <p class="sub">Runs a 5 second test recording to show your live input level. Nothing is saved.</p>
+          <div class="mic-meter"><div class="mic-meter-fill" id="micMeterFill"></div><div class="mic-meter-peak" id="micMeterPeak"></div></div>
+          <button class="btn" id="micProbeBtn" onclick="startMicProbe()">Test mic</button>
+        </div>
+      </section>
 
-    <div class="s-sec">
-      <div class="s-sec-ttl">System</div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Start with Windows</div><div class="s-lbl-s">Launch hidden at logon via Task Scheduler</div></div>
-        <div class="tog" id="autostartTog" onclick="autostartClick(this)" onkeydown="togKeydown(event,this)"
-             role="switch" aria-checked="false" aria-label="Start with Windows" tabindex="0"><div class="tog-k"></div></div>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Export settings</div><div class="s-lbl-s">Save your settings, corrections, and vocabulary to a JSON file</div></div>
-        <button class="btn btn-s" onclick="exportSettings()">Export settings</button>
-      </div>
-      <div class="s-row">
-        <div class="s-lbl"><div class="s-lbl-t">Import settings</div><div class="s-lbl-s">Load settings from a previously exported JSON file</div></div>
-        <button class="btn btn-s" onclick="importSettings()">Import settings</button>
-      </div>
-    </div>
+      <!-- Settings -->
+      <section class="page" id="page-settings">
+        <div class="ph"><div><div class="eyebrow neutral">SYSTEM</div><h1>Settings</h1><p>Instant apply. There is no save button.</p></div></div>
+        <div id="settingsForm">
 
+        <div class="plane" style="margin-bottom:16px">
+          <div class="s-sec-ttl">APPEARANCE<button class="sec-reset-btn" onclick="resetSection('appearance')">Reset section</button></div>
+          <div class="srow" style="padding-top:2px">
+            <div><div class="lbl">Theme</div><div class="desc">Dark or light interface.</div></div>
+            <span class="sp"></span>
+            <select class="input" style="max-width:180px" data-key="theme" onchange="applyThemeFromSelect(this.value)">
+              <option value="dark">Dark</option><option value="light">Light</option><option value="system">Follow Windows</option>
+            </select>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Dashboard scale</div><div class="desc">Resizes this window's interface. The floating preview panel is unaffected.</div></div>
+            <span class="sp"></span>
+            <select class="input" style="max-width:120px" data-key="dashboard_scale" onchange="applyScaleFromSelect(this.value)">
+              <option value="90">90%</option><option value="100" selected>100%</option><option value="110">110%</option><option value="125">125%</option>
+            </select>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Recording animation</div><div class="desc">Style of the pill's motion while you speak.</div></div>
+            <span class="sp"></span>
+            <select class="input" style="max-width:160px" data-key="badge_animation">
+              <option value="waveform">Waveform</option><option value="pulse">Pulse</option><option value="bars">Bars</option>
+            </select>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Preview position</div><div class="desc">Where the transcription panel appears.</div></div>
+            <span class="sp"></span>
+            <select class="input" style="max-width:180px" data-key="preview_position">
+              <option value="cursor">Near cursor</option><option value="top-right">Top right</option><option value="bottom-right">Bottom right</option><option value="top-left">Top left</option><option value="bottom-left">Bottom left</option><option value="center">Centre</option>
+            </select>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Auto-dismiss (seconds)</div><div class="desc">0 = never auto-dismiss.</div></div>
+            <span class="sp"></span>
+            <input class="input n-in" type="number" data-key="preview_auto_dismiss_seconds" min="0" max="30" step="0.5">
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Animations</div><div class="desc">Popup slide/fade motion. Also off automatically when Windows' own "Show animations" setting is off.</div></div>
+            <span class="sp"></span>
+            <div class="tog" data-key="animations" role="switch" aria-checked="false" aria-label="Animations" tabindex="0" onclick="togClick(this)" onkeydown="togKeydown(event,this)"></div>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Sound volume</div><div class="desc">Record/stop/success/error chimes. 0 = mute.</div></div>
+            <span class="sp"></span>
+            <div class="range-row"><input class="slider" type="range" id="soundVolumeRange" data-key="sound_volume" data-type="int" min="0" max="100" step="5" oninput="document.getElementById('soundVolumeLbl').textContent=this.value+'%'"><span class="range-val" id="soundVolumeLbl">100%</span></div>
+          </div>
+        </div>
+
+        <div class="plane" style="margin-bottom:16px">
+          <div class="s-sec-ttl">RECORDING<button class="sec-reset-btn" onclick="resetSection('recording')">Reset section</button></div>
+          <div class="srow" style="padding-top:2px">
+            <div><div class="lbl">Min duration (s)</div><div class="desc">Ignore recordings shorter than this.</div></div>
+            <span class="sp"></span><input class="input n-in" type="number" data-key="min_record_seconds" min="0.1" max="5" step="0.1">
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Max duration (s)</div><div class="desc">Auto-stop after this many seconds.</div></div>
+            <span class="sp"></span><input class="input n-in" type="number" data-key="max_record_seconds" min="5" max="300" step="5">
+          </div>
+          <div class="srow">
+            <div><div class="lbl">VAD filter</div><div class="desc">Strip silence via voice activity detection.</div></div>
+            <span class="sp"></span>
+            <div class="tog" data-key="vad_filter" role="switch" aria-checked="false" aria-label="VAD filter" tabindex="0" onclick="togClick(this)" onkeydown="togKeydown(event,this)"></div>
+          </div>
+        </div>
+
+        <div class="plane" style="margin-bottom:16px">
+          <div class="s-sec-ttl">TRANSCRIPTION<button class="sec-reset-btn" onclick="resetSection('transcription')">Reset section</button></div>
+          <div class="srow" style="padding-top:2px">
+            <div><div class="lbl">Language</div><div class="desc">ISO code, e.g. en, fr, de.</div></div>
+            <span class="sp"></span><input class="input t-in" type="text" data-key="language" maxlength="10">
+          </div>
+          <div class="srow col">
+            <div><div class="lbl">Filler words</div><div class="desc">Comma-separated words to remove (e.g. um, uh, like).</div></div>
+            <input class="input t-in wide" type="text" data-key="filler_words" data-type="array">
+          </div>
+          <div class="srow col">
+            <div><div class="lbl">Initial prompt</div><div class="desc">Primes Whisper with context (vocabulary, style).</div></div>
+            <textarea class="input" data-key="initial_prompt" rows="3"></textarea>
+          </div>
+        </div>
+
+        <div class="plane" style="margin-bottom:16px">
+          <div class="s-sec-ttl">PASTE<button class="sec-reset-btn" onclick="resetSection('paste')">Reset section</button></div>
+          <div class="srow" style="padding-top:2px">
+            <div><div class="lbl">Clipboard restore delay (ms)</div><div class="desc">How long before restoring your previous clipboard.</div></div>
+            <span class="sp"></span><input class="input n-in" type="number" data-key="clipboard_restore_delay_ms" min="50" max="1000" step="50" data-type="int">
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Electron / VS Code paste</div><div class="desc">Method for Electron apps.</div></div>
+            <span class="sp"></span>
+            <select class="input" style="max-width:220px" data-key="electron_paste_method">
+              <option value="ctrl_v">Clipboard + Ctrl+V</option><option value="type">Unicode typing</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="plane" style="margin-bottom:16px">
+          <div class="s-sec-ttl">HISTORY<button class="sec-reset-btn" onclick="resetSection('history')">Reset section</button></div>
+          <div class="srow" style="padding-top:2px">
+            <div><div class="lbl">Keep history</div><div class="desc">Older entries are trimmed past this count. Pinned entries are never trimmed.</div></div>
+            <span class="sp"></span>
+            <select class="input" style="max-width:160px" data-key="history_max_entries">
+              <option value="50">50 entries</option><option value="100" selected>100 entries</option><option value="250">250 entries</option><option value="500">500 entries</option>
+            </select>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Auto-delete recordings</div><div class="desc">Deletes saved audio older than this. Transcripts stay either way; pinned entries are exempt.</div></div>
+            <span class="sp"></span>
+            <select class="input" style="max-width:160px" data-key="recording_retention_days">
+              <option value="0" selected>Never</option><option value="7">After 7 days</option><option value="30">After 30 days</option><option value="90">After 90 days</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="plane" style="margin-bottom:16px">
+          <div class="s-sec-ttl">SYSTEM</div>
+          <div class="srow" style="padding-top:2px">
+            <div><div class="lbl">Start with Windows</div><div class="desc">Launch hidden at logon via Task Scheduler.</div></div>
+            <span class="sp"></span>
+            <div class="tog" id="autostartTog" role="switch" aria-checked="false" aria-label="Start with Windows" tabindex="0" onclick="autostartClick(this)" onkeydown="togKeydown(event,this)"></div>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Export settings</div><div class="desc">Save your settings, corrections, and vocabulary to a JSON file.</div></div>
+            <span class="sp"></span><button class="btn" onclick="exportSettings()">Export</button>
+          </div>
+          <div class="srow">
+            <div><div class="lbl">Import settings</div><div class="desc">Load settings from a previously exported JSON file.</div></div>
+            <span class="sp"></span><button class="btn ghost" onclick="importSettings()">Import</button>
+          </div>
+        </div>
+
+        </div>
+        <div class="row" style="padding:6px 0 0;justify-content:flex-end;gap:12px">
+          <span class="save-ok" id="saveOk">✓ Saved</span>
+          <button class="btn ghost" onclick="reloadSettings()">Reload</button>
+        </div>
+      </section>
+
+      <!-- About -->
+      <section class="page" id="page-about">
+        <div class="ph"><div><div class="eyebrow neutral">SYSTEM</div><h1>About</h1><p>Version, licence, and credits.</p></div></div>
+        <div class="plane" style="margin-bottom:16px">
+          <h3>Quiett</h3>
+          <p class="sub" id="aboutVersion" style="margin-top:6px">Version —</p>
+          <p class="sub" style="margin-top:8px;max-width:560px">Offline, hold-to-talk voice dictation for Windows. Records while you hold a hotkey, transcribes locally, and lets you review before it lands in whatever app has focus.</p>
+          <p class="sub" style="margin-top:8px">Licence: private build, not for redistribution.</p>
+        </div>
+        <div class="plane" style="margin-bottom:16px">
+          <h3 style="margin-bottom:8px">Credits</h3>
+          <p class="sub" style="line-height:1.7">Speech recognition by <b style="color:var(--text);font-weight:500">whisper.cpp</b> (large-v3-turbo, Vulkan build), MIT licence.<br>Cloned-voice read-aloud by <b style="color:var(--text);font-weight:500">qwentts.cpp</b> (Qwen3-TTS, Vulkan build), MIT licence, Apache 2.0 weights.</p>
+        </div>
+        <div class="plane">
+          <h3 style="margin-bottom:8px">Changelog</h3>
+          <div id="changelogList" class="sub">Loading…</div>
+        </div>
+      </section>
+
+    </div>
   </div>
-  <div class="save-bar">
-    <span class="save-ok" id="saveOk">✓ Saved</span>
-    <button class="btn btn-s" onclick="reloadSettings()">Reload</button>
-  </div>
-</div>
 
-<!-- Diagnostics -->
-<div class="page" id="page-diagnostics">
-  <div class="ph">
-    <div><h1>Diagnostics</h1><div class="sub">Live status of the whisper server, hotkey hook, and microphone.</div></div>
-    <div class="ph-actions">
-      <button class="btn btn-s" onclick="loadDiagnostics()">Refresh</button>
-    </div>
+  <!-- the voice line -->
+  <div class="voiceline">
+    <svg class="vl-wave" viewBox="0 0 74 16" aria-hidden="true"><polyline id="vlPoly" points=""/></svg>
+    <span id="vlStatus">QUIETT NOT RUNNING</span>
+    <span class="vl-sp"></span>
+    <span class="vl-keys">HOLD <span class="key">Ctrl</span>+<span class="key">Alt</span> TO DICTATE</span>
   </div>
-  <div class="dict-grid" id="diagGrid">
-    <div class="dict-sec">
-      <div class="dict-sec-ttl">Whisper server</div>
-      <div class="diag-row"><span class="status-dot" id="diagWhisperDot"></span><span id="diagWhisperTxt">Checking…</span></div>
-      <div class="diag-sub" id="diagWhisperLatency"></div>
-      <div class="diag-sub" id="diagWhisperModel"></div>
-      <div class="diag-sub" id="diagWhisperDevice"></div>
-    </div>
-    <div class="dict-sec">
-      <div class="dict-sec-ttl">Hotkey hook</div>
-      <div class="diag-row"><span class="status-dot" id="diagHotkeyDot"></span><span id="diagHotkeyTxt">Checking…</span></div>
-      <div class="diag-sub" id="diagHotkeyNote"></div>
-    </div>
-    <div class="dict-sec">
-      <div class="dict-sec-ttl">Microphone</div>
-      <div class="diag-row"><span class="status-dot" id="diagMicDot"></span><span id="diagMicTxt">Checking…</span></div>
-      <div class="diag-sub" id="diagMicRecording"></div>
-    </div>
-    <div class="dict-sec" style="grid-column:1 / -1">
-      <div class="dict-sec-ttl">Mic level test</div>
-      <div class="diag-hint">Runs a 5 second test recording to show your live input level. Nothing is saved.</div>
-      <div class="mic-meter-wrap">
-        <div class="mic-meter"><div class="mic-meter-fill" id="micMeterFill"></div><div class="mic-meter-peak" id="micMeterPeak"></div></div>
-      </div>
-      <button class="btn btn-p" id="micProbeBtn" onclick="startMicProbe()">Test mic</button>
-    </div>
-  </div>
-</div>
-
-<!-- About -->
-<div class="page" id="page-about">
-  <div class="ph"><div><h1>About</h1><div class="sub">Version, licence, and credits.</div></div></div>
-  <div class="dict-grid" style="grid-template-columns:1fr">
-    <div class="dict-sec">
-      <div class="dict-sec-ttl">Quiett</div>
-      <div class="s-lbl-s" id="aboutVersion" style="font-size:12.5px">Version —</div>
-      <div class="s-lbl-s" style="font-size:12.5px;line-height:1.5">
-        Offline, hold-to-talk voice dictation for Windows. Records while you hold a hotkey,
-        transcribes locally, and lets you review before it lands in whatever app has focus.
-      </div>
-      <div class="s-lbl-s" style="font-size:11.5px;margin-top:2px">
-        Licence: private build, not for redistribution.
-      </div>
-    </div>
-    <div class="dict-sec">
-      <div class="dict-sec-ttl">Credits</div>
-      <div class="s-lbl-s" style="font-size:12.5px;line-height:1.7">
-        Speech recognition by <strong style="color:var(--txt2)">whisper.cpp</strong>
-        (large-v3-turbo, Vulkan build) — ggml-org/whisper.cpp, MIT licence.<br>
-        Cloned-voice read-aloud by <strong style="color:var(--txt2)">qwentts.cpp</strong>
-        (Qwen3-TTS, Vulkan build) — MIT licence, Apache 2.0 weights.
-      </div>
-    </div>
-    <div class="dict-sec">
-      <div class="dict-sec-ttl">Changelog</div>
-      <div id="changelogList" class="s-lbl-s" style="font-size:12.5px">Loading…</div>
-      <button class="btn btn-s" disabled title="Offline app, no update check" style="opacity:.5;cursor:not-allowed;align-self:flex-start">Check for updates</button>
-    </div>
-  </div>
-</div>
-
-</main>
 </div>
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
 let _histAll = [];
 let _histTexts = [];  // parallel array — safe index-based access avoids JSON-in-onclick quoting bugs
-let _homeTexts = [];
 let _currentPage = 'home';
 let _theme = 'dark';
 let _INIT_PAGE = 'home';
 let _histSourceFilter = 'all';
 let _selectMode = false;
 let _selectedIdx = new Set();
+let _pausePlanSegments = [];
+let _networkSealed = false;
+let _lastNetworkProbe = null;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fmt(n) {
@@ -1793,13 +1971,16 @@ function navigateTo(page) {
     return;
   }
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.nav').forEach(n => n.classList.remove('active'));
   document.getElementById('page-'+page).classList.add('active');
-  document.querySelector('.nav-item[data-page="'+page+'"]').classList.add('active');
+  const navBtn = document.querySelector('.nav[data-page="'+page+'"]');
+  if (navBtn) navBtn.classList.add('active');  // 'about' has no rail entry
   _currentPage = page;
   if (page === 'home') loadHome();
-  else if (page === 'history') loadHistory();
+  else if (page === 'dictation') loadSettings();
+  else if (page === 'voice') { loadSettings(); loadVoice(); }
   else if (page === 'dictionary') loadDictionary();
+  else if (page === 'history') loadHistory();
   else if (page === 'settings') loadSettings();
   else if (page === 'diagnostics') loadDiagnostics();
   else if (page === 'about') loadAbout();
@@ -1847,6 +2028,7 @@ function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
   try { window.pywebview.api.set_titlebar_dark(t !== 'light'); } catch (e) {}
   const icon = document.getElementById('themeIcon');
+  if (!icon) return;  // theme icon left the titlebar in the ion-glass restyle
   if (t === 'light') {
     icon.innerHTML = '<path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clip-rule="evenodd"/>';
   } else {
@@ -1864,32 +2046,78 @@ function toggleTheme() {
   window.pywebview.api.save_settings({theme: next});
 }
 
-// ── Home page ──────────────────────────────────────────────────────────────
+// ── Home page — real data, no simulate button (P3) ──────────────────────────
 async function loadHome() {
-  const [stats, history] = await Promise.all([
-    window.pywebview.api.get_stats(),
-    window.pywebview.api.get_history(10),
-  ]);
-  document.getElementById('s-tw').textContent  = fmt(stats.today_words);
-  document.getElementById('s-ttl').textContent = fmt(stats.total_words);
-  document.getElementById('s-tr').textContent  = fmt(stats.today_recordings);
-  document.getElementById('s-at').textContent  = fmt(stats.total_recordings);
+  const s = await window.pywebview.api.get_home_stats();
+  const eyebrow = document.getElementById('homeEyebrow');
+  const hero = document.getElementById('homeHero');
+  const metrics = document.getElementById('homeMetrics');
+  const grid = document.getElementById('homeGrid');
+  const edu = document.getElementById('homeEdu');
+  const recentPlane = document.getElementById('homeRecent').closest('.plane');
 
-  const el = document.getElementById('activityList');
-  if (!history.length) { el.innerHTML = '<div class="empty">No dictations yet.</div>'; return; }
-  _homeTexts = history.map(e => e.text);
-  el.innerHTML = history.map((e, i) => `
-    <div class="list-item">
-      <div class="li-text">${esc(e.text)}</div>
-      <div class="li-meta">
-        <span>${esc(e.label)}</span>
-        <span>·</span><span>${e.words} words</span>
-        ${e.source ? '<span class="src-badge">'+esc(e.source)+'</span>' : ''}
-      </div>
-      <div class="li-acts">
-        <button class="ia" title="Copy" aria-label="Copy" onclick="copyText(_homeTexts[${i}])">${copyIcon()}</button>
-      </div>
-    </div>`).join('');
+  if (!s.has_history) {
+    eyebrow.textContent = 'GET STARTED';
+    hero.innerHTML = '';
+    metrics.innerHTML = '';
+    document.getElementById('rhythm').innerHTML = '';
+    document.getElementById('rhythmLbl').innerHTML = '';
+    grid.classList.add('single');
+    recentPlane.style.display = 'none';
+    edu.classList.add('hero-edu');
+    edu.innerHTML = `
+      <h3>Hold Ctrl+Alt anywhere.</h3>
+      <p class="sub">Your first dictation lands here.</p>
+      <div class="keys" style="margin-top:8px"><span class="key">Ctrl</span><span class="plus">+</span><span class="key">Alt</span><span style="color:var(--dim);font-size:11px;letter-spacing:.04em">&nbsp;hold · speak · release</span></div>
+      <p class="sub">Hear anything back in your own cloned voice with <span class="key">Ctrl</span><span class="plus">+</span><span class="key">Shift</span><span class="plus">+</span><span class="key">S</span></p>`;
+    return;
+  }
+
+  eyebrow.textContent = 'THIS WEEK';
+  grid.classList.remove('single');
+  recentPlane.style.display = '';
+  edu.classList.remove('hero-edu');
+  edu.innerHTML = `
+    <h3>Dictate anywhere</h3>
+    <p class="sub">No app to open. No window to switch to.</p>
+    <div class="keys"><span class="key">Ctrl</span><span class="plus">+</span><span class="key">Alt</span><span style="color:var(--dim);font-size:11px;letter-spacing:.04em">&nbsp;hold · speak · release</span></div>
+    <p class="sub">Hear anything back in your own cloned voice with <span class="key">Ctrl</span><span class="plus">+</span><span class="key">Shift</span><span class="plus">+</span><span class="key">S</span></p>
+    <div style="margin-top:auto;padding-top:12px"><button class="btn primary" onclick="navigateTo('history')">Open History</button></div>`;
+
+  const deltaArrow = s.delta_pct > 0 ? '▲' : (s.delta_pct < 0 ? '▼' : '·');
+  const deltaCls = s.delta_pct === 0 ? ' flat' : '';
+  hero.innerHTML = `<div class="hero">
+      <div><div class="big">${fmt(s.words_this_week)}</div>
+      <div class="delta${deltaCls}">${deltaArrow} ${Math.abs(s.delta_pct)}% on last week</div></div>
+      <div class="cap">WORDS SPOKEN<br>INTO PLACE</div>
+    </div>`;
+
+  const wpmVal = s.avg_wpm != null ? `${s.avg_wpm}<small>wpm</small>` : '—';
+  const fasterVal = s.faster_than_typing != null ? `${s.faster_than_typing}×` : '—';
+  const hrs = Math.floor(s.reclaimed_minutes / 60), mins = s.reclaimed_minutes % 60;
+  const reclaimedVal = s.reclaimed_minutes > 0 ? (hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`) : '—';
+  metrics.innerHTML = `
+    <div class="metric"><div class="v">${wpmVal}</div><div class="k">AVERAGE PACE</div></div>
+    <div class="metric"><div class="v">${fasterVal}</div><div class="k">FASTER THAN TYPING</div></div>
+    <div class="metric"><div class="v">${reclaimedVal}</div><div class="k">RECLAIMED</div></div>
+    <div class="metric"><div class="v">${fmt(s.dictation_count)}</div><div class="k">DICTATIONS</div></div>`;
+
+  const rEl = document.getElementById('rhythm'), lEl = document.getElementById('rhythmLbl');
+  const max = Math.max(1, ...s.per_day);
+  rEl.innerHTML = s.per_day.map((n, i) => {
+    const hiCls = i === s.per_day.length - 1 ? ' hi' : '';
+    return `<span class="rcell"><i class="${hiCls.trim()}" style="height:${Math.max(9, (n / max) * 100)}%"></i></span>`;
+  }).join('');
+  lEl.innerHTML = s.day_labels.map(d => `<span>${esc(d)}</span>`).join('');
+
+  const recEl = document.getElementById('homeRecent');
+  if (!s.recent.length) {
+    recEl.innerHTML = '<p class="sub">Nothing yet.</p>';
+  } else {
+    recEl.innerHTML = s.recent.map(e => `
+      <div class="item"><span class="glyph">${e.source ? esc(e.source.slice(0, 2).toUpperCase()) : '··'}</span>
+      <div><div class="txt">${esc(e.text)}</div><div class="meta">${esc(e.label)} · ${e.words} WORDS${e.source ? ' · ' + esc(e.source.toUpperCase()) : ''}</div></div></div>`).join('');
+  }
 }
 
 // ── History page ──────────────────────────────────────────────────────────
@@ -1923,24 +2151,19 @@ function filterEntries(items, q, srcFilter) {
 function renderHistItem(e, i) {
   const hasAudio = !!e.has_audio;
   return `
-    <div class="list-item${e.pinned ? ' pinned' : ''}" id="hi-${e.index}">
+    <div class="hrow${e.pinned ? ' pinned' : ''}" id="hi-${e.index}">
       <input type="checkbox" class="li-check" ${_selectedIdx.has(e.index) ? 'checked' : ''}
         onclick="toggleSelect(${e.index}, this.checked)">
-      <div class="li-text">${highlightText(e.text, _histQuery)}</div>
-      <div class="li-meta">
-        ${hasAudio ? `<div class="wave-thumb" data-idx="${e.index}" title="Waveform"></div>` : ''}
-        <span>${esc(e.label)}</span>
-        <span>·</span><span>${e.words} words</span>
-        ${e.source ? '<span class="src-badge">'+esc(e.source)+'</span>' : ''}
-        ${e.pinned ? '<span class="pin-badge" title="Pinned">'+starIcon(true)+'</span>' : ''}
-      </div>
-      <div class="li-acts">
-        ${hasAudio ? `<button class="ia play" title="Play" aria-label="Play recording" onclick="toggleAudioPlay(${e.index})">${playIcon()}</button>` : ''}
-        <button class="ia pin${e.pinned ? ' on' : ''}" title="${e.pinned ? 'Unpin' : 'Pin'}" aria-label="${e.pinned ? 'Unpin' : 'Pin'}"
+      <span class="txt">${highlightText(e.text, _histQuery)}</span>
+      ${hasAudio ? `<span class="wave-thumb" data-idx="${e.index}" title="Waveform"></span>` : ''}
+      <span class="t">${esc(e.label)} · ${e.words}w${e.source ? ' · ' + esc(e.source) : ''}</span>
+      <span class="act">
+        ${hasAudio ? `<button class="iby play" title="Play" aria-label="Play recording" onclick="toggleAudioPlay(${e.index})">${playIcon()}</button>` : ''}
+        <button class="iby pin${e.pinned ? ' on' : ''}" title="${e.pinned ? 'Unpin' : 'Pin'}" aria-label="${e.pinned ? 'Unpin' : 'Pin'}"
           onclick="togglePin(${e.index}, ${e.pinned ? 'false' : 'true'})">${starIcon(e.pinned)}</button>
-        <button class="ia" title="Copy" aria-label="Copy" onclick="copyText(_histTexts[${i}])">${copyIcon()}</button>
-        <button class="ia del" title="Delete" aria-label="Delete" onclick="deleteHistory(${e.index})">${trashIcon()}</button>
-      </div>
+        <button class="iby" title="Copy" aria-label="Copy" onclick="copyText(_histTexts[${i}])">${copyIcon()}</button>
+        <button class="iby" title="Delete" aria-label="Delete" onclick="deleteHistory(${e.index})">${trashIcon()}</button>
+      </span>
     </div>`;
 }
 
@@ -1965,7 +2188,7 @@ function renderHistory(items) {
   if (!items.length) {
     _histTexts = [];
     el.innerHTML = (_histQuery || (_histSourceFilter && _histSourceFilter !== 'all'))
-      ? '<div class="empty">No dictations match your filters.</div>'
+      ? '<div class="empty">No dictations match your search.</div>'
       : emptyState(_ES_MIC_ICON, 'No dictations yet',
                    'Hold Ctrl+Alt and speak. Your dictations land here.');
     updateBulkCount();
@@ -1976,12 +2199,12 @@ function renderHistory(items) {
   const ordered = pinned.concat(rest);
   _histTexts = ordered.map(e => e.text);
   let html = '';
-  if (pinned.length) html += '<div class="day-hdr">Pinned</div>';
+  if (pinned.length) html += '<div class="dayh">PINNED</div>';
   let lastDay = null;
   ordered.forEach((e, i) => {
     if (!e.pinned && e.day_label && e.day_label !== lastDay) {
       lastDay = e.day_label;
-      html += `<div class="day-hdr">${esc(e.day_label)}</div>`;
+      html += `<div class="dayh">${esc(e.day_label.toUpperCase())}</div>`;
     }
     html += renderHistItem(e, i);
   });
@@ -2018,7 +2241,7 @@ async function toggleAudioPlay(idx) {
 }
 
 function setPlayButtonState(idx, playing) {
-  const btn = document.querySelector(`#hi-${idx} .ia.play`);
+  const btn = document.querySelector(`#hi-${idx} .iby.play`);
   if (!btn) return;
   btn.classList.toggle('on', playing);
   btn.innerHTML = playing ? stopIcon() : playIcon();
@@ -2029,7 +2252,7 @@ function setPlayButtonState(idx, playing) {
 function hideAudioControls(idx) {
   const row = document.getElementById(`hi-${idx}`);
   if (!row) return;
-  const btn = row.querySelector('.ia.play');
+  const btn = row.querySelector('.iby.play');
   if (btn) btn.style.display = 'none';
   const wave = row.querySelector('.wave-thumb');
   if (wave) wave.style.display = 'none';
@@ -2109,7 +2332,7 @@ async function deleteHistory(idx) {
 
 async function confirmClear() {
   if (!confirm('Clear all history? This cannot be undone.')) return;
-  await window.pywebview.api.clear_history();
+  await window.pywebview.api.clear_history(true);
   _histAll = [];
   _selectedIdx.clear();
   renderHistory([]);
@@ -2189,6 +2412,9 @@ async function loadDictionary() {
   const dict = await window.pywebview.api.get_dictionary();
   renderCorrections(dict.corrections);
   renderVocab(dict.vocabulary);
+  const tog = document.querySelector('.tog[data-key="learn_from_edits"]');
+  if (tog) setTogState(tog, dict.learn_from_edits !== false);
+  loadPromotions();
 }
 
 function renderCorrections(corr) {
@@ -2196,29 +2422,57 @@ function renderCorrections(corr) {
   const entries = Object.entries(corr || {});
   if (!entries.length) {
     el.innerHTML = emptyState(_ES_PENCIL_ICON, 'No corrections yet',
-                              'Add a "heard → replace" pair below to fix words Whisper keeps mishearing.');
+                              'Add a "heard, replace" pair below to fix words Whisper keeps mishearing.');
     return;
   }
   el.innerHTML = entries.map(([from, to]) => `
-    <div class="corr-item">
-      <span class="corr-from">${esc(from)}</span>
-      <span class="corr-arr">→</span>
-      <span class="corr-to">${esc(to)}</span>
-      <button class="corr-del" title="Remove" aria-label="Remove correction for ${esc(from)}" onclick="removeCorrection(${JSON.stringify(from)})">${xIcon()}</button>
+    <div class="corr-row">
+      <span class="mono" style="flex:1;color:var(--mid);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(from)}</span>
+      <span class="arrow">→</span>
+      <span class="mono" style="flex:1;color:var(--text)">${esc(to)}</span>
+      <button class="iby" title="Remove" aria-label="Remove correction for ${esc(from)}" onclick="removeCorrection(${JSON.stringify(from)})">${xIcon()}</button>
     </div>`).join('');
 }
 
 function renderVocab(vocab) {
   const el = document.getElementById('vocabList');
+  const countEl = document.getElementById('vocabCount');
+  if (countEl) countEl.textContent = 'Vocabulary' + (vocab && vocab.length ? ' · ' + vocab.length + ' terms' : '');
   if (!(vocab && vocab.length)) {
     el.innerHTML = emptyState(_ES_TAG_ICON, 'No custom vocabulary yet',
                               'Add names, jargon, or acronyms below so Whisper recognises them.');
     return;
   }
   el.innerHTML = vocab.map(w => `
-    <div class="vchip">${esc(w)}
-      <button class="vdel" title="Remove" aria-label="Remove ${esc(w)} from vocabulary" onclick="removeVocab(${JSON.stringify(w)})">${xIcon()}</button>
-    </div>`).join('');
+    <span class="vchip">${esc(w)}
+      <button class="x" title="Remove" aria-label="Remove ${esc(w)} from vocabulary" onclick="removeVocab(${JSON.stringify(w)})">${xIcon()}</button>
+    </span>`).join('');
+}
+
+// ── Learned this week (P6 auto-learn dictionary, Agent B's promotions feed) ─
+async function loadPromotions() {
+  const el = document.getElementById('learnedList');
+  if (!el) return;
+  try {
+    const items = await window.pywebview.api.get_promotions();
+    if (!items || !items.length) {
+      el.innerHTML = '<p class="sub">Nothing promoted yet. Fix the same word three times and it lands here.</p>';
+      return;
+    }
+    el.innerHTML = items.map(p => `
+      <div class="item"><div><div class="mono" style="font-size:11px;color:var(--text)">"${esc(p.raw)}" <span class="arrow">→</span> "${esc(p.fixed)}"</div>
+      <div class="meta">${p.count} FIXES · PROMOTED ${esc(fmtPromotedDate(p.promoted_at))}</div></div></div>`).join('');
+  } catch (e) {
+    el.innerHTML = '<p class="sub">Nothing promoted yet. Fix the same word three times and it lands here.</p>';
+  }
+}
+
+function fmtPromotedDate(iso) {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { weekday: 'long' }).toUpperCase();
+  } catch (e) { return ''; }
 }
 
 async function addCorrection() {
@@ -2283,10 +2537,14 @@ async function loadSettings() {
     }
   });
 
-  // Toggles
+  // Toggles. learn_from_edits defaults true (Agent B's config default may not
+  // exist in an older config.json yet) — every other toggle here is fine
+  // falling back to false/undefined.
   document.querySelectorAll('.tog[data-key]').forEach(tog => {
     const key = tog.dataset.key;
-    let val = key === '_paste_clipboard_only' ? (cfg.paste_mode === 'clipboard_only') : cfg[key];
+    let val = key === '_paste_clipboard_only' ? (cfg.paste_mode === 'clipboard_only')
+      : key === 'learn_from_edits' ? (cfg.learn_from_edits !== false)
+      : cfg[key];
     setTogState(tog, !!val);
   });
 
@@ -2327,20 +2585,17 @@ async function reloadSettings() { await loadSettings(); }
 // (theme, animations, sound_volume, history_max_entries,
 // recording_retention_days, dashboard_scale) are dashboard-only settings —
 // their "factory" value is defined here instead.
+// 'audio' and 'readaloud' sections moved to the Dictation and Voice pages
+// (P2/P6) and dropped no reset button with them - the showcase design has
+// no reset control on those pages either, mirroring that here.
 const _SECTION_DEFAULTS = {
   appearance: {
     theme: 'dark', dashboard_scale: 100, badge_animation: 'waveform',
     preview_position: 'cursor', preview_auto_dismiss_seconds: 0,
     animations: true, sound_volume: 100,
   },
-  audio: { input_device: null },
   recording: {
-    min_record_seconds: 0.5, max_record_seconds: 120,
-    silence_auto_stop_seconds: 3, vad_filter: false,
-  },
-  readaloud: {
-    tts_enabled: false, tts_speed: 1.0,
-    study_mode: false, study_speed: 0.95, study_pause_scale: 1.0,
+    min_record_seconds: 0.5, max_record_seconds: 120, vad_filter: false,
   },
   transcription: { language: 'en', filler_words: [], initial_prompt: '' },
   paste: {
@@ -2349,13 +2604,11 @@ const _SECTION_DEFAULTS = {
   },
   history: {
     history_max_entries: '100', recording_retention_days: '0',
-    incognito: false, redact_patterns: [],
   },
 };
 const _SECTION_LABELS = {
-  appearance: 'Appearance', audio: 'Audio', recording: 'Recording',
-  readaloud: 'Read-aloud', transcription: 'Transcription',
-  paste: 'Paste', history: 'History',
+  appearance: 'Appearance', recording: 'Recording',
+  transcription: 'Transcription', paste: 'Paste', history: 'History',
 };
 
 function applyDefaultsToForm(defaults) {
@@ -2379,6 +2632,7 @@ function applyDefaultsToForm(defaults) {
     });
     if (key === 'theme') applyTheme(val);
     if (key === 'dashboard_scale') applyScale(val);
+    if (key === 'animations') setVoicelineMotion(val);
     if (key === 'sound_volume') {
       const lbl = document.getElementById('soundVolumeLbl');
       if (lbl) lbl.textContent = val + '%';
@@ -2473,72 +2727,193 @@ async function loadAbout() {
 let _micProbeTimer = null;
 let _micProbePeak = 0;
 
-function _setDot(id, colorVar) {
-  const el = document.getElementById(id);
-  if (el) el.style.background = colorVar;
+function _setProbe(stId, ok, warm) {
+  const st = document.getElementById(stId);
+  if (!st) return;
+  st.textContent = ok ? '✓' : (warm ? '·' : '✕');
+  st.className = 'st' + (ok ? '' : (warm ? ' warm' : ' bad'));
 }
 
 async function loadDiagnostics() {
   ['diagWhisperTxt', 'diagHotkeyTxt', 'diagMicTxt'].forEach(id => {
     document.getElementById(id).textContent = 'Checking…';
   });
-  ['diagWhisperDot', 'diagHotkeyDot', 'diagMicDot'].forEach(id => _setDot(id, 'var(--txt3)'));
-  document.getElementById('diagWhisperLatency').textContent = '';
-  document.getElementById('diagWhisperModel').textContent = '';
-  document.getElementById('diagWhisperDevice').textContent = '';
-  document.getElementById('diagHotkeyNote').textContent = '';
-  document.getElementById('diagMicRecording').textContent = '';
+  ['diagWhisperSt', 'diagHotkeySt', 'diagMicSt', 'diagNetSt'].forEach(id => _setProbe(id, false, true));
+  ['diagWhisperVal', 'diagHotkeyVal', 'diagMicVal'].forEach(id => { document.getElementById(id).textContent = ''; });
+  document.getElementById('diagNetVal').textContent = 'checking…';
+  document.getElementById('sockWell').textContent = 'Checking…';
 
   try {
     const d = await window.pywebview.api.get_diagnostics();
-    if (!d || d.reachable === false) { renderDiagnosticsUnreachable(); return; }
-    renderDiagnostics(d);
+    if (!d || d.reachable === false) renderDiagnosticsUnreachable();
+    else renderDiagnostics(d);
   } catch (e) {
     renderDiagnosticsUnreachable();
   }
+  refreshNetworkProbe();
 }
 
 function renderDiagnostics(d) {
   const w = d.whisper || {};
-  _setDot('diagWhisperDot', w.up ? 'var(--success)' : 'var(--danger)');
-  document.getElementById('diagWhisperTxt').textContent = w.up ? 'Running' : 'Not responding';
-  document.getElementById('diagWhisperLatency').textContent = w.up && w.latency_ms != null
-    ? `Ping latency: ${w.latency_ms} ms` : 'Ping latency: unavailable';
-  document.getElementById('diagWhisperModel').textContent = `Model: ${w.model || 'unknown'}`;
-  document.getElementById('diagWhisperDevice').textContent = `Device: ${w.device || 'unknown'}`;
+  _setProbe('diagWhisperSt', !!w.up);
+  document.getElementById('diagWhisperTxt').textContent = w.up ? 'Whisper server' : 'Whisper server not responding';
+  document.getElementById('diagWhisperVal').textContent = w.up
+    ? `${w.model || 'unknown'} · ${w.device || 'unknown'}${w.latency_ms != null ? ' · ' + w.latency_ms + ' ms' : ''}`
+    : '';
 
   const h = d.hotkey || {};
-  _setDot('diagHotkeyDot', 'var(--success)');
-  document.getElementById('diagHotkeyTxt').textContent =
-    `Registered at startup (${h.combo || 'ctrl+alt'})`;
-  document.getElementById('diagHotkeyNote').textContent = h.note || '';
+  _setProbe('diagHotkeySt', true);
+  document.getElementById('diagHotkeyTxt').textContent = 'Hotkey hook';
+  document.getElementById('diagHotkeyVal').textContent = `${h.combo || 'ctrl+alt'}${h.note ? ' · ' + h.note : ''}`;
 
   const m = d.mic || {};
-  _setDot('diagMicDot', m.device_exists ? 'var(--success)' : 'var(--danger)');
-  document.getElementById('diagMicTxt').textContent = m.device_exists
+  _setProbe('diagMicSt', !!m.device_exists);
+  document.getElementById('diagMicTxt').textContent = 'Microphone';
+  document.getElementById('diagMicVal').textContent = m.device_exists
     ? (m.device_name || 'Unknown device')
     : (m.device_name ? `${m.device_name} not found` : 'No microphone found');
-  document.getElementById('diagMicRecording').textContent = m.recording
-    ? 'A dictation recording is in progress right now.'
-    : 'Not currently recording.';
 
   const btn = document.getElementById('micProbeBtn');
   if (btn && !_micProbeTimer) { btn.disabled = false; btn.title = ''; }
 }
 
 function renderDiagnosticsUnreachable() {
-  ['diagWhisperDot', 'diagHotkeyDot', 'diagMicDot'].forEach(id => _setDot(id, 'var(--warn)'));
   const msg = "Quiett isn't running";
-  document.getElementById('diagWhisperTxt').textContent = msg;
-  document.getElementById('diagHotkeyTxt').textContent = msg;
-  document.getElementById('diagMicTxt').textContent = msg;
-  document.getElementById('diagHotkeyNote').textContent = 'Start Quiett to see live diagnostics.';
-  document.getElementById('diagWhisperLatency').textContent = '';
-  document.getElementById('diagWhisperModel').textContent = '';
-  document.getElementById('diagWhisperDevice').textContent = '';
-  document.getElementById('diagMicRecording').textContent = '';
+  ['diagWhisperSt', 'diagHotkeySt', 'diagMicSt'].forEach(id => _setProbe(id, false, true));
+  document.getElementById('diagWhisperTxt').textContent = 'Whisper server';
+  document.getElementById('diagWhisperVal').textContent = msg;
+  document.getElementById('diagHotkeyTxt').textContent = 'Hotkey hook';
+  document.getElementById('diagHotkeyVal').textContent = msg;
+  document.getElementById('diagMicTxt').textContent = 'Microphone';
+  document.getElementById('diagMicVal').textContent = msg;
   const btn = document.getElementById('micProbeBtn');
   if (btn) { btn.disabled = true; btn.title = 'Start Quiett first.'; }
+}
+
+// ── Network isolation probe (P7) — also feeds the header seal, one fetch
+// serves both (Agent B's GET /diag/sockets on api_server.py). ──────────────
+async function refreshNetworkProbe() {
+  let d;
+  try { d = await window.pywebview.api.get_network_probe(); } catch (e) { d = { reachable: false }; }
+  _lastNetworkProbe = d;
+  renderNetworkProbe(d);
+  updateSeal(d);
+  return d;
+}
+
+function renderNetworkProbe(d) {
+  const well = document.getElementById('sockWell');
+  const val = document.getElementById('diagNetVal');
+  if (!well || !val) return;
+  if (!d || d.reachable === false) {
+    _setProbe('diagNetSt', false, true);
+    val.textContent = "can't verify";
+    well.textContent = "Quiett isn't running - start it to see the socket list.";
+    return;
+  }
+  const sockets = d.sockets || [];
+  const external = d.external || 0;
+  _setProbe('diagNetSt', external === 0);
+  val.textContent = external === 0 ? 'external connections: 0' : `${external} external connection${external === 1 ? '' : 's'}`;
+  if (!sockets.length) {
+    well.textContent = `external connections: ${external} - dictation works with the cable out`;
+  } else {
+    well.innerHTML = sockets.map(s => `<div><span class="sock-app">${esc(s.proc || '?')}</span> · ${esc(s.laddr || '')} · ${esc(s.state || '')}</div>`).join('')
+      + `<div style="margin-top:6px;color:var(--dim)">external connections: ${external} - dictation works with the cable out</div>`;
+  }
+}
+
+function updateSeal(d) {
+  const seal = document.getElementById('seal');
+  if (!seal) return;
+  if (d && d.reachable !== false && (d.external || 0) === 0) {
+    _networkSealed = true;
+    seal.classList.add('lit');
+    seal.title = 'Nothing leaves this machine';
+  } else {
+    _networkSealed = false;
+    seal.classList.remove('lit');
+    seal.title = (d && d.reachable === false) ? "Can't verify: Quiett isn't running" : 'Network isolation check unavailable';
+  }
+}
+
+// ── The voice line — bottom status strip, backend status + seal state ──────
+async function refreshVoiceline() {
+  const el = document.getElementById('vlStatus');
+  if (!el) return;
+  try {
+    const d = await window.pywebview.api.get_diagnostics();
+    if (!d || d.reachable === false) { el.textContent = 'QUIETT NOT RUNNING'; return; }
+    const w = d.whisper || {};
+    const bits = [(w.model || 'WHISPER').toUpperCase(), (w.device || 'GPU').toUpperCase()];
+    if (_networkSealed) bits.push('SEALED');
+    el.textContent = bits.join(' · ');
+  } catch (e) {
+    el.textContent = 'QUIETT NOT RUNNING';
+  }
+}
+
+// ── Voice page (P6) — orb identity, speed/study controls (moved from
+// Settings), and the pause-plan visual rendered from REAL narration.py
+// output on a fixed sample passage. ─────────────────────────────────────────
+async function loadVoice() {
+  const sub = document.getElementById('pausePlanSub');
+  const el = document.getElementById('pauseplan');
+  if (!sub || !el) return;
+  sub.textContent = 'Loading the real plan from narration.py…';
+  el.innerHTML = '';
+  _pausePlanSegments = [];
+  try {
+    const res = await window.pywebview.api.get_pause_plan();
+    if (!res || !res.ok) { sub.textContent = "Couldn't load the plan right now."; return; }
+    _pausePlanSegments = res.segments;
+    sub.textContent = `${res.segments.length} segment${res.segments.length === 1 ? '' : 's'}. Warm marks are deliberate pauses, planned from this passage's own structure.`;
+    res.segments.forEach(seg => {
+      const s = document.createElement('div');
+      s.className = 'pp-seg';
+      s.style.flex = Math.max(1, seg.chars);
+      s.title = seg.text;
+      el.appendChild(s);
+      if (seg.pause > 0) {
+        const g = document.createElement('div');
+        g.className = 'pp-gap';
+        g.style.width = (6 + seg.pause * 22) + 'px';
+        const i = document.createElement('i');
+        i.style.height = (8 + seg.pause * 22) + 'px';
+        g.appendChild(i);
+        el.appendChild(g);
+      }
+    });
+  } catch (e) {
+    sub.textContent = "Couldn't load the plan right now.";
+  }
+}
+
+function playStudyPlan() {
+  const segs = document.querySelectorAll('#pauseplan .pp-seg');
+  if (!segs.length) return;
+  segs.forEach(s => s.classList.remove('played'));
+  let t = 100;
+  _pausePlanSegments.forEach((seg, i) => {
+    const el = segs[i];
+    setTimeout(() => { if (el) el.classList.add('played'); }, t);
+    t += 260 + seg.chars * 16 + seg.pause * 1000;
+  });
+}
+
+async function playSample() {
+  const btn = document.getElementById('playSampleBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await window.pywebview.api.play_sample();
+    if (res && res.ok) showToast('Playing sample…');
+    else if (res && res.reason === 'off') showToast('Read-aloud is off.');
+    else showToast('App not running.');
+  } catch (e) {
+    showToast('App not running.');
+  } finally {
+    if (btn) setTimeout(() => { btn.disabled = false; }, 800);
+  }
 }
 
 function _resetMicMeter() {
@@ -2608,7 +2983,11 @@ function setTogState(el, on) {
   el.setAttribute('aria-checked', String(!!on));
 }
 
-function togClick(el) { setTogState(el, !el.classList.contains('on')); autoSave(); }
+function togClick(el) {
+  setTogState(el, !el.classList.contains('on'));
+  if (el.dataset.key === 'animations') setVoicelineMotion(el.classList.contains('on'));
+  autoSave();
+}
 
 // Enter/Space activates a .tog the same way a click does (item 80) — the
 // toggle is a div with role="switch", not a native control, so it needs its
@@ -2634,25 +3013,37 @@ function silenceAutoStopLabel(v) {
   return n === 0 ? 'Off' : n.toFixed(1) + 's';
 }
 
-// ── Backend status (BACKLOG item 48b) ───────────────────────────────────────
-// The sidebar footer dot/label already existed but was a hardcoded "Ready" —
-// wire it to a real, periodic health check instead of adding a second area.
-async function refreshBackendStatus() {
-  const dot = document.getElementById('statusDot');
-  const txt = document.getElementById('statusTxt');
-  if (!dot || !txt) return;
-  try {
-    const st = await window.pywebview.api.get_backend_status();
-    if (!st.whisper_ok) {
-      dot.style.background = 'var(--danger)';
-      txt.textContent = 'Whisper down';
-      dot.title = "Whisper server isn't responding. It restarts automatically.";
-    } else {
-      dot.style.background = 'var(--success)';
-      txt.textContent = 'Ready';
-      dot.title = '';
+// ── Voice line idle waveform — rAF, respects the animations setting AND OS
+// reduce-motion (P2); a flat static line otherwise. ─────────────────────────
+let _voicelineAnimEnabled = true;
+let _voicelineRafOn = false;
+
+function _voicelineFrame(poly, t0, now) {
+  if (!_voicelineRafOn) return;
+  const t = (now - t0) * 0.0025;
+  const pts = [];
+  for (let x = 0; x <= 74; x += 2) {
+    const y = 8 + Math.sin(t + x * 0.24) * Math.sin(t * 0.7 + x * 0.05) * 3.2;
+    pts.push(x + ',' + y.toFixed(1));
+  }
+  poly.setAttribute('points', pts.join(' '));
+  requestAnimationFrame((n) => _voicelineFrame(poly, t0, n));
+}
+
+function setVoicelineMotion(enabled) {
+  const poly = document.getElementById('vlPoly');
+  if (!poly) return;
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  _voicelineAnimEnabled = !!enabled && !reduceMotion;
+  if (_voicelineAnimEnabled) {
+    if (!_voicelineRafOn) {
+      _voicelineRafOn = true;
+      requestAnimationFrame((n) => _voicelineFrame(poly, n, n));
     }
-  } catch (e) { /* leave last-known state on a transient IPC hiccup */ }
+  } else {
+    _voicelineRafOn = false;
+    poly.setAttribute('points', '0,8 74,8');
+  }
 }
 
 // ── Instant apply — settings persist on change, no Save button ─────────────
@@ -2735,16 +3126,42 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-window.addEventListener('pywebviewready', async function () {
+// Boot must survive both orders: script-then-bridge (pywebviewready fires
+// later) and bridge-then-script (the event already fired and will never
+// come again). A bare listener misses the second case - the whole init
+// silently never runs. Guard + listener + slow poll fallback, run once.
+let _booted = false;
+async function _boot() {
+  if (_booted) return;
+  _booted = true;
   try {
     const cfg = await window.pywebview.api.get_config();
     applyTheme(cfg.theme || 'dark');
     applyScale(cfg.dashboard_scale || 100);
-    const sf = document.getElementById('settingsForm');
-    sf.addEventListener('input', autoSave);
-    sf.addEventListener('change', autoSave);
-    refreshBackendStatus();
-    setInterval(refreshBackendStatus, 15000);
+    setVoicelineMotion(cfg.animations !== false);
+
+    // Settings/Dictation/Voice controls all share the same data-key config
+    // system now, spread across three pages instead of one - hydrate every
+    // data-key element document-wide up front, regardless of which page is
+    // showing, then autosave on change wherever it fires.
+    await loadSettings();
+    document.addEventListener('input', (e) => {
+      if (e.target.closest && e.target.closest('[data-key]')) autoSave();
+    });
+    document.addEventListener('change', (e) => {
+      if (e.target.closest && e.target.closest('[data-key]')) autoSave();
+    });
+
+    try {
+      const about = await window.pywebview.api.get_about();
+      const ver = document.getElementById('verTag');
+      if (ver) ver.textContent = 'v' + about.version;
+    } catch (e) {}
+
+    refreshVoiceline();
+    refreshNetworkProbe();
+    setInterval(refreshVoiceline, 15000);
+    setInterval(refreshNetworkProbe, 20000);
     _histStamp = await window.pywebview.api.get_history_stamp();
     setInterval(pollHistory, 4000);
     if (_INIT_PAGE === 'home') {
@@ -2754,11 +3171,35 @@ window.addEventListener('pywebviewready', async function () {
     }
   } catch (e) {
     console.error('init error:', e);
+    var vl = document.getElementById('vlStatus');
+    if (vl) vl.textContent = 'INIT ERR: ' + String(e && e.message || e).slice(0, 160);
   }
-});
+}
+window.onerror = function (msg, src, line) {
+  var vl = document.getElementById('vlStatus');
+  if (vl) vl.textContent = 'JS ERR L' + line + ': ' + String(msg).slice(0, 150);
+};
+if (window.pywebview && window.pywebview.api) { _boot(); }
+window.addEventListener('pywebviewready', _boot);
+(function () {
+  let tries = 0;
+  const iv = setInterval(function () {
+    if (window.pywebview && window.pywebview.api) { clearInterval(iv); _boot(); }
+    else if (++tries > 100) { clearInterval(iv); }
+  }, 100);
+})();
 </script>
 </body>
 </html>"""
+
+# Tokens come from theme.py (single source of truth shared with the Tk panel
+# and tray) - substituted once at import time, not per page-build, since the
+# palette only changes when theme.py itself changes.
+_HTML = (_HTML
+         .replace("__ROOT_VARS_DARK__", theme.css_vars(theme.DARK))
+         .replace("__ROOT_VARS_LIGHT__", theme.css_vars(theme.LIGHT))
+         .replace("__AURORA_DARK__", theme.DARK["aurora"])
+         .replace("__AURORA_LIGHT__", theme.LIGHT["aurora"]))
 
 
 # ── Subprocess entrypoint ──────────────────────────────────────────────────────

@@ -116,6 +116,8 @@ _CONFIG_DEFAULTS = {
     "study_mode":                  False,   # read-aloud narrates with structural pauses instead of flat
     "study_speed":                 0.95,    # ...and at its own rate, so normal read-aloud keeps tts_speed
     "study_pause_scale":           1.0,     # multiplies every study pause, for tuning delivery by ear
+    "panel_acrylic":               True,    # Win11 acrylic backdrop on the panel/badge (QUIETT_UI_PLAN P4)
+    "learn_from_edits":            True,    # auto-promote a correction to a rule after 3 repeats (P6)
 }
 
 _RECORDINGS_DIR = "recordings"
@@ -251,6 +253,8 @@ def _validate_config(raw: dict) -> dict:
         cfg["redact_patterns"] = []
     else:
         cfg["redact_patterns"] = [p for p in cfg["redact_patterns"] if isinstance(p, str) and p.strip()]
+    cfg["panel_acrylic"] = bool(cfg.get("panel_acrylic", True))
+    cfg["learn_from_edits"] = bool(cfg.get("learn_from_edits", True))
     return cfg
 
 
@@ -684,7 +688,8 @@ def main() -> None:
                             "retain_audio", "retain_audio_max_files",
                             "retain_audio_min_seconds", "redact_patterns",
                             "tts_speed", "tts_max_chunk_chars",
-                            "study_speed", "study_pause_scale"):
+                            "study_speed", "study_pause_scale",
+                            "panel_acrylic", "learn_from_edits"):
                     _cfg[key] = validated[key]
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],

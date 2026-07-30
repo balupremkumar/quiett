@@ -16,6 +16,8 @@ import win32gui
 
 _DWMWA_WINDOW_CORNER_PREFERENCE = 33
 _DWMWCP_ROUND = 2
+_DWMWA_SYSTEMBACKDROP_TYPE = 38
+_DWMSBT_TRANSIENTWINDOW = 3
 
 # ---------------------------------------------------------------------------
 # Motion policy (BACKLOG item 47) — every animation in this module is capped
@@ -110,6 +112,24 @@ def _apply_drop_shadow(hwnd: int) -> None:
             wintypes.HWND(hwnd), ctypes.byref(margins))
     except Exception:
         pass
+
+
+def apply_backdrop(hwnd: int) -> bool:
+    """Win11 acrylic-style backdrop (DWMSBT_TRANSIENTWINDOW) behind a
+    borderless Toplevel — QUIETT_UI_PLAN P4. Silent no-op returning False on
+    Win10 or any DWM refusal: callers must never depend on this for
+    visibility, only polish. Tk still paints every widget solid on top, so
+    this only shows through wherever the window's own background colour
+    would otherwise be — the existing solid fill is the fallback that always
+    works, unchanged, when this returns False."""
+    try:
+        pref = ctypes.c_int(_DWMSBT_TRANSIENTWINDOW)
+        hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(hwnd), _DWMWA_SYSTEMBACKDROP_TYPE,
+            ctypes.byref(pref), ctypes.sizeof(pref))
+        return hr == 0
+    except Exception:
+        return False
 
 
 def fade_to(win, target: float, duration_ms: int = 180, steps: int = 9,

@@ -9,15 +9,19 @@ recording  red    — mic is active (icon pulses with sine-eased brightness)
 processing yellow — transcribing audio
 """
 
+import io
 import json
 import math
 import os
+import struct
 import threading
 import time
 
 import pyperclip
 import pystray
 from PIL import Image, ImageDraw
+
+import theme
 
 _CONFIG_FILE = "config.json"
 
@@ -46,12 +50,9 @@ _TOOLTIPS = {
     "processing": "Quiett — Processing...",
 }
 
-_BG = {
-    "loading":      (110, 110, 110),
-    "idle":         (34,  170,  84),
-    "recording":    (220,  38,  38),
-    "processing":   (217, 152,  10),
-}
+def _hex_to_rgb(hexcolour: str) -> tuple:
+    return (int(hexcolour[1:3], 16), int(hexcolour[3:5], 16), int(hexcolour[5:7], 16))
+
 
 # Number of brightness steps for the sine-eased recording pulse
 _PULSE_STEPS = 14
@@ -69,70 +70,109 @@ def _system_light_taskbar() -> bool:
         return False
 
 
-_DOT = {  # state → indicator dot colour; idle is the bare glyph
-    "loading":    (110, 110, 110),
-    "recording":  (220, 38, 38),
-    "processing": (217, 152, 10),
+_DOT = {  # state -> indicator dot colour, from theme.py (QUIETT_UI_PLAN P5);
+          # idle stays the bare glyph, no dot at all.
+    "loading":    _hex_to_rgb(theme.DARK["dim"]),
+    "recording":  _hex_to_rgb(theme.DARK["rec"]),
+    "processing": _hex_to_rgb(theme.DARK["pause"]),
 }
 
 
-def _make_badge_icon(bg: tuple, target_size: int = 32) -> Image.Image:
-    """Coloured-disc badge icon — kept for the desktop/installer .ico, where a
-    bare monochrome glyph would vanish against the wallpaper."""
+# ---------------------------------------------------------------------------
+# The Quiett master mark (QUIETT_UI_PLAN P5) — mic capsule, open arc, stem,
+# caret foot. Matches the kove.nz showcase titlebar SVG. One shared drawing
+# primitive so the tray glyph, the badge overlay logo, and the desktop .ico
+# are always the same shape, never three hand-drifted lookalikes.
+# ---------------------------------------------------------------------------
+
+def _draw_mic_caret_glyph(draw: "ImageDraw.ImageDraw", cx: float, cy: float,
+                          glyph_h: float, fg, stroke: int | None = None,
+                          include_arc: bool = True, body_scale: float = 1.0) -> None:
+    """Draw the mark centred on (cx, cy), `glyph_h` pixels tall overall.
+    `include_arc=False` drops the open arc under the capsule — at 16px it
+    muddies the shape more than it reads as a mic stand, so legibility wins;
+    `body_scale` widens the capsule relative to the stem to keep the two
+    readable as separate parts once that arc (their usual visual seam) is
+    gone. `stroke` overrides the auto stroke weight for hand-tuning small
+    sizes."""
+    stroke = stroke if stroke is not None else max(2, round(glyph_h * 0.075))
+
+    body_half_w = glyph_h * 0.18 * body_scale
+    body_h      = glyph_h * 0.56
+    body_top    = cy - glyph_h * 0.48
+    draw.rounded_rectangle(
+        [cx - body_half_w, body_top, cx + body_half_w, body_top + body_h],
+        radius=body_half_w, fill=fg,
+    )
+
+    stem_top = body_top + body_h
+    if include_arc:
+        arc_half_w = glyph_h * 0.26
+        arc_top    = stem_top - glyph_h * 0.16
+        arc_bottom = stem_top + glyph_h * 0.24
+        draw.arc([cx - arc_half_w, arc_top, cx + arc_half_w, arc_bottom],
+                 start=0, end=180, fill=fg, width=stroke)
+        stem_top = arc_bottom
+
+    stem_bottom = cy + glyph_h * 0.48
+    draw.line([cx, stem_top, cx, stem_bottom], fill=fg, width=stroke)
+
+    foot_half_w = glyph_h * 0.18
+    draw.line([cx - foot_half_w, stem_bottom, cx + foot_half_w, stem_bottom],
+              fill=fg, width=stroke)
+
+
+_GRADIENT_BASE = 64  # small working resolution; a linear gradient upsamples
+                     # losslessly, so this keeps icon generation fast
+
+
+def _gradient_tile(px: int, corner_frac: float = 0.22) -> Image.Image:
+    """Rounded-square tile in the 125deg ion -> ion-deep gradient — the
+    master mark's background (QUIETT_UI_PLAN P5). Always the flagship (dark
+    theme) hues: this is the coloured brand mark, not a themed UI surface."""
+    c0 = _hex_to_rgb(theme.DARK["ion"])
+    c1 = _hex_to_rgb(theme.DARK["ion_deep"])
+    angle = math.radians(125)
+    ax, ay = math.cos(angle), math.sin(angle)
+    n = _GRADIENT_BASE
+    corners = [(0, 0), (n, 0), (0, n), (n, n)]
+    projs = [x * ax + y * ay for x, y in corners]
+    lo, hi = min(projs), max(projs)
+    span = (hi - lo) or 1.0
+    small = Image.new("RGB", (n, n))
+    sp = small.load()
+    for y in range(n):
+        base = y * ay
+        for x in range(n):
+            t = (x * ax + base - lo) / span
+            sp[x, y] = _blend_rgb(c0, c1, max(0.0, min(1.0, t)))
+    grad = small.resize((px, px), Image.BICUBIC)
+
+    img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    mask = Image.new("L", (px, px), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, px - 1, px - 1], radius=max(1, int(px * corner_frac)), fill=255)
+    img.paste(grad, (0, 0), mask)
+    return img
+
+
+def _mic_caret_tile(size: int, stroke_frac: float | None = None,
+                    include_arc: bool = True, body_scale: float = 1.0) -> Image.Image:
+    """One frame of the desktop .ico master mark at `size` px. Rendered at 4x
+    and LANCZOS-downsampled like every other icon here, except 16/20px which
+    export_ico() calls directly at their own resolution (not resized down
+    from the 256px master) so their stroke/arc/body can be hand-tuned."""
     scale = 4
-    size  = target_size * scale
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-
-    # Background circle with subtle inner shadow for depth
-    pad = 2 * scale
-    d.ellipse([pad, pad, size - pad, size - pad], fill=bg)
-
-    fg = (255, 255, 255)
-    stroke = max(2, int(2.5 * scale))
-
-    # ── Microphone (shifted left, centred vertically) ─────────────────────
-    cx_mic = int(size * 0.34)
-    body_top    = int(size * 0.20)
-    body_bottom = int(size * 0.55)
-    body_half_w = int(size * 0.11)
-    body_radius = body_half_w
-    d.rounded_rectangle(
-        [cx_mic - body_half_w, body_top, cx_mic + body_half_w, body_bottom],
-        radius=body_radius, fill=fg,
-    )
-    # Mic stand arc (U-shape under the body)
-    arc_half_w = int(size * 0.16)
-    arc_top    = int(size * 0.45)
-    arc_bottom = int(size * 0.70)
-    d.arc(
-        [cx_mic - arc_half_w, arc_top, cx_mic + arc_half_w, arc_bottom],
-        start=0, end=180, fill=fg, width=stroke,
-    )
-    # Vertical stem from arc to foot
-    stem_top    = int(size * 0.70)
-    stem_bottom = int(size * 0.82)
-    d.line([cx_mic, stem_top, cx_mic, stem_bottom], fill=fg, width=stroke)
-    # Foot
-    foot_half_w = int(size * 0.11)
-    d.line(
-        [cx_mic - foot_half_w, stem_bottom, cx_mic + foot_half_w, stem_bottom],
-        fill=fg, width=stroke,
-    )
-
-    # ── Waveform — 3 rounded vertical bars (short-tall-short) ─────────────
-    bar_width = max(2, int(2 * scale))
-    bar_centre_y = int(size * 0.50)
-    bar_xs = [int(size * 0.66), int(size * 0.76), int(size * 0.86)]
-    bar_half_hs = [int(size * 0.11), int(size * 0.20), int(size * 0.14)]
-    for bx, bh in zip(bar_xs, bar_half_hs):
-        d.rounded_rectangle(
-            [bx - bar_width, bar_centre_y - bh, bx + bar_width, bar_centre_y + bh],
-            radius=bar_width, fill=fg,
-        )
-
-    # Downsample with LANCZOS for crisp anti-aliasing at 16/24/32 px tray sizes
-    return img.resize((target_size, target_size), Image.LANCZOS)
+    px = size * scale
+    img = _gradient_tile(px)
+    glyph_h = px * 0.62
+    stroke = None
+    if stroke_frac is not None:
+        stroke = max(2, round(glyph_h * stroke_frac))
+    _draw_mic_caret_glyph(ImageDraw.Draw(img), px / 2, px / 2, glyph_h,
+                         (255, 255, 255, 255), stroke=stroke, include_arc=include_arc,
+                         body_scale=body_scale)
+    return img.resize((size, size), Image.LANCZOS)
 
 
 def _make_icon(state: str, target_size: int = 32, dot: tuple | None = None) -> Image.Image:
@@ -145,34 +185,8 @@ def _make_icon(state: str, target_size: int = 32, dot: tuple | None = None) -> I
     d = ImageDraw.Draw(img)
 
     fg = (28, 28, 28, 255) if _system_light_taskbar() else (255, 255, 255, 255)
-    stroke = max(2, int(2.5 * scale))
-
-    # ── Microphone (shifted left, centred vertically) ─────────────────────
-    cx_mic = int(size * 0.34)
-    body_top    = int(size * 0.20)
-    body_bottom = int(size * 0.55)
-    body_half_w = int(size * 0.11)
-    d.rounded_rectangle(
-        [cx_mic - body_half_w, body_top, cx_mic + body_half_w, body_bottom],
-        radius=body_half_w, fill=fg,
-    )
-    arc_half_w = int(size * 0.16)
-    d.arc([cx_mic - arc_half_w, int(size * 0.45), cx_mic + arc_half_w, int(size * 0.70)],
-          start=0, end=180, fill=fg, width=stroke)
-    d.line([cx_mic, int(size * 0.70), cx_mic, int(size * 0.82)], fill=fg, width=stroke)
-    foot_half_w = int(size * 0.11)
-    d.line([cx_mic - foot_half_w, int(size * 0.82), cx_mic + foot_half_w, int(size * 0.82)],
-           fill=fg, width=stroke)
-
-    # ── Waveform — 3 rounded vertical bars (short-tall-short) ─────────────
-    bar_width = max(2, int(2 * scale))
-    bar_centre_y = int(size * 0.50)
-    for bx, bh in zip([int(size * 0.66), int(size * 0.76), int(size * 0.86)],
-                      [int(size * 0.11), int(size * 0.20), int(size * 0.14)]):
-        d.rounded_rectangle(
-            [bx - bar_width, bar_centre_y - bh, bx + bar_width, bar_centre_y + bh],
-            radius=bar_width, fill=fg,
-        )
+    _draw_mic_caret_glyph(d, size * 0.5, size * 0.5, size * 0.62, fg,
+                         include_arc=target_size > 16)
 
     dot = dot if dot is not None else _DOT.get(state)
     if dot:
@@ -229,10 +243,9 @@ def make_logo(target_size: int = 48,
               bg: tuple = (210, 30, 30),
               ring: tuple = (255, 255, 255, 90)) -> Image.Image:
     """
-    Render a polished Quiett logo for the recording overlay.
-
-    Mic body + emanating sound arcs inside a circular badge.
-    Drawn at 4x and LANCZOS-downsampled.
+    Render the Quiett recording-overlay logo: the mic-to-caret mark on a
+    coloured circular badge (state accent — see preview._badge_cfg). Drawn
+    at 4x and LANCZOS-downsampled.
     """
     scale = 4
     size = target_size * scale
@@ -249,57 +262,61 @@ def make_logo(target_size: int = 48,
         outline=ring, width=max(1, int(0.6 * scale)),
     )
 
-    fg = (255, 255, 255)
-    stroke = max(2, int(2.5 * scale))
-
-    # Centred microphone
-    cx = size // 2
-    body_top    = int(size * 0.22)
-    body_bottom = int(size * 0.58)
-    body_half_w = int(size * 0.12)
-    body_radius = body_half_w
-    d.rounded_rectangle(
-        [cx - body_half_w, body_top, cx + body_half_w, body_bottom],
-        radius=body_radius, fill=fg,
-    )
-
-    # U-shaped stand
-    arc_half_w = int(size * 0.18)
-    arc_top    = int(size * 0.46)
-    arc_bottom = int(size * 0.72)
-    d.arc(
-        [cx - arc_half_w, arc_top, cx + arc_half_w, arc_bottom],
-        start=0, end=180, fill=fg, width=stroke,
-    )
-    stem_top    = int(size * 0.72)
-    stem_bottom = int(size * 0.82)
-    d.line([cx, stem_top, cx, stem_bottom], fill=fg, width=stroke)
-    foot_half_w = int(size * 0.11)
-    d.line(
-        [cx - foot_half_w, stem_bottom, cx + foot_half_w, stem_bottom],
-        fill=fg, width=stroke,
-    )
-
-    # Symmetric sound-wave arcs left & right of the mic
-    arc_stroke = max(2, int(1.8 * scale))
-    for i, off in enumerate([0.20, 0.28]):
-        ax_l = int(cx - size * (0.16 + off))
-        ax_r = int(cx + size * (0.16 + off))
-        ay_t = int(size * (0.30 - i * 0.04))
-        ay_b = int(size * (0.62 + i * 0.04))
-        d.arc([ax_l - int(size * 0.05), ay_t, ax_l + int(size * 0.05), ay_b],
-              start=300, end=60, fill=fg, width=arc_stroke)
-        d.arc([ax_r - int(size * 0.05), ay_t, ax_r + int(size * 0.05), ay_b],
-              start=120, end=240, fill=fg, width=arc_stroke)
+    _draw_mic_caret_glyph(d, size / 2, size / 2, size * 0.58, (255, 255, 255))
 
     return img.resize((target_size, target_size), Image.LANCZOS)
 
 
+def _write_ico(path: str, frames: dict) -> None:
+    """Write an ICO container with each size's frame kept exactly as given
+    (PNG-compressed entries, supported since Vista) — unlike
+    `Image.save(..., format="ICO", sizes=...)`, which only resizes one base
+    image, this lets 16/20px carry their own hand-tuned render instead of
+    inheriting the 256px master's stroke weight."""
+    entries = sorted(frames.items(), key=lambda kv: kv[0][0])
+    blobs = []
+    for (w, h), img in entries:
+        buf = io.BytesIO()
+        img.convert("RGBA").save(buf, format="PNG")
+        blobs.append(buf.getvalue())
+
+    header = struct.pack("<HHH", 0, 1, len(entries))
+    dir_entries = b""
+    data_offset = 6 + 16 * len(entries)
+    image_data = b""
+    for ((w, h), _img), blob in zip(entries, blobs):
+        w_b = 0 if w >= 256 else w
+        h_b = 0 if h >= 256 else h
+        dir_entries += struct.pack("<BBBBHHII", w_b, h_b, 0, 0, 1, 32, len(blob), data_offset)
+        data_offset += len(blob)
+        image_data += blob
+
+    with open(path, "wb") as f:
+        f.write(header)
+        f.write(dir_entries)
+        f.write(image_data)
+
+
+ICO_SIZES = (16, 20, 24, 32, 48, 64, 128, 256)
+
+
 def export_ico(path: str) -> None:
-    """Write a multi-resolution .ico file for use as a desktop shortcut icon."""
-    icon = _make_badge_icon(_BG["idle"], target_size=256)
-    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    icon.save(path, format="ICO", sizes=sizes)
+    """Write the multi-resolution desktop .ico — the QUIETT_UI_PLAN P5 master
+    mark (rounded-square ion-gradient tile + mic-to-caret glyph). 16/20px are
+    rendered at their own resolution with a thicker stroke (and, at 16px, the
+    arc dropped) instead of being resized down from the 256px master."""
+    frames = {}
+    master = None
+    for s in ICO_SIZES:
+        if s == 16:
+            frames[(s, s)] = _mic_caret_tile(s, stroke_frac=0.09, include_arc=False, body_scale=1.7)
+        elif s == 20:
+            frames[(s, s)] = _mic_caret_tile(s, stroke_frac=0.13, include_arc=True)
+        else:
+            if master is None:
+                master = _mic_caret_tile(256)
+            frames[(s, s)] = master if s == 256 else master.resize((s, s), Image.LANCZOS)
+    _write_ico(path, frames)
 
 # Pulse state — sine-eased breathing at ~14 frames * 100ms = 1.4s/cycle
 _pulse_timer: threading.Timer | None = None
