@@ -1,4 +1,4 @@
-' Launch VoiceDictate with no console window using pythonw.exe
+' Launch Quietype with no console window using pythonw.exe
 Dim shell, dir, cmd
 Set shell = CreateObject("WScript.Shell")
 dir = Left(WScript.ScriptFullName, InStrRev(WScript.ScriptFullName, "\"))

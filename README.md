@@ -1,4 +1,4 @@
-# VoiceDictate
+# Quietype
 
 Hold **Ctrl+Alt** to record, release to transcribe. A floating preview panel appears near your cursor — edit if needed, then press **Enter** or click **Insert** to paste into the previously focused application.
 
@@ -27,7 +27,7 @@ Read-aloud (Ctrl+Shift+S speaks the highlighted text in your cloned voice) runs 
 
 ## Run with no console window / Desktop shortcut (run once)
 
-Right-click `create_shortcut.ps1` → **Run with PowerShell**. This places a **VoiceDictate** shortcut
+Right-click `create_shortcut.ps1` → **Run with PowerShell**. This places a **Quietype** shortcut
 on your Desktop (with the app icon) that launches with **no console window** via `launch.vbs` +
 `pythonw.exe`. `run.bat` also launches without a persistent console.
 

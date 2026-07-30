@@ -95,3 +95,9 @@ Tagline: "Offline Voice. What you say stays on your PC."
 It's the only name in the shortlist that scored clean on the collision check, has a domain confirmed buyable right now (not just unclaimed, actually for sale, no chase-down needed), and states the real, provable claim instead of a mood. That claim, nothing ever leaves the machine, is the actual product story per the brief, not a marketing line layered on top. A name that says it outright saves the tagline and the FAQ some work, and it reads fine out loud, which matters for a product people will say the name of while recommending it to a colleague.
 
 Quietype is the strongest runner-up if Balu wants more brand personality and less literal description, at the cost of a domain that needs sorting rather than a straight purchase.
+
+## 5. Round 2 (2026-07-30) — catchy/brandable lane, Balu reopened
+
+Full dossier: D:\Dev\ai\research\voice-dictation-naming-round2-2026.md. Verdicts: Hushtype KILL (identical-name OSS local voice-to-text), Sotto KILL (sotto.to, $49 Mac dictation app, same privacy pitch), Solovoce KILL (phonetically = "Solo Voice" competitor), Sayble KILL (Sayble AI Note Taker), Aside KILL (YC AI browser + a voice-notes app), Kōrero KILL (Te Hiku Media speech-AI collision + cultural-appropriation risk), Hushkey RISKY (3+ unrelated apps), Vocora RISKY downgrade (Vocora AI Storyteller does voice-clone read-aloud), Undertone CLEAR but .com permanently gone, Softspoken CLEAR (softspoken.com status needs a manual browser check), Quietype CLEAR (reconfirmed, three sweeps clean).
+Viable pool as of 2026-07-30: Quietype, Softspoken, Undertone, PrivateType, Talkript, Diction.
+Manual follow-ups before purchase: softspoken.com live check, undertone.app/vocora.app WHOIS, IPONZ trademark search on the final pick.

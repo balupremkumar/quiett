@@ -1,4 +1,4 @@
-# Run once to place a VoiceDictate shortcut on the Desktop.
+# Run once to place a Quietype shortcut on the Desktop.
 # Right-click this file -> "Run with PowerShell"
 
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -6,7 +6,7 @@ $python     = Join-Path $projectDir ".venv\Scripts\python.exe"
 $vbsPath    = Join-Path $projectDir "launch.vbs"
 $icoPath    = Join-Path $projectDir "icon.ico"
 $desktop    = [Environment]::GetFolderPath("Desktop")
-$lnkPath    = Join-Path $desktop "VoiceDictate.lnk"
+$lnkPath    = Join-Path $desktop "Quietype.lnk"
 
 # Generate multi-resolution icon.ico from tray.export_ico (single source of truth)
 $tempPy = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.py'
@@ -26,7 +26,7 @@ $sc  = $wsh.CreateShortcut($lnkPath)
 $sc.TargetPath       = "wscript.exe"
 $sc.Arguments        = "`"$vbsPath`""
 $sc.WorkingDirectory = $projectDir
-$sc.Description      = "VoiceDictate - hold Ctrl+Alt to dictate"
+$sc.Description      = "Quietype - hold Ctrl+Alt to dictate"
 
 if (Test-Path $icoPath) {
     $sc.IconLocation = "$icoPath,0"

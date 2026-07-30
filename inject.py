@@ -580,7 +580,7 @@ def _is_own_window(hwnd: int) -> bool:
         title = win32gui.GetWindowText(hwnd)
     except Exception:
         title = ""
-    return title == "VoiceDictate" and _get_exe_name(hwnd).startswith("python")
+    return title == "Quietype" and _get_exe_name(hwnd).startswith("python")
 
 
 def capture_foreground(quiet: bool = False) -> int:
@@ -1010,7 +1010,7 @@ def inject_text(text: str, hwnd: int) -> None:
     if _is_higher_integrity_target(hwnd):
         _notify_failure(
             f"Cannot insert into elevated window ({target_exe or 'unknown'}). "
-            "Run VoiceDictate as administrator to enable input into UAC-elevated apps."
+            "Run Quietype as administrator to enable input into UAC-elevated apps."
         )
         return
 

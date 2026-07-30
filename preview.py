@@ -1508,7 +1508,7 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
     # drag below, the pin button is excluded so its own click still toggles.
     header_row = tk.Frame(frame, bg=_BG, cursor="fleur")
     header_row.pack(fill=tk.X, pady=(0, 8))
-    title_lbl = tk.Label(header_row, text="VoiceDictate", bg=_BG, fg=_FG3,
+    title_lbl = tk.Label(header_row, text="Quietype", bg=_BG, fg=_FG3,
                          font=(_FONT_FAM_DISPLAY, 9, "normal"), anchor="w", cursor="fleur")
     title_lbl.pack(side=tk.LEFT)
     # Status dot: green = ready to insert, grey = nothing usable.
@@ -2039,7 +2039,7 @@ def _open_profile() -> None:
     rules = profile.get_all_rules()
 
     win = tk.Toplevel(_root)
-    win.title("VoiceDictate — Speech Profile")
+    win.title("Quietype — Speech Profile")
     win.configure(bg=_BG)
     win.geometry("560x440")
     win.minsize(420, 240)
@@ -2153,7 +2153,7 @@ def _open_settings() -> None:
         cfg = {}
 
     win = tk.Toplevel(_root)
-    win.title("VoiceDictate — Settings")
+    win.title("Quietype — Settings")
     win.configure(bg=_BG)
     win.geometry("760x600")
     win.minsize(680, 480)

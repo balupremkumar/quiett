@@ -1,4 +1,4 @@
-"""Local HTTP API server for VoiceDictate — runs on loopback :8090.
+"""Local HTTP API server for Quietype — runs on loopback :8090.
 
 Endpoints
 ---------
@@ -47,7 +47,7 @@ def configure(get_config, get_history, trigger_dictate, patch_config,
 
 @_app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "VoiceDictate"})
+    return jsonify({"status": "ok", "service": "Quietype"})
 
 
 @_app.route("/history", methods=["GET"])

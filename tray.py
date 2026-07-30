@@ -40,10 +40,10 @@ _LABELS = {
 }
 
 _TOOLTIPS = {
-    "loading":    "VoiceDictate — Loading...",
-    "idle":       "VoiceDictate — Ready",
-    "recording":  "VoiceDictate — Recording",
-    "processing": "VoiceDictate — Processing...",
+    "loading":    "Quietype — Loading...",
+    "idle":       "Quietype — Ready",
+    "recording":  "Quietype — Recording",
+    "processing": "Quietype — Processing...",
 }
 
 _BG = {
@@ -229,7 +229,7 @@ def make_logo(target_size: int = 48,
               bg: tuple = (210, 30, 30),
               ring: tuple = (255, 255, 255, 90)) -> Image.Image:
     """
-    Render a polished VoiceDictate logo for the recording overlay.
+    Render a polished Quietype logo for the recording overlay.
 
     Mic body + emanating sound arcs inside a circular badge.
     Drawn at 4x and LANCZOS-downsampled.
@@ -389,7 +389,7 @@ def set_incognito(enabled: bool) -> None:
     _incognito = enabled
     if _icon is not None:
         _icon.title = _with_incognito_suffix(
-            _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}"))
+            _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"Quietype — {_state}"))
         _icon.update_menu()
 
 
@@ -435,18 +435,18 @@ def set_state(state: str) -> None:
             else:
                 _icon.icon = _ICONS.get(state, _ICONS["idle"])
             _icon.title = _with_incognito_suffix(
-                _pause_tooltip() if _paused else _TOOLTIPS.get(state, f"VoiceDictate — {state}"))
+                _pause_tooltip() if _paused else _TOOLTIPS.get(state, f"Quietype — {state}"))
             _icon.update_menu()
 
 
 def _pause_tooltip() -> str:
     if _pause_until is None:
-        return "VoiceDictate — Paused"
+        return "Quietype — Paused"
     remaining = int(_pause_until - time.time())
     if remaining <= 0:
-        return "VoiceDictate — Paused"
+        return "Quietype — Paused"
     mins = max(1, round(remaining / 60))
-    return f"VoiceDictate — Paused ({mins} min left)"
+    return f"Quietype — Paused ({mins} min left)"
 
 
 def _auto_resume() -> None:
@@ -471,7 +471,7 @@ def _set_paused(paused: bool, resume_at: float | None = None) -> None:
         _pause_timer.start()
     if _icon is not None:
         _icon.title = _with_incognito_suffix(
-            _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}"))
+            _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"Quietype — {_state}"))
         _icon.update_menu()
 
 
@@ -513,7 +513,7 @@ def _copy_history_entry(text: str):
             pyperclip.copy(text)
         except Exception:
             return
-        notify("VoiceDictate", "Copied to clipboard")
+        notify("Quietype", "Copied to clipboard")
     return _handler
 
 
@@ -658,7 +658,7 @@ def run() -> None:
         if _on_toggle_incognito:
             _on_toggle_incognito(_incognito)
         icon.title = _with_incognito_suffix(
-            _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"VoiceDictate — {_state}"))
+            _pause_tooltip() if _paused else _TOOLTIPS.get(_state, f"Quietype — {_state}"))
         icon.update_menu()
 
     # Timed-pause flyout: durations + Resume (only enabled while paused)
@@ -705,7 +705,7 @@ def run() -> None:
     _icon = pystray.Icon(
         name="dictation",
         icon=_ICONS["loading"],
-        title=_with_incognito_suffix("VoiceDictate — Loading..."),
+        title=_with_incognito_suffix("Quietype — Loading..."),
         menu=menu,
     )
     _icon.run()
