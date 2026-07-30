@@ -1,6 +1,6 @@
 """Tests for the dashboard control channel (single instance + live refresh).
 
-The channel is what stops a second Quietype window ever opening: whoever
+The channel is what stops a second Quiett window ever opening: whoever
 holds the port owns the window, everyone else hands their request over. These
 tests drive the real socket code with a stub listener standing in for a
 running dashboard.

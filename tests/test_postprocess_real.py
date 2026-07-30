@@ -190,7 +190,7 @@ class TestVocabularySplitRepair:
     is the source of truth for putting them back together."""
 
     VOCAB = ["SharePoint", "Dataverse", "MyFitnessPal", "Waikato", "Copilot",
-             "Quietype", "Christchurch"]
+             "Quiett", "Christchurch"]
 
     def pv(self, text: str) -> str:
         return transcribe._postprocess(text, [], {}, self.VOCAB).strip()

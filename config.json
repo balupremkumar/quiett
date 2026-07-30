@@ -41,7 +41,7 @@
   },
   "silence_auto_stop_seconds": 3,
   "preview_position": "cursor",
-  "initial_prompt": "Notes on Power Platform work: Dataverse tables, Canvas apps, code apps, Copilot Studio, Power Automate flows, SharePoint lists, and Azure AI Foundry. Also Claude Code, Opus, Sonnet, Gemini, MCP servers, GitHub, Whisper, Vulkan, Quietype, VoiceDictate, Kove, kove.nz, Christchurch, Selwyn, Waikato, Harcourts.",
+  "initial_prompt": "Notes on Power Platform work: Dataverse tables, Canvas apps, code apps, Copilot Studio, Power Automate flows, SharePoint lists, and Azure AI Foundry. Also Claude Code, Opus, Sonnet, Gemini, MCP servers, GitHub, Whisper, Vulkan, Quiett, VoiceDictate, Kove, kove.nz, Christchurch, Selwyn, Waikato, Harcourts.",
   "custom_vocabulary": [
     "Copilot Studio",
     "Power Platform",
@@ -71,7 +71,7 @@
     "Whisper",
     "Vulkan",
     "VoiceDictate",
-    "Quietype",
+    "Quiett",
     "multi-agent orchestration",
     "sub-agent",
     "harness",
@@ -127,10 +127,10 @@
   "history_max_entries": "100",
   "recording_retention_days": "0",
   "dashboard_window": {
-    "x": 1390,
-    "y": 476,
-    "w": 980,
-    "h": 660
+    "x": -8,
+    "y": -8,
+    "w": 2576,
+    "h": 1408
   },
   "panel_position": {
     "\\\\.\\DISPLAY1": {

@@ -114,7 +114,7 @@ class TestCaptureForeground:
 
     def test_dashboard_subprocess_returns_zero(self, monkeypatch):
         _win32gui.GetForegroundWindow.return_value = 4242
-        _win32gui.GetWindowText.return_value = "Quietype"
+        _win32gui.GetWindowText.return_value = "Quiett"
         monkeypatch.setattr(inject, "_user32", self._fake_user32(99999))
         monkeypatch.setattr(inject, "_get_exe_name", lambda h: "pythonw3.13.exe")
         assert inject.capture_foreground() == 0

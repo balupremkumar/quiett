@@ -267,11 +267,11 @@ def main() -> None:
     # Single-instance guard: a second launch (e.g. double-clicking the desktop
     # shortcut again) would race the first for the hotkey hook, port 8089, and
     # config.json writes. Bail out with a clear message instead.
-    _mutex = win32event.CreateMutex(None, False, "Quietype_SingleInstance_Mutex")
+    _mutex = win32event.CreateMutex(None, False, "Quiett_SingleInstance_Mutex")
     if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
         ctypes.windll.user32.MessageBoxW(
-            None, "Quietype is already running (check the system tray).",
-            "Quietype", 0x40,  # MB_ICONINFORMATION
+            None, "Quiett is already running (check the system tray).",
+            "Quiett", 0x40,  # MB_ICONINFORMATION
         )
         sys.exit(0)
 

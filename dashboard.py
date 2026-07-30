@@ -1,5 +1,5 @@
 """
-Modern pywebview dashboard for Quietype.
+Modern pywebview dashboard for Quiett.
 
 Replaces the Tkinter Settings + History popup windows with a single
 Edge-rendered window (Windows 11 native WebView2). The floating preview
@@ -53,7 +53,7 @@ _CHANGELOG = [
 
 _proc: "subprocess.Popen | None" = None
 _proc_lock = threading.Lock()
-_AUTOSTART_TASK = "Quietype"
+_AUTOSTART_TASK = "Quiett"
 _THIS_FILE = os.path.abspath(__file__)
 _PROJECT_DIR = os.path.dirname(_THIS_FILE)
 
@@ -193,7 +193,7 @@ def _diag_api_post(path: str, timeout: float = 2.0) -> dict:
 
 
 def _format_history_export(entries: list) -> str:
-    lines = ["# Quietype history export", ""]
+    lines = ["# Quiett history export", ""]
     for e in entries:
         src = e.get("source") or "dictation"
         lines.append(f"## {e.get('timestamp', '')} - {src}")
@@ -393,7 +393,7 @@ def _save_window_geom(win) -> None:
 
 
 def _own_main_hwnd() -> int:
-    """Top-level window of this process titled Quietype — the webview host.
+    """Top-level window of this process titled Quiett — the webview host.
     pywebview doesn't expose the native handle on every backend, and we need a
     real hwnd to steal foreground properly."""
     import win32gui
@@ -408,7 +408,7 @@ def _own_main_hwnd() -> int:
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
         except Exception:
             return True
-        if pid == os.getpid() and win32gui.GetWindowText(hwnd) == "Quietype":
+        if pid == os.getpid() and win32gui.GetWindowText(hwnd) == "Quiett":
             found.append(hwnd)
             return False
         return True
@@ -886,7 +886,7 @@ class DashboardAPI:
         matched = [k for k in data if k in _KNOWN_CONFIG_KEYS]
         if not matched:
             return {"ok": False,
-                    "error": "That file doesn't look like a Quietype settings export."}
+                    "error": "That file doesn't look like a Quiett settings export."}
         if not _merge_cfg(data):
             return {"ok": False, "error": "Couldn't save the imported settings."}
         return {"ok": True, "imported_keys": len(matched)}
@@ -939,7 +939,7 @@ _HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Quietype</title>
+<title>Quiett</title>
 <style>
 /* ── Variables ── */
 :root {
@@ -1252,7 +1252,7 @@ select option{background:var(--surf2);color:var(--txt)}
       <path d="M5 10a7 7 0 0014 0"/><line x1="12" y1="17" x2="12" y2="22"/>
       <line x1="8" y1="22" x2="16" y2="22"/>
     </svg>
-    Quietype
+    Quiett
   </div>
   <nav class="nav">
     <button class="nav-item active" data-page="home" onclick="navigateTo('home')">
@@ -1676,7 +1676,7 @@ select option{background:var(--surf2);color:var(--txt)}
   <div class="ph"><div><h1>About</h1><div class="sub">Version, licence, and credits.</div></div></div>
   <div class="dict-grid" style="grid-template-columns:1fr">
     <div class="dict-sec">
-      <div class="dict-sec-ttl">Quietype</div>
+      <div class="dict-sec-ttl">Quiett</div>
       <div class="s-lbl-s" id="aboutVersion" style="font-size:12.5px">Version —</div>
       <div class="s-lbl-s" style="font-size:12.5px;line-height:1.5">
         Offline, hold-to-talk voice dictation for Windows. Records while you hold a hotkey,
@@ -2528,17 +2528,17 @@ function renderDiagnostics(d) {
 
 function renderDiagnosticsUnreachable() {
   ['diagWhisperDot', 'diagHotkeyDot', 'diagMicDot'].forEach(id => _setDot(id, 'var(--warn)'));
-  const msg = "Quietype isn't running";
+  const msg = "Quiett isn't running";
   document.getElementById('diagWhisperTxt').textContent = msg;
   document.getElementById('diagHotkeyTxt').textContent = msg;
   document.getElementById('diagMicTxt').textContent = msg;
-  document.getElementById('diagHotkeyNote').textContent = 'Start Quietype to see live diagnostics.';
+  document.getElementById('diagHotkeyNote').textContent = 'Start Quiett to see live diagnostics.';
   document.getElementById('diagWhisperLatency').textContent = '';
   document.getElementById('diagWhisperModel').textContent = '';
   document.getElementById('diagWhisperDevice').textContent = '';
   document.getElementById('diagMicRecording').textContent = '';
   const btn = document.getElementById('micProbeBtn');
-  if (btn) { btn.disabled = true; btn.title = 'Start Quietype first.'; }
+  if (btn) { btn.disabled = true; btn.title = 'Start Quiett first.'; }
 }
 
 function _resetMicMeter() {
@@ -2563,7 +2563,7 @@ async function startMicProbe() {
     data = null;
   }
   if (!data || data.reachable === false) {
-    showToast("Couldn't reach Quietype to start the mic test.");
+    showToast("Couldn't reach Quiett to start the mic test.");
     btn.disabled = false;
     btn.textContent = 'Test mic';
     return;
@@ -2807,7 +2807,7 @@ if __name__ == "__main__":
     _html = _html.replace('<html lang="en">', f'<html lang="en" data-theme="{_theme}">')
     _geom = _load_window_geom()
     _win_kwargs = dict(
-        title="Quietype",
+        title="Quiett",
         html=_html,
         js_api=DashboardAPI(),
         min_size=(_MIN_W, _MIN_H),
