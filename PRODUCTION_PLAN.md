@@ -94,11 +94,11 @@ Reference products to tear down: Wispr Flow, SuperWhisper (mac), Windows Voice A
 
 ## Part 5 — Legal/commercial blockers (check before any sale)
 
-1. **`keyboard` lib is MIT — but verify; `pystray` LGPL** (dynamic linking OK, document it). Full pip-licenses audit needed.
-2. ~~**LM Studio cannot be redistributed or required.**~~ Resolved 2026-07-25: nothing in the app uses LM Studio now. Blocker closed.
-3. Qwen2.5-1.5B is Apache-2.0 — fine if we later bundle. Whisper large-v3-turbo weights MIT. whisper.cpp MIT. All fine.
-4. EULA + privacy policy (one page: "audio never leaves your machine, recordings stored locally at X, delete anytime").
-5. Third-party licence NOTICE file generated into the installer.
+1. ~~**`keyboard` lib is MIT — but verify; `pystray` LGPL**~~ Confirmed 2026-08-01 via full audit (LICENSES.md): `keyboard` MIT, `pystray` LGPLv3 (dynamic linking OK, needs an attribution/NOTICE entry, documented). No GPL/AGPL anywhere in the dependency tree.
+2. ~~**LM Studio cannot be redistributed or required.**~~ Resolved 2026-07-25, re-confirmed 2026-08-01 with grep evidence: nothing in the app uses LM Studio now. Blocker closed.
+3. Whisper large-v3-turbo weights MIT, whisper.cpp MIT — confirmed 2026-08-01 (LICENSE file on disk). Qwen3-TTS engine (qwentts.cpp) and weights believed MIT/Apache-2.0 but **not verifiable from files on disk** (no LICENSE/model card vendored locally) — open item, pull both before ship.
+4. EULA + privacy policy — drafted 2026-08-01 as EULA-DRAFT.md (NOT LEGAL ADVICE, Balu + lawyer review required before any sale).
+5. Third-party licence NOTICE file generated into the installer — still TODO, blocked on item 3's two open verifications; full table ready in LICENSES.md once closed.
 
 ## Part 6 — Execution order (resume point)
 
@@ -111,7 +111,7 @@ Each step is one session-sized chunk; tick as done.
 - [ ] **P5. Onboarding wizard** in dashboard incl. model downloader.
 - [ ] **P6. PyInstaller onedir build** + smoke on clean VM.
 - [ ] **P7. Inno Setup installer** + uninstall correctness.
-- [ ] **P8. Licence audit + NOTICE + EULA/privacy page.**
+- [ ] **P8. Licence audit + NOTICE + EULA/privacy page.** Audit drafted 2026-08-01: LICENSES.md (full dependency table, verdicts) and EULA-DRAFT.md (NOT LEGAL ADVICE) written. No GPL/AGPL found; pystray LGPLv3 needs an attribution entry only, not a blocker. LM Studio blocker confirmed closed (grep evidence, no functional references remain). Two paperwork gaps open: qwentts.cpp engine licence and Qwen3-TTS weight licence are believed MIT/Apache-2.0 but not verifiable from files currently on disk (no LICENSE/model card shipped locally) — pull both before ship. NOTICE.txt generation still TODO (P7 scope, once the two gaps close). **Balu review of both docs pending.**
 - [ ] **P9. Signing cert + SmartScreen test.**
 - [ ] **P10. Licence key gate + LemonSqueezy checkout.**
 - [ ] **P11. Landing page + 60s demo capture** (growth agent).
