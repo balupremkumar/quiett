@@ -290,3 +290,71 @@ Impact H/M/L, Effort S/M/L.
 198. [ ] Health page listing the last ten dictations with duration, inference time and confidence, for spotting drift. (M/S)
 199. [ ] Document the hotkey conflicts VoiceDictate has with common apps, and detect them at startup. (M/M)
 200. [ ] Prune the recordings directory by total size as well as file count; 200 long dictations is several GB. (H/S)
+
+
+## Next-50 roadmap (2026-08-01) — sequencing layer over the numbered pool above
+
+Curated against the rulings ledger: name is QUIETT (settled 2026-07-30), pricing ruling PENDING (gates R46),
+model picker #74 stays excluded per the 2026-07-11 ruling, culled items 2 and 42 stay dead.
+Caveat: before building any batch-1/2 item cited here, check it is not in the 2026-07-11 nineteen-item exclusion list (brain/rulings.md).
+PRODUCTION_PLAN P1 (naming) is DONE — the plan doc predates the Quiett ruling.
+
+### Phase Q0 — Unblock (all Balu, all quick)
+R1. Hands-on pass: ion-glass UI, panel/acrylic, tray icon, light-theme sweep (pending since 2026-07-30)
+R2. RDP sticky-modifier verification in a real remote session (open since 2026-07-02)
+R3. Pricing model ruling: hybrid vs subscription (research done; gates R46)
+R4. Play-sample voice check by ear (TTS)
+R5. The queued ambiguous-mistranscription calls (STATE list)
+
+### Phase Q1 — Productisation core (PRODUCTION_PLAN P2-P9)
+R6. P2 icon set + Quiett wordmark
+R7. P3 feature-flag the personal bits out of the default build
+R8. P4 dashboard design-token pass
+R9. P5 onboarding wizard (#43 + the 92-95 polish batch)
+R10. P6 PyInstaller build
+R11. P7 Inno Setup installer
+R12. P8 licence audit + EULA final review (Balu reads)
+R13. Pre-frame the UAC moments (#44)
+R14. Mic test wizard (#73), folded into onboarding
+R15. Hotkey recorder control (#28)
+R16. Version scheme applied (#77): 0.x now, 1.0.0 at first public/paid ship per ruling
+R17. Auto-update decision: reuse the Flightdeck local-manifest pattern or a simple version check
+R18. Crash/diagnostics bundle export (opt-in, local only)
+R19. quiett.app / quiett.nz purchase + IPONZ check (Balu, at-purchase per ruling)
+R20. P9 signing certificate (Balu spend; also unblocks SmartScreen reputation)
+
+### Phase Q2 — Reliability + accuracy (batch-3 pool, the paid-product bar)
+R21. Insert-reliability sweep (#136-145): the money path, text lands every time in every target app
+R22. Accuracy top-5 by impact from #101-125
+R23. Speed: cold-start + pre-warmed popup (#126-135, #52)
+R24. Sticky/stuck-modifier defense in depth beyond the RDP fix
+R25. Fullscreen/game detection (#67): never pop over a game
+R26. Native Windows toasts (#66)
+R27. Jump list actions (#65)
+R28. Tray queued badge (#71)
+R29. Diagnostics/safety picks from #181-190 (self-test, log rotation)
+R30. Packaging polish picks from #191-200
+R31. Clipboard save/restore robustness (risks.md voice entry 3)
+R32. Verify api_server binds 127.0.0.1 only (risks.md entry 4 — flagged 2026-07-07, STILL unverified)
+R33. Whisper model refresh evaluation when a successor to large-v3-turbo lands
+R34. Latency instrumentation: release-to-paste p95 visible in diagnostics
+R35. 8-hour tray soak test: memory + VRAM stability, idle reap proof
+
+### Phase Q3 — Approved feature guts (ruled 2026-07-30; UI already ships as coming-soon)
+R36. Local AI cleanup pass v1: punctuation, fillers, paragraphing; lazy subprocess + idle reap; off by default
+R37. Per-app tone profiles scoped to the cleanup pass (#75, narrowed)
+R38. Meeting mode v1: system-audio capture to live transcript
+R39. Meeting mode v2: speaker labels (diarisation; podcast-pipeline experience transfers)
+R40. Voice edit commands v1: select / replace / delete-last-sentence
+R41. Multilingual v1: whisper multilingual + language auto-detect
+R42. Translate mode: dictate in any language, insert English
+R43. Cloud AI settings page guts (shape follows the pricing ruling)
+R44. Read-aloud/study polish picks from #171-180
+R45. Re-transcribe from history (#37) with the cleanup pass applied
+
+### Phase Q4 — Go to market (PORTFOLIO-PLAN sequence)
+R46. P10 licence gate + checkout (after R3 pricing ruling)
+R47. P11 buy/download path: extend kove.nz/work-voice-dictation (showcase + demo already live)
+R48. Early-access cohort: 5-10 NZ users from the privacy verticals (legal, medical, finance) via the lead pipeline
+R49. In-app feedback loop: report-a-mistranscription -> dictionary suggestion
+R50. Launch: signed 1.0.0, showcase re-cut if the UI moved, privacy-vertical outreach campaign
