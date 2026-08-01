@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Quiett icon candidate 1 "Fade", monochrome tray glyph. fill is currentColor:
+       the host sets it to white on a dark taskbar and near-black (#1C1C1C, matching
+       tray.py's existing fg choice) on a light one -- same swap tray.py already does. -->
+  <rect x="51" y="50" width="34" height="140" rx="17" fill="currentColor"/>
+  <rect x="111" y="100" width="34" height="90" rx="17" fill="currentColor"/>
+  <rect x="171" y="144" width="34" height="46" rx="17" fill="currentColor"/>
+</svg>

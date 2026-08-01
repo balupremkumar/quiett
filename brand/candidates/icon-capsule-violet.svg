@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Quiett icon candidate 3 "Capsule": the mic reduced to a pill and a single calm
+       baseline -- no stand, no stem, no arc. Minimalism as the message: the least
+       icon that still reads as "mic", and the closest relative of today's shipped
+       mic-to-caret mark, offered as the safe/continuity option. -->
+  <defs>
+    <linearGradient id="qgrad-cap-v" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BFA8FF"/>
+      <stop offset="100%" stop-color="#7C5CFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="#0B0D13"/>
+  <rect x="96" y="56" width="64" height="104" rx="32" fill="url(#qgrad-cap-v)"/>
+  <rect x="78" y="182" width="100" height="16" rx="8" fill="url(#qgrad-cap-v)"/>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Quiett icon candidate 2 "Comet", monochrome tray glyph. Ring + tail: expect the
+       tail's two trailing marks to be simplified away at 16px in production, same
+       pattern tray.py already uses (dropping the mic's arc detail below 20px). -->
+  <path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="currentColor" stroke-width="30" stroke-linecap="round"/>
+  <line x1="178" y1="152" x2="215" y2="192" stroke="currentColor" stroke-width="26" stroke-linecap="round"/>
+  <line x1="222" y1="172" x2="235" y2="185" stroke="currentColor" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="246" cy="198" r="5" fill="currentColor"/>
+</svg>

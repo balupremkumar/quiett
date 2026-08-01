@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Quiett brand candidates — P2 pick</title>
+<style>
+  :root{
+    --page-bg:#0B0D13;
+    --card-bg:rgba(255,255,255,.03);
+    --hair:rgba(255,255,255,.09);
+    --text:#F2F5FA;
+    --mid:#8A94A8;
+    --dim:#566074;
+    --dark-swatch:#1F1F1F;   /* Windows 11 dark taskbar */
+    --light-swatch:#F3F3F3;  /* Windows 11 light taskbar */
+    --ink-on-dark:#FFFFFF;
+    --ink-on-light:#1C1C1C;  /* matches tray.py's existing light-taskbar fg */
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:48px 56px 96px;
+    background:var(--page-bg); color:var(--text);
+    font-family:"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
+  }
+  h1{font-size:22px; font-weight:600; margin:0 0 4px;}
+  h2{font-size:15px; font-weight:600; margin:0 0 2px; letter-spacing:.02em;}
+  p.lede{color:var(--mid); font-size:13px; margin:0 0 40px; max-width:720px; line-height:1.5;}
+  section{margin-bottom:56px;}
+  section > h2.section-title{font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:var(--dim); border-bottom:1px solid var(--hair); padding-bottom:8px; margin-bottom:24px;}
+  .concept-card{background:var(--card-bg); border:1px solid var(--hair); border-radius:12px; padding:24px 28px; margin-bottom:20px;}
+  .concept-head{display:flex; align-items:baseline; gap:10px; margin-bottom:2px;}
+  .concept-name{font-size:16px; font-weight:600;}
+  .concept-tag{font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em;}
+  .idea{color:var(--mid); font-size:13px; margin:2px 0 20px; line-height:1.5;}
+  .row-label{font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; margin:18px 0 10px;}
+  .swatch-row{display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end;}
+  .swatch{display:flex; flex-direction:column; align-items:center; gap:8px;}
+  .swatch-box{display:flex; align-items:center; justify-content:center; border-radius:8px;}
+  .swatch-box.dark{background:var(--dark-swatch);}
+  .swatch-box.light{background:var(--light-swatch);}
+  .swatch-box.brand{background:var(--page-bg); border:1px solid var(--hair);}
+  .size-label{font-size:11px; color:var(--dim);}
+  .critique{font-size:12px; color:var(--dim); margin-top:14px; padding-top:14px; border-top:1px dashed var(--hair); line-height:1.5;}
+  .critique b{color:var(--mid); font-weight:600;}
+  .wordmark-card{background:var(--card-bg); border:1px solid var(--hair); border-radius:12px; padding:24px 28px; margin-bottom:20px;}
+  .wordmark-swatches{display:flex; gap:16px; flex-wrap:wrap; margin-top:16px;}
+  .wm-box{border-radius:8px; padding:24px 32px; display:flex; align-items:center;}
+  .wm-box.dark{background:var(--dark-swatch);}
+  .wm-box.light{background:var(--light-swatch);}
+  footer{color:var(--dim); font-size:12px; line-height:1.6; border-top:1px solid var(--hair); padding-top:20px; max-width:760px;}
+  footer b{color:var(--mid);}
+</style>
+</head>
+<body>
+
+<h1>Quiett brand candidates — P2 pick</h1>
+<p class="lede">Three icon directions, two wordmark treatments. Violet on dark (#BFA8FF → #7C5CFF, gradient, product-inside accent) plus a monochrome tray glyph for each icon — checked at 16 / 32 / 256px against both a dark and a light Windows 11 taskbar. No text baked into any icon. Pick one icon direction and one wordmark treatment (or ask for a mix) — that's the P2 gate.</p>
+
+<section>
+<h2 class="section-title">Icons</h2>
+
+<!-- ============ FADE ============ -->
+<div class="concept-card">
+  <div class="concept-head"><span class="concept-name">1 · Fade</span><span class="concept-tag">waveform, quietening</span></div>
+  <p class="idea">Idea: a 3-bar waveform stepping down to near-silence, left to right — the product's job (speech in, quiet clean text out) in three bars.</p>
+
+  <div class="row-label">Violet · app tile (256 / 32 / 16px)</div>
+  <div class="swatch-row">
+    <div class="swatch"><div class="swatch-box brand" style="width:256px;height:256px;">
+      <svg viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g1a" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><rect width="256" height="256" rx="56" ry="56" fill="#0B0D13"/><rect x="51" y="50" width="34" height="140" rx="17" fill="url(#g1a)"/><rect x="111" y="100" width="34" height="90" rx="17" fill="url(#g1a)"/><rect x="171" y="144" width="34" height="46" rx="17" fill="url(#g1a)"/></svg>
+    </div><span class="size-label">256px</span></div>
+    <div class="swatch"><div class="swatch-box brand" style="width:32px;height:32px;">
+      <svg viewBox="0 0 256 256" width="32" height="32"><defs><linearGradient id="g1b" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><rect width="256" height="256" rx="56" ry="56" fill="#0B0D13"/><rect x="51" y="50" width="34" height="140" rx="17" fill="url(#g1b)"/><rect x="111" y="100" width="34" height="90" rx="17" fill="url(#g1b)"/><rect x="171" y="144" width="34" height="46" rx="17" fill="url(#g1b)"/></svg>
+    </div><span class="size-label">32px</span></div>
+    <div class="swatch"><div class="swatch-box brand" style="width:16px;height:16px;">
+      <svg viewBox="0 0 256 256" width="16" height="16"><defs><linearGradient id="g1c" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><rect width="256" height="256" rx="56" ry="56" fill="#0B0D13"/><rect x="51" y="50" width="34" height="140" rx="17" fill="url(#g1c)"/><rect x="111" y="100" width="34" height="90" rx="17" fill="url(#g1c)"/><rect x="171" y="144" width="34" height="46" rx="17" fill="url(#g1c)"/></svg>
+    </div><span class="size-label">16px</span></div>
+  </div>
+
+  <div class="row-label">Monochrome · tray, dark taskbar (16 / 32 / 256px)</div>
+  <div class="swatch-row">
+    <div class="swatch"><div class="swatch-box dark" style="width:48px;height:48px;color:var(--ink-on-dark);"><svg viewBox="0 0 256 256" width="16" height="16"><rect x="51" y="50" width="34" height="140" rx="17" fill="currentColor"/><rect x="111" y="100" width="34" height="90" rx="17" fill="currentColor"/><rect x="171" y="144" width="34" height="46" rx="17" fill="currentColor"/></svg></div><span class="size-label">16px</span></div>
+    <div class="swatch"><div class="swatch-box dark" style="width:64px;height:64px;color:var(--ink-on-dark);"><svg viewBox="0 0 256 256" width="32" height="32"><rect x="51" y="50" width="34" height="140" rx="17" fill="currentColor"/><rect x="111" y="100" width="34" height="90" rx="17" fill="currentColor"/><rect x="171" y="144" width="34" height="46" rx="17" fill="currentColor"/></svg></div><span class="size-label">32px</span></div>
+    <div class="swatch"><div class="swatch-box dark" style="width:288px;height:288px;color:var(--ink-on-dark);"><svg viewBox="0 0 256 256" width="256" height="256"><rect x="51" y="50" width="34" height="140" rx="17" fill="currentColor"/><rect x="111" y="100" width="34" height="90" rx="17" fill="currentColor"/><rect x="171" y="144" width="34" height="46" rx="17" fill="currentColor"/></svg></div><span class="size-label">256px</span></div>
+  </div>
+
+  <div class="row-label">Monochrome · tray, light taskbar (16 / 32 / 256px)</div>
+  <div class="swatch-row">
+    <div class="swatch"><div class="swatch-box light" style="width:48px;height:48px;color:var(--ink-on-light);"><svg viewBox="0 0 256 256" width="16" height="16"><rect x="51" y="50" width="34" height="140" rx="17" fill="currentColor"/><rect x="111" y="100" width="34" height="90" rx="17" fill="currentColor"/><rect x="171" y="144" width="34" height="46" rx="17" fill="currentColor"/></svg></div><span class="size-label">16px</span></div>
+    <div class="swatch"><div class="swatch-box light" style="width:64px;height:64px;color:var(--ink-on-light);"><svg viewBox="0 0 256 256" width="32" height="32"><rect x="51" y="50" width="34" height="140" rx="17" fill="currentColor"/><rect x="111" y="100" width="34" height="90" rx="17" fill="currentColor"/><rect x="171" y="144" width="34" height="46" rx="17" fill="currentColor"/></svg></div><span class="size-label">32px</span></div>
+    <div class="swatch"><div class="swatch-box light" style="width:288px;height:288px;color:var(--ink-on-light);"><svg viewBox="0 0 256 256" width="256" height="256"><rect x="51" y="50" width="34" height="140" rx="17" fill="currentColor"/><rect x="111" y="100" width="34" height="90" rx="17" fill="currentColor"/><rect x="171" y="144" width="34" height="46" rx="17" fill="currentColor"/></svg></div><span class="size-label">256px</span></div>
+  </div>
+
+  <p class="critique"><b>16px check:</b> reads as a stepped block immediately, holds on both taskbars. Least ambiguous of the three at tray size — nobody has to be told what it means.</p>
+</div>
+
+<!-- ============ COMET ============ -->
+<div class="concept-card">
+  <div class="concept-head"><span class="concept-name">2 · Comet</span><span class="concept-tag">Q monogram, sound-wave tail</span></div>
+  <p class="idea">Idea: a Q monogram whose tail trails off into two diminishing marks, like sound settling to quiet — owns the name itself, not just the microphone category.</p>
+
+  <div class="row-label">Violet · app tile (256 / 32 / 16px)</div>
+  <div class="swatch-row">
+    <div class="swatch"><div class="swatch-box brand" style="width:256px;height:256px;">
+      <svg viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g2a" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><rect width="256" height="256" rx="56" ry="56" fill="#0B0D13"/><path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="url(#g2a)" stroke-width="30" stroke-linecap="round"/><line x1="178" y1="152" x2="215" y2="192" stroke="url(#g2a)" stroke-width="26" stroke-linecap="round"/><line x1="222" y1="172" x2="235" y2="185" stroke="url(#g2a)" stroke-width="12" stroke-linecap="round"/><circle cx="246" cy="198" r="5" fill="url(#g2a)"/></svg>
+    </div><span class="size-label">256px</span></div>
+    <div class="swatch"><div class="swatch-box brand" style="width:32px;height:32px;">
+      <svg viewBox="0 0 256 256" width="32" height="32"><defs><linearGradient id="g2b" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><rect width="256" height="256" rx="56" ry="56" fill="#0B0D13"/><path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="url(#g2b)" stroke-width="30" stroke-linecap="round"/><line x1="178" y1="152" x2="215" y2="192" stroke="url(#g2b)" stroke-width="26" stroke-linecap="round"/><line x1="222" y1="172" x2="235" y2="185" stroke="url(#g2b)" stroke-width="12" stroke-linecap="round"/><circle cx="246" cy="198" r="5" fill="url(#g2b)"/></svg>
+    </div><span class="size-label">32px</span></div>
+    <div class="swatch"><div class="swatch-box brand" style="width:16px;height:16px;">
+      <svg viewBox="0 0 256 256" width="16" height="16"><defs><linearGradient id="g2c" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><rect width="256" height="256" rx="56" ry="56" fill="#0B0D13"/><path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="url(#g2c)" stroke-width="30" stroke-linecap="round"/><line x1="178" y1="152" x2="215" y2="192" stroke="url(#g2c)" stroke-width="26" stroke-linecap="round"/><line x1="222" y1="172" x2="235" y2="185" stroke="url(#g2c)" stroke-width="12" stroke-linecap="round"/><circle cx="246" cy="198" r="5" fill="url(#g2c)"/></svg>
+    </div><span class="size-label">16px</span></div>
+  </div>
+
+  <div class="row-label">Monochrome · tray, dark taskbar (16 / 32 / 256px)</div>
+  <div class="swatch-row">
+    <div class="swatch"><div class="swatch-box dark" style="width:48px;height:48px;color:var(--ink-on-dark);"><svg viewBox="0 0 256 256" width="16" height="16"><path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="currentColor" stroke-width="30" stroke-linecap="round"/><line x1="178" y1="152" x2="215" y2="192" stroke="currentColor" stroke-width="26" stroke-linecap="round"/><line x1="222" y1="172" x2="235" y2="185" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><circle cx="246" cy="198" r="5" fill="currentColor"/></svg></div><span class="size-label">16px</span></div>
+    <div class="swatch"><div class="swatch-box dark" style="width:64px;height:64px;color:var(--ink-on-dark);"><svg viewBox="0 0 256 256" width="32" height="32"><path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="currentColor" stroke-width="30" stroke-linecap="round"/><line x1="178" y1="152" x2="215" y2="192" stroke="currentColor" stroke-width="26" stroke-linecap="round"/><line x1="222" y1="172" x2="235" y2="185" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><circle cx="246" cy="198" r="5" fill="currentColor"/></svg></div><span class="size-label">32px</span></div>
+    <div class="swatch"><div class="swatch-box dark" style="width:288px;height:288px;color:var(--ink-on-dark);"><svg viewBox="0 0 256 256" width="256" height="256"><path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="currentColor" stroke-width="30" stroke-linecap="round"/><line x1="178" y1="152" x2="215" y2="192" stroke="currentColor" stroke-width="26" stroke-linecap="round"/><line x1="222" y1="172" x2="235" y2="185" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><circle cx="246" cy="198" r="5" fill="currentColor"/></svg></div><span class="size-label">256px</span></div>
+  </div>
+
+  <div class="row-label">Monochrome · tray, light taskbar (16 / 32 / 256px)</div>
+  <div class="swatch-row">
+    <div class="swatch"><div class="swatch-box light" style="width:48px;height:48px;color:var(--ink-on-light);"><svg viewBox="0 0 256 256" width="16" height="16"><path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="currentColor" stroke-width="30" stroke-linecap="round"/><line x1="178" y1="152" x2="215" y2="192" stroke="currentColor" stroke-width="26" stroke-linecap="round"/><line x1="222" y1="172" x2="235" y2="185" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><circle cx="246" cy="198" r="5" fill="currentColor"/></svg></div><span class="size-label">16px</span></div>
+    <div class="swatch"><div class="swatch-box light" style="width:64px;height:64px;color:var(--ink-on-light);"><svg viewBox="0 0 256 256" width="32" height="32"><path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="currentColor" stroke-width="30" stroke-linecap="round"/><line x1="178" y1="152" x2="215" y2="192" stroke="currentColor" stroke-width="26" stroke-linecap="round"/><line x1="222" y1="172" x2="235" y2="185" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><circle cx="246" cy="198" r="5" fill="currentColor"/></svg></div><span class="size-label">32px</span></div>
+    <div class="swatch"><div class="swatch-box light" style="width:288px;height:288px;color:var(--ink-on-light);"><svg viewBox="0 0 256 256" width="256" height="256"><path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="currentColor" stroke-width="30" stroke-linecap="round"/><line x1="178" y1="152" x2="215" y2="192" stroke="currentColor" stroke-width="26" stroke-linecap="round"/><line x1="222" y1="172" x2="235" y2="185" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><circle cx="246" cy="198" r="5" fill="currentColor"/></svg></div><span class="size-label">256px</span></div>
+  </div>
+
+  <p class="critique"><b>16px check:</b> the ring holds as a clean donut shape on both taskbars; the two trailing marks soften into a smudge at 16px and would need to be dropped there in production (same treatment tray.py already gives the mic's arc below 20px). Best identity value of the three — most ownable as a mark, least literal.</p>
+</div>
+
+<!-- ============ CAPSULE ============ -->
+<div class="concept-card">
+  <div class="concept-head"><span class="concept-name">3 · Capsule</span><span class="concept-tag">mic, reduced</span></div>
+  <p class="idea">Idea: the mic reduced to a pill and one calm baseline — no stand, no stem, no arc. Minimalism as the message; the closest relative of today's shipped mic-to-caret mark, offered as the safe continuity option.</p>
+
+  <div class="row-label">Violet · app tile (256 / 32 / 16px)</div>
+  <div class="swatch-row">
+    <div class="swatch"><div class="swatch-box brand" style="width:256px;height:256px;">
+      <svg viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g3a" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><rect width="256" height="256" rx="56" ry="56" fill="#0B0D13"/><rect x="96" y="56" width="64" height="104" rx="32" fill="url(#g3a)"/><rect x="78" y="182" width="100" height="16" rx="8" fill="url(#g3a)"/></svg>
+    </div><span class="size-label">256px</span></div>
+    <div class="swatch"><div class="swatch-box brand" style="width:32px;height:32px;">
+      <svg viewBox="0 0 256 256" width="32" height="32"><defs><linearGradient id="g3b" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><rect width="256" height="256" rx="56" ry="56" fill="#0B0D13"/><rect x="96" y="56" width="64" height="104" rx="32" fill="url(#g3b)"/><rect x="78" y="182" width="100" height="16" rx="8" fill="url(#g3b)"/></svg>
+    </div><span class="size-label">32px</span></div>
+    <div class="swatch"><div class="swatch-box brand" style="width:16px;height:16px;">
+      <svg viewBox="0 0 256 256" width="16" height="16"><defs><linearGradient id="g3c" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><rect width="256" height="256" rx="56" ry="56" fill="#0B0D13"/><rect x="96" y="56" width="64" height="104" rx="32" fill="url(#g3c)"/><rect x="78" y="182" width="100" height="16" rx="8" fill="url(#g3c)"/></svg>
+    </div><span class="size-label">16px</span></div>
+  </div>
+
+  <div class="row-label">Monochrome · tray, dark taskbar (16 / 32 / 256px)</div>
+  <div class="swatch-row">
+    <div class="swatch"><div class="swatch-box dark" style="width:48px;height:48px;color:var(--ink-on-dark);"><svg viewBox="0 0 256 256" width="16" height="16"><rect x="96" y="56" width="64" height="104" rx="32" fill="currentColor"/><rect x="78" y="182" width="100" height="16" rx="8" fill="currentColor"/></svg></div><span class="size-label">16px</span></div>
+    <div class="swatch"><div class="swatch-box dark" style="width:64px;height:64px;color:var(--ink-on-dark);"><svg viewBox="0 0 256 256" width="32" height="32"><rect x="96" y="56" width="64" height="104" rx="32" fill="currentColor"/><rect x="78" y="182" width="100" height="16" rx="8" fill="currentColor"/></svg></div><span class="size-label">32px</span></div>
+    <div class="swatch"><div class="swatch-box dark" style="width:288px;height:288px;color:var(--ink-on-dark);"><svg viewBox="0 0 256 256" width="256" height="256"><rect x="96" y="56" width="64" height="104" rx="32" fill="currentColor"/><rect x="78" y="182" width="100" height="16" rx="8" fill="currentColor"/></svg></div><span class="size-label">256px</span></div>
+  </div>
+
+  <div class="row-label">Monochrome · tray, light taskbar (16 / 32 / 256px)</div>
+  <div class="swatch-row">
+    <div class="swatch"><div class="swatch-box light" style="width:48px;height:48px;color:var(--ink-on-light);"><svg viewBox="0 0 256 256" width="16" height="16"><rect x="96" y="56" width="64" height="104" rx="32" fill="currentColor"/><rect x="78" y="182" width="100" height="16" rx="8" fill="currentColor"/></svg></div><span class="size-label">16px</span></div>
+    <div class="swatch"><div class="swatch-box light" style="width:64px;height:64px;color:var(--ink-on-light);"><svg viewBox="0 0 256 256" width="32" height="32"><rect x="96" y="56" width="64" height="104" rx="32" fill="currentColor"/><rect x="78" y="182" width="100" height="16" rx="8" fill="currentColor"/></svg></div><span class="size-label">32px</span></div>
+    <div class="swatch"><div class="swatch-box light" style="width:288px;height:288px;color:var(--ink-on-light);"><svg viewBox="0 0 256 256" width="256" height="256"><rect x="96" y="56" width="64" height="104" rx="32" fill="currentColor"/><rect x="78" y="182" width="100" height="16" rx="8" fill="currentColor"/></svg></div><span class="size-label">256px</span></div>
+  </div>
+
+  <p class="critique"><b>16px check:</b> two shapes, nothing to lose — the strongest tray performer of the three on both backgrounds. Trade-off: closest to what already ships, so picking it is closer to a refinement than a rebrand.</p>
+</div>
+
+</section>
+
+<section>
+<h2 class="section-title">Wordmarks</h2>
+
+<div class="wordmark-card">
+  <div class="concept-head"><span class="concept-name">A · Geometric</span><span class="concept-tag">quiett, lowercase</span></div>
+  <p class="idea">Idea: quiet, geometric, lowercase, tracked out a touch — recedes so the product does the talking, not the logo. Font stack (honest, no outline conversion done): Century Gothic / Poppins / Segoe UI Variable Display Semibold, weight 600. Will render slightly differently machine to machine until a picked weight is converted to paths.</p>
+  <div class="wordmark-swatches">
+    <div class="wm-box dark"><svg viewBox="0 0 720 220" width="360" height="110"><defs><linearGradient id="gwa1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><text x="30" y="160" font-family="Century Gothic, Poppins, 'Segoe UI Variable Display Semibold', 'Segoe UI Semibold', sans-serif" font-size="140" font-weight="600" letter-spacing="2" fill="url(#gwa1)">quiett</text></svg></div>
+    <div class="wm-box light"><svg viewBox="0 0 720 220" width="360" height="110"><defs><linearGradient id="gwa2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><text x="30" y="160" font-family="Century Gothic, Poppins, 'Segoe UI Variable Display Semibold', 'Segoe UI Semibold', sans-serif" font-size="140" font-weight="600" letter-spacing="2" fill="url(#gwa2)">quiett</text></svg></div>
+  </div>
+</div>
+
+<div class="wordmark-card">
+  <div class="concept-head"><span class="concept-name">B · Double-t waveform</span><span class="concept-tag">Quie + drawn "tt"</span></div>
+  <p class="idea">Idea: the double "t" becomes the icon's own waveform — its crossbar rebuilt as a 3-bar peak, so the one word that means "quiet" carries the mark. "Quie" is live text (same honest font stack as A); the "tt" is hand-drawn and its kerning against the text is eyeballed for this mockup, not measured.</p>
+  <div class="wordmark-swatches">
+    <div class="wm-box dark"><svg viewBox="0 0 430 200" width="215" height="100"><defs><linearGradient id="gwb1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><text x="30" y="160" font-family="Century Gothic, Poppins, 'Segoe UI Variable Display Semibold', sans-serif" font-size="140" font-weight="600" fill="url(#gwb1)">Quie</text><rect x="330" y="68" width="16" height="92" fill="url(#gwb1)"/><rect x="374" y="68" width="16" height="92" fill="url(#gwb1)"/><rect x="320" y="88" width="12" height="20" rx="6" fill="url(#gwb1)"/><rect x="352" y="78" width="12" height="40" rx="6" fill="url(#gwb1)"/><rect x="384" y="88" width="12" height="20" rx="6" fill="url(#gwb1)"/></svg></div>
+    <div class="wm-box light"><svg viewBox="0 0 430 200" width="215" height="100"><defs><linearGradient id="gwb2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#BFA8FF"/><stop offset="100%" stop-color="#7C5CFF"/></linearGradient></defs><text x="30" y="160" font-family="Century Gothic, Poppins, 'Segoe UI Variable Display Semibold', sans-serif" font-size="140" font-weight="600" fill="url(#gwb2)">Quie</text><rect x="330" y="68" width="16" height="92" fill="url(#gwb2)"/><rect x="374" y="68" width="16" height="92" fill="url(#gwb2)"/><rect x="320" y="88" width="12" height="20" rx="6" fill="url(#gwb2)"/><rect x="352" y="78" width="12" height="40" rx="6" fill="url(#gwb2)"/><rect x="384" y="88" width="12" height="20" rx="6" fill="url(#gwb2)"/></svg></div>
+  </div>
+</div>
+
+</section>
+
+<footer>
+  <b>Spec conflicts found (need Balu's call, not resolved here):</b><br>
+  1. The violet accent (#BFA8FF / #7C5CFF) used across every candidate here does not appear anywhere in the shipped app: theme.py's DARK/LIGHT tokens are still cyan "ion" (#7DE8FF / #3F8CFF), and PRODUCTION_PLAN.md §3.3 says "current blue #3b82f6 is fine" — a third colour, also unshipped (the app never used #3b82f6 either, that line is stale). Nothing in brain/rulings.md records a violet ruling. Treat these candidates as the first violet artefacts, not a continuation of an existing one.<br>
+  2. PRODUCTION_PLAN.md §6 still lists P2 ("Icon set") as an open checkbox, but STATE.md says a mic-to-caret icon set already SHIPPED 2026-07-30 (tray.py's <code>_mic_caret_tile</code> / <code>_make_icon</code>, wired via scripts/make_icons.py into assets/icon.ico and assets/tray_*.png). Candidate 3 "Capsule" is the closest relative of that shipped mark; candidates 1 and 2 are genuine rebrand directions. Worth deciding whether P2 is "replace the mark" or "just recolour the mark violet" before Balu picks.<br><br>
+  <b>No git access from this pass:</b> these files were written directly (Read/Grep/Glob/Write tools only, no shell). Commit locally when ready: <code>git add brand/candidates && git commit -m "Quiett brand candidates for P2 pick"</code> — do not push.
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Quiett icon candidate 3 "Capsule", monochrome tray glyph. Two shapes only --
+       expect this to be the strongest 16px performer of the three. -->
+  <rect x="96" y="56" width="64" height="104" rx="32" fill="currentColor"/>
+  <rect x="78" y="182" width="100" height="16" rx="8" fill="currentColor"/>
+</svg>

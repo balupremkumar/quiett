@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 430 200" width="430" height="200">
+  <!-- Quiett wordmark B "Double-t waveform". "Quie" is live <text> (same honest font
+       stack as wordmark A: "Century Gothic, Poppins, 'Segoe UI Variable Display
+       Semibold', sans-serif", weight 600, no outline conversion done yet). The "tt"
+       is hand-drawn: two stems sharing a crossbar rebuilt as a 3-bar waveform, so the
+       one word that means "quiet" repeats the icon's own sound-to-quiet motif.
+       Kerning between the live text and the drawn "tt" is eyeballed for this mockup,
+       not measured against real font metrics -- finalise once a font is picked. -->
+  <defs>
+    <linearGradient id="qgrad-word-b" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BFA8FF"/>
+      <stop offset="100%" stop-color="#7C5CFF"/>
+    </linearGradient>
+  </defs>
+  <text x="30" y="160" font-family="Century Gothic, Poppins, 'Segoe UI Variable Display Semibold', sans-serif" font-size="140" font-weight="600" fill="url(#qgrad-word-b)">Quie</text>
+  <rect x="330" y="68" width="16" height="92" fill="url(#qgrad-word-b)"/>
+  <rect x="374" y="68" width="16" height="92" fill="url(#qgrad-word-b)"/>
+  <rect x="320" y="88" width="12" height="20" rx="6" fill="url(#qgrad-word-b)"/>
+  <rect x="352" y="78" width="12" height="40" rx="6" fill="url(#qgrad-word-b)"/>
+  <rect x="384" y="88" width="12" height="20" rx="6" fill="url(#qgrad-word-b)"/>
+</svg>

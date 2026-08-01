@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" width="720" height="220">
+  <!-- Quiett wordmark A "Geometric". Honest font-stack note: no outline-path conversion
+       has been done -- this is live <text>, so it will render slightly differently
+       machine to machine until a specific licensed weight is picked and converted to
+       paths for production. Stack used here: "Century Gothic, Poppins,
+       'Segoe UI Variable Display Semibold', 'Segoe UI Semibold', sans-serif", weight 600,
+       tracking +2px, all lowercase (recedes -- the product does the talking, not the logo). -->
+  <defs>
+    <linearGradient id="qgrad-word-a" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BFA8FF"/>
+      <stop offset="100%" stop-color="#7C5CFF"/>
+    </linearGradient>
+  </defs>
+  <text x="30" y="160" font-family="Century Gothic, Poppins, 'Segoe UI Variable Display Semibold', 'Segoe UI Semibold', sans-serif" font-size="140" font-weight="600" letter-spacing="2" fill="url(#qgrad-word-a)">quiett</text>
+</svg>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Quiett icon candidate 2 "Comet": a Q monogram whose tail trails off into two
+       diminishing marks, like sound settling to quiet. Owns the name itself, not
+       just the "microphone" category -- the direction most distinct from the mic mark. -->
+  <defs>
+    <linearGradient id="qgrad-comet-v" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BFA8FF"/>
+      <stop offset="100%" stop-color="#7C5CFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="#0B0D13"/>
+  <path d="M144,180 A62,62 0 1 1 186,141" fill="none" stroke="url(#qgrad-comet-v)" stroke-width="30" stroke-linecap="round"/>
+  <line x1="178" y1="152" x2="215" y2="192" stroke="url(#qgrad-comet-v)" stroke-width="26" stroke-linecap="round"/>
+  <line x1="222" y1="172" x2="235" y2="185" stroke="url(#qgrad-comet-v)" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="246" cy="198" r="5" fill="url(#qgrad-comet-v)"/>
+</svg>
