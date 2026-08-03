@@ -360,6 +360,7 @@ _on_set_tts_speed = None
 _tts_speed = 1.0
 _on_toggle_study_mode = None
 _study_mode = False
+_on_insert_last = None
 
 
 def configure(on_view_history, on_toggle_pause=None,
@@ -368,13 +369,15 @@ def configure(on_view_history, on_toggle_pause=None,
               on_rebuild_voice_profile=None, on_open_dashboard=None,
               on_toggle_incognito=None, incognito: bool = False,
               on_set_tts_speed=None, tts_speed: float = 1.0,
-              on_toggle_study_mode=None, study_mode: bool = False) -> None:
+              on_toggle_study_mode=None, study_mode: bool = False,
+              on_insert_last=None) -> None:
     global _on_view_history, _on_toggle_pause, _on_view_profile, _on_open_settings
     global _on_toggle_clipboard_only, _clipboard_only
     global _on_rebuild_voice_profile, _on_open_dashboard
     global _on_toggle_incognito, _incognito
     global _on_set_tts_speed, _tts_speed
     global _on_toggle_study_mode, _study_mode
+    global _on_insert_last
     _on_view_history  = on_view_history
     _on_toggle_pause  = on_toggle_pause
     _on_view_profile  = on_view_profile
@@ -389,6 +392,7 @@ def configure(on_view_history, on_toggle_pause=None,
     _tts_speed = tts_speed
     _on_toggle_study_mode = on_toggle_study_mode
     _study_mode = study_mode
+    _on_insert_last = on_insert_last
 
 
 def set_clipboard_only(enabled: bool) -> None:
@@ -553,6 +557,31 @@ def _recent_history_items():
         yield pystray.MenuItem(label, _copy_history_entry(text))
 
 
+def _latest_history_text() -> str:
+    """Newest saved dictation, or "" when history is empty/unreadable."""
+    import history
+    try:
+        entries = history.load()
+    except Exception:
+        return ""
+    for e in entries:
+        text = (e.get("text") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _insert_last(icon, item):
+    """Re-insert the newest dictation into whatever is focused now — the
+    recovery path when a paste never landed."""
+    text = _latest_history_text()
+    if not text:
+        notify("Quiett", "No recent dictations")
+        return
+    if _on_insert_last:
+        _on_insert_last(text)
+
+
 _MIC_NAME_TRUNCATE = 40
 
 
@@ -710,6 +739,7 @@ def run() -> None:
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("View History", _view_history),
         pystray.MenuItem("Recent Dictations", recent_menu),
+        pystray.MenuItem("Insert Last Dictation", _insert_last),
         pystray.MenuItem("Settings",     _open_settings),
         pystray.MenuItem(lambda _: "Paused" if _paused else "Pause", pause_menu),
         pystray.MenuItem("Study Mode", _toggle_study_mode, checked=lambda item: _study_mode),

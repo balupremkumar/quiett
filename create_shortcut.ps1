@@ -4,7 +4,9 @@
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $python     = Join-Path $projectDir ".venv\Scripts\python.exe"
 $vbsPath    = Join-Path $projectDir "launch.vbs"
-$icoPath    = Join-Path $projectDir "icon.ico"
+$assetsIco  = Join-Path $projectDir "assets\icon.ico"
+$rootIco    = Join-Path $projectDir "icon.ico"
+$icoPath    = if (Test-Path $assetsIco) { $assetsIco } else { $rootIco }
 $desktop    = [Environment]::GetFolderPath("Desktop")
 $lnkPath    = Join-Path $desktop "Quiett.lnk"
 

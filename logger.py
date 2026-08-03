@@ -8,7 +8,7 @@ import os
 from logging.handlers import RotatingFileHandler
 
 _LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log")
-_logger = logging.getLogger("voicedictate")
+_logger = logging.getLogger("quiett")
 _logger.setLevel(logging.INFO)
 
 if not _logger.handlers:

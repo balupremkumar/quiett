@@ -118,6 +118,7 @@ _CONFIG_DEFAULTS = {
     "study_pause_scale":           1.0,     # multiplies every study pause, for tuning delivery by ear
     "panel_acrylic":               True,    # Win11 acrylic backdrop on the panel/badge (QUIETT_UI_PLAN P4)
     "learn_from_edits":            True,    # auto-promote a correction to a rule after 3 repeats (P6)
+    "dashboard_prewarm":           True,    # boot the dashboard hidden at startup so it opens instantly
 }
 
 _RECORDINGS_DIR = "recordings"
@@ -255,12 +256,77 @@ def _validate_config(raw: dict) -> dict:
         cfg["redact_patterns"] = [p for p in cfg["redact_patterns"] if isinstance(p, str) and p.strip()]
     cfg["panel_acrylic"] = bool(cfg.get("panel_acrylic", True))
     cfg["learn_from_edits"] = bool(cfg.get("learn_from_edits", True))
+    cfg["dashboard_prewarm"] = bool(cfg.get("dashboard_prewarm", True))
     return cfg
 
 
 def _get_cfg() -> dict:
     with _cfg_lock:
         return dict(_cfg)
+
+
+# A failed insert toast has to outlive the normal dwell: the user reads it,
+# clicks into the field they actually wanted, and only then hits the action.
+_INSERT_RETRY_DWELL_MS = 15000
+
+
+def _resolve_paste_target() -> int:
+    """Best paste target right now, best evidence first: whoever is in front,
+    else whoever was in front when the hotkey went down. The second case is
+    real — our own badge or a leftover preview panel holding focus at release
+    used to mean "no paste target" and the dictation only ever reached the
+    clipboard (app.log 2026-07-27 18:46:17)."""
+    hwnd = inject.capture_foreground()
+    if not hwnd:
+        fallback = _recording_target.get("hwnd", 0)
+        if inject.is_usable_target(fallback):
+            hwnd = fallback
+            log("main", f"paste target fell back to the hotkey-down window hwnd={hwnd}")
+    return hwnd
+
+
+def insert_text_now(text: str, hwnd: int = 0, submit: bool = False) -> str:
+    """Insert text into the target and, when it does not land, offer a retry.
+
+    hwnd=0 resolves the target at call time, which is what makes the retry
+    work: the user focuses the field they wanted, clicks "Insert again", and
+    the text goes there rather than back into whatever was in front before.
+    """
+    # Not stripped: a panel insert with "append" on carries a leading space
+    # that the retry has to preserve.
+    if not text or not text.strip():
+        return inject.INSERTED
+    target = hwnd if hwnd else _resolve_paste_target()
+    fn = inject.inject_text_and_submit if submit else inject.inject_text
+    status = fn(text, target)
+    if status != inject.INSERTED:
+        show_insert_retry_toast(text, status)
+    return status
+
+
+def show_insert_retry_toast(text: str, status: str) -> None:
+    """Loud, actionable clipboard-fallback notice (BACKLOG item 139)."""
+    if _get_cfg().get("paste_mode") == "clipboard_only":
+        return  # copying instead of inserting is the point of that mode
+    if status == inject.FAILED:
+        msg = "The text did not go in and the clipboard copy failed. Click into the field you want, then try again."
+    else:
+        msg = "The text did not go in. It is on your clipboard. Click into the field you want, then insert again."
+
+    def _retry() -> None:
+        threading.Thread(target=insert_text_now, args=(text,), daemon=True).start()
+
+    preview.show_toast(msg, kind="warn", action_label="Insert again",
+                       action_cb=_retry, dwell_ms=_INSERT_RETRY_DWELL_MS)
+
+
+def insert_last_dictation(text: str) -> None:
+    """Tray "Insert Last Dictation" — give the menu a moment to close and focus
+    to settle back on the user's window before resolving the target."""
+    def _worker() -> None:
+        time.sleep(0.25)
+        insert_text_now(text)
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def main() -> None:
@@ -301,6 +367,9 @@ def main() -> None:
     inject.set_paste_info_callback(
         lambda msg: preview.show_toast(msg, kind="info")
     )
+    # An insert fired from the preview panel that only reached the clipboard
+    # comes back here for the retry toast.
+    preview.set_insert_failed_callback(show_insert_retry_toast)
     preview.configure_position(_cfg["preview_position"])
     preview.start()
 
@@ -387,7 +456,7 @@ def main() -> None:
         app_auto = bool(app_ctx.get("auto_paste"))
         if text.strip() and (app_auto or (threshold > 0.0 and confidence is not None
                                           and confidence >= threshold)):
-            inject.inject_text(text.strip(), hwnd)
+            insert_text_now(text.strip(), hwnd)
             threading.Thread(target=_persist, daemon=True).start()
             return
 
@@ -406,17 +475,7 @@ def main() -> None:
     def _on_audio_stop(chunks: list) -> None:
         hotkey.set_external_recording(False)  # release hold-mode suppression
         inject.flush_hotkey_modifiers_async()  # un-stick modifiers in a focused RDP session
-        # Target resolution, best evidence first: whoever is in front now, else
-        # whoever was in front when the hotkey went down. The second case is
-        # real — our own badge or a leftover preview panel holding focus at
-        # release used to mean "no paste target" and the dictation only ever
-        # reached the clipboard (app.log 2026-07-27 18:46:17).
-        hwnd = inject.capture_foreground()
-        if not hwnd:
-            fallback = _recording_target.get("hwnd", 0)
-            if inject.is_usable_target(fallback):
-                hwnd = fallback
-                log("main", f"paste target fell back to the hotkey-down window hwnd={hwnd}")
+        hwnd = _resolve_paste_target()
         duration = (sum(len(c) for c in chunks) / audio.SAMPLE_RATE) if chunks else 0.0
 
         tray.set_state("processing")
@@ -622,6 +681,19 @@ def main() -> None:
     threading.Thread(target=_load_model, daemon=True).start()
     atexit.register(transcribe.shutdown)
     atexit.register(tts.shutdown)
+    # The dashboard hides rather than exits when its window is closed, so it
+    # has to be told to go when we do.
+    atexit.register(dashboard.shutdown)
+
+    # ------------------------------------------------------------------
+    # Dashboard prewarm — boot it hidden once startup has settled, so the
+    # first tray click only has to unhide a window that is already built.
+    # ------------------------------------------------------------------
+
+    if _cfg.get("dashboard_prewarm", True):
+        _prewarm_timer = threading.Timer(6.0, dashboard.prewarm)
+        _prewarm_timer.daemon = True
+        _prewarm_timer.start()
 
     # ------------------------------------------------------------------
     # HTTP API server (Phase 2)
@@ -728,6 +800,15 @@ def main() -> None:
                 with _cfg_lock:
                     _cfg["incognito"] = new_incognito
                 tray.set_incognito(new_incognito)
+            # Prewarm can be switched on mid-session; switching it off only
+            # stops the next startup booting one, it never closes a dashboard
+            # the user may be looking at.
+            new_prewarm = validated.get("dashboard_prewarm", True)
+            if new_prewarm != _cfg.get("dashboard_prewarm"):
+                with _cfg_lock:
+                    _cfg["dashboard_prewarm"] = new_prewarm
+                if new_prewarm:
+                    threading.Thread(target=dashboard.prewarm, daemon=True).start()
             # Sync study_mode into the tray, and with it the speed the picker
             # shows: each mode carries its own rate.
             new_study = validated.get("study_mode", False)
@@ -839,6 +920,7 @@ def main() -> None:
         on_toggle_clipboard_only=_on_toggle_clipboard_only,
         clipboard_only=_cfg.get("paste_mode", "auto") == "clipboard_only",
         on_rebuild_voice_profile=_on_rebuild_voice_profile,
+        on_insert_last=insert_last_dictation,
         on_toggle_incognito=_on_toggle_incognito,
         incognito=_cfg.get("incognito", False),
         on_toggle_study_mode=_on_toggle_study_mode,

@@ -35,6 +35,12 @@ import win32gui
 
 from logger import log, warn
 
+# inject_text() outcome, so callers can offer a retry instead of the text
+# silently ending up only on the clipboard (or nowhere at all).
+INSERTED  = "inserted"
+CLIPBOARD = "clipboard"
+FAILED    = "failed"
+
 _restore_delay_ms = 150
 _per_app_paste: dict = {}   # exe_name_lower → "ctrl_v" | "ctrl_shift_v"
 _electron_paste_method = "ctrl_v"  # how to paste into Electron/Chromium (VS Code, Cursor, browsers)
@@ -959,45 +965,57 @@ def get_selected_text(timeout_ms: int = 600) -> str:
     return text
 
 
-def inject_text_and_submit(text: str, hwnd: int) -> None:
-    """Insert text, then forward a single Enter to the target (insert-and-send)."""
-    inject_text(text, hwnd)
+def inject_text_and_submit(text: str, hwnd: int) -> str:
+    """Insert text, then forward a single Enter to the target (insert-and-send).
+
+    Returns the same status string as inject_text(); the Enter forward never
+    downgrades an insert that already landed."""
+    status = inject_text(text, hwnd)
+    if status != INSERTED:
+        return status
     if _paste_mode == "clipboard_only":
-        return
+        return status
     time.sleep(0.15)  # let the target app process the paste before Enter lands
     if not _wait_modifiers_released(timeout_ms=3000):
         # Enter under a still-held Ctrl would land as another Ctrl+Enter.
         warn("inject", "inject_text_and_submit: modifiers still held, skipping the Enter forward")
-        return
+        return status
     _flush_all_modifiers(force=_is_rdp(hwnd))
     time.sleep(0.03)
     _send_inputs([_make_vk_input(_VK_RETURN, key_up=False),
                   _make_vk_input(_VK_RETURN, key_up=True)])
     log("inject", "inject_text_and_submit: forwarded Enter")
+    return status
 
 
-def inject_text(text: str, hwnd: int) -> None:
+def inject_text(text: str, hwnd: int) -> str:
+    """Insert text into hwnd. Returns one of:
+
+    INSERTED  — the text went into the target window (or there was nothing to do)
+    CLIPBOARD — the insert did not land, but the text is on the clipboard
+    FAILED    — the insert did not land and the clipboard copy failed too
+    """
     global _last_insert
     if not text:
-        return
+        return INSERTED
 
     # Clipboard-only mode: don't inject anywhere — just copy and tell the user to paste.
     # A reliable manual fallback for apps that fight synthetic input.
     if _paste_mode == "clipboard_only":
         if _clipboard_set_text(text):
             _notify_info(f"Copied to clipboard ({len(text)} chars) — press Ctrl+V to paste")
-        else:
-            _notify_failure("Could not place text on clipboard")
-        return
+            return CLIPBOARD
+        _notify_failure("Could not place text on clipboard")
+        return FAILED
 
     if not hwnd or not win32gui.IsWindow(hwnd):
         # No usable target — never drop the text; leave it on the clipboard.
         warn("inject", f"no paste target (hwnd={hwnd}) — {len(text)} chars left on the clipboard")
         if _clipboard_set_text(text):
             _notify_info(f"No target window — copied to clipboard ({len(text)} chars), press Ctrl+V to paste")
-        else:
-            _notify_failure("No target window and clipboard copy failed")
-        return
+            return CLIPBOARD
+        _notify_failure("No target window and clipboard copy failed")
+        return FAILED
 
     target_cls   = _get_class(hwnd)
     target_exe   = _get_exe_name(hwnd)
@@ -1008,11 +1026,14 @@ def inject_text(text: str, hwnd: int) -> None:
 
     # UAC guard: SendInput cannot reach a higher-integrity process.
     if _is_higher_integrity_target(hwnd):
+        # Copy first: without this the text was simply lost on elevated targets.
+        copied = _clipboard_set_text(text)
         _notify_failure(
             f"Cannot insert into elevated window ({target_exe or 'unknown'}). "
-            "Run Quiett as administrator to enable input into UAC-elevated apps."
+            + ("Text copied, press Ctrl+V to paste. " if copied else "")
+            + "Run Quiett as administrator to enable input into UAC-elevated apps."
         )
-        return
+        return CLIPBOARD if copied else FAILED
 
     # Bring target to foreground (preview already called prime_foreground while
     # we still owned the foreground, so this should succeed).
@@ -1044,9 +1065,9 @@ def inject_text(text: str, hwnd: int) -> None:
                        f"({_modifiers_physically_down()}), not injecting")
         if _clipboard_set_text(text):
             _notify_failure("Keys still held down. Text copied, press Ctrl+V to paste.")
-        else:
-            _notify_failure("Keys still held down and clipboard copy failed")
-        return
+            return CLIPBOARD
+        _notify_failure("Keys still held down and clipboard copy failed")
+        return FAILED
     # Force-flush for RDP: clears modifiers stuck in the remote session (mstsc
     # has focus here, so the key-ups get forwarded) before we send Ctrl+V.
     _flush_all_modifiers(force=_is_rdp(hwnd))
@@ -1065,7 +1086,7 @@ def inject_text(text: str, hwnd: int) -> None:
         log("inject", f"typed {sent} chars via KEYEVENTF_UNICODE")
         if sent > 0:
             _last_insert = {"hwnd": hwnd, "chars": sent}
-            return
+            return INSERTED
         # SendInput inserted nothing (throttled / blocked / secure desktop). Safe to
         # fall back to clipboard paste because nothing landed — no duplication risk.
         warn("inject", "type path inserted 0 chars; falling back to clipboard Ctrl+V")
@@ -1076,7 +1097,7 @@ def inject_text(text: str, hwnd: int) -> None:
     snapshot = _clipboard_snapshot()  # save ALL formats (CF_HDROP, CF_DIB, HTML, etc.)
     if not _clipboard_set_text(text):
         _notify_failure("Could not place text on clipboard")
-        return
+        return FAILED
 
     # Brief pause so VS Code's clipboard-change listener (WM_CLIPBOARDUPDATE) finishes
     # processing before we send Ctrl+V. Without this, Electron can have BlockInput active
@@ -1101,7 +1122,7 @@ def inject_text(text: str, hwnd: int) -> None:
 
     if paste_blocked:
         # Leave text on clipboard so the manual Ctrl+V in the toast actually works.
-        return
+        return CLIPBOARD
 
     _last_insert = {"hwnd": hwnd, "chars": len(text)}
 
@@ -1131,6 +1152,7 @@ def inject_text(text: str, hwnd: int) -> None:
             warn("inject", f"clipboard restore failed: {exc}")
 
     threading.Thread(target=_restore, daemon=True).start()
+    return INSERTED
 
 
 def _is_descendant(child_hwnd: int, ancestor_hwnd: int) -> bool:

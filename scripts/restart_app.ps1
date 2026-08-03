@@ -1,4 +1,4 @@
-# Clean restart for Voice Dictation.
+# Clean restart for Quiett.
 # Kills every process running this project's code (stale copies included),
 # relaunches hidden via launch.vbs, confirms the new PID, tails the log.
 

@@ -99,6 +99,21 @@ def apply_rounded_region(win, radius: int = 12) -> None:
         pass
 
 
+def apply_no_activate(win) -> None:
+    """Stop a floating popup from stealing the foreground when it is clicked.
+
+    Toasts need this: the recovery action re-inserts into whatever window the
+    user has focused, so activating our own toast on click would move the
+    target out from under it. Buttons still receive clicks without activation."""
+    try:
+        hwnd = _toplevel_hwnd(win)
+        style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+        win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE,
+                               style | win32con.WS_EX_NOACTIVATE)
+    except Exception:
+        pass
+
+
 def _apply_drop_shadow(hwnd: int) -> None:
     """Extend a 1px DWM frame margin into the client area — the documented
     minimal-margins trick that makes the compositor draw its native drop

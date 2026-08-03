@@ -92,6 +92,129 @@ class TestInjectText:
         assert inject._restore_delay_ms == 300
 
 
+class TestInjectStatus:
+    """inject_text reports what actually happened so callers can offer a retry
+    instead of the text silently ending up only on the clipboard."""
+
+    @pytest.fixture
+    def live_target(self, monkeypatch):
+        """A valid, non-elevated target with modifiers released."""
+        _win32gui.IsWindow.return_value = True
+        monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: False)
+        monkeypatch.setattr(inject, "_force_foreground", lambda h: None)
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_notify_failure", lambda m: None)
+        monkeypatch.setattr(inject, "_notify_info", lambda m: None)
+        # Never let the real clipboard-restore thread outlive the test.
+        monkeypatch.setattr(inject.threading, "Thread",
+                            lambda target=None, daemon=None: MagicMock(start=lambda: None))
+
+    def test_empty_text_is_a_no_op(self):
+        assert inject.inject_text("", 1234) == inject.INSERTED
+
+    def test_clipboard_only_mode_reports_clipboard(self, monkeypatch):
+        monkeypatch.setattr(inject, "_paste_mode", "clipboard_only")
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
+        monkeypatch.setattr(inject, "_notify_info", lambda m: None)
+        assert inject.inject_text("hello", 1234) == inject.CLIPBOARD
+
+    def test_clipboard_only_mode_copy_failure_reports_failed(self, monkeypatch):
+        monkeypatch.setattr(inject, "_paste_mode", "clipboard_only")
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: False)
+        monkeypatch.setattr(inject, "_notify_failure", lambda m: None)
+        assert inject.inject_text("hello", 1234) == inject.FAILED
+
+    def test_no_target_reports_clipboard(self, monkeypatch):
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
+        monkeypatch.setattr(inject, "_notify_info", lambda m: None)
+        assert inject.inject_text("hello", 0) == inject.CLIPBOARD
+
+    def test_no_target_and_copy_failure_reports_failed(self, monkeypatch):
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: False)
+        monkeypatch.setattr(inject, "_notify_failure", lambda m: None)
+        assert inject.inject_text("hello", 0) == inject.FAILED
+
+    def test_elevated_target_copies_instead_of_dropping(self, monkeypatch):
+        """Regression: the UAC branch used to return without copying, so the
+        dictation was lost entirely."""
+        _win32gui.IsWindow.return_value = True
+        copied, failures = [], []
+        monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: True)
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: copied.append(t) or True)
+        monkeypatch.setattr(inject, "_notify_failure", lambda m: failures.append(m))
+        assert inject.inject_text("secret", 1234) == inject.CLIPBOARD
+        assert copied == ["secret"]
+        assert failures
+
+    def test_elevated_target_copy_failure_reports_failed(self, monkeypatch):
+        _win32gui.IsWindow.return_value = True
+        monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: True)
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: False)
+        monkeypatch.setattr(inject, "_notify_failure", lambda m: None)
+        assert inject.inject_text("secret", 1234) == inject.FAILED
+
+    def test_modifiers_still_held_reports_clipboard(self, monkeypatch):
+        _win32gui.IsWindow.return_value = True
+        copied = []
+        monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: False)
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
+        monkeypatch.setattr(inject, "_force_foreground", lambda h: None)
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: False)
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: copied.append(t) or True)
+        monkeypatch.setattr(inject, "_notify_failure", lambda m: None)
+        assert inject.inject_text("hello", 1234) == inject.CLIPBOARD
+        assert copied == ["hello"]
+
+    def test_typed_text_reports_inserted(self, monkeypatch, live_target):
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
+        monkeypatch.setattr(inject, "_send_unicode_text",
+                            lambda t, batch=32, batch_delay_ms=2: len(t))
+        assert inject.inject_text("hello", 1234) == inject.INSERTED
+
+    def test_successful_paste_reports_inserted(self, monkeypatch, live_target):
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "ctrl_v")
+        monkeypatch.setattr(inject, "_clipboard_snapshot", lambda: [])
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
+        monkeypatch.setattr(inject, "_send_keystroke", lambda mods, key: 4)
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        assert inject.inject_text("hello", 1234) == inject.INSERTED
+
+    def test_blocked_paste_reports_clipboard(self, monkeypatch, live_target):
+        """SendInput blocked and WM_PASTE refused: text stays on the clipboard."""
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "ctrl_v")
+        monkeypatch.setattr(inject, "_clipboard_snapshot", lambda: [])
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
+        monkeypatch.setattr(inject, "_send_keystroke", lambda mods, key: 0)
+        monkeypatch.setattr(inject, "_try_wm_paste", lambda h: False)
+        assert inject.inject_text("hello", 1234) == inject.CLIPBOARD
+
+    def test_clipboard_set_failure_on_paste_path_reports_failed(self, monkeypatch, live_target):
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "ctrl_v")
+        monkeypatch.setattr(inject, "_clipboard_snapshot", lambda: [])
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: False)
+        assert inject.inject_text("hello", 1234) == inject.FAILED
+
+    def test_submit_skips_enter_when_insert_did_not_land(self, monkeypatch):
+        """No Enter into a window the text never reached."""
+        sent = []
+        monkeypatch.setattr(inject, "inject_text", lambda t, h: inject.CLIPBOARD)
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs))
+        assert inject.inject_text_and_submit("hello", 1234) == inject.CLIPBOARD
+        assert sent == []
+
+    def test_submit_forwards_enter_after_a_real_insert(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(inject, "inject_text", lambda t, h: inject.INSERTED)
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_flush_all_modifiers", lambda force=False: None)
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs))
+        assert inject.inject_text_and_submit("hello", 1234) == inject.INSERTED
+        assert sent
+
+
 class TestCaptureForeground:
     """Own-app windows (tray icon message window, preview, dashboard subprocess)
     must never be captured as paste targets."""

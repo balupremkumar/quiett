@@ -24,7 +24,7 @@ import winsound
 
 _SAMPLE_RATE = 44100
 _CONFIG_FILE = "config.json"
-_CACHE_DIR = os.path.join(tempfile.gettempdir(), "voicedictate_chimes")
+_CACHE_DIR = os.path.join(tempfile.gettempdir(), "quiett_chimes")
 os.makedirs(_CACHE_DIR, exist_ok=True)
 
 _START_PATH = os.path.join(_CACHE_DIR, "start.wav")

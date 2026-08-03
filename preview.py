@@ -77,6 +77,9 @@ _preview_position = "cursor"
 # Re-record callback — set by main.py
 _on_rerecord = None
 
+# Insert-failure callback (text, status) — set by main.py, drives the retry toast
+_on_insert_failed = None
+
 # Themes — dark / light / system. Palette lives in refreshable module globals:
 # refresh_theme() re-resolves them, new windows pick the change up on open.
 # QUIETT_UI_PLAN P4: every colour here now comes from theme.py's Tk-flat
@@ -305,10 +308,14 @@ def hide_badge() -> None:
 
 
 def show_toast(message: str, kind: str = "info", action_label: str = "",
-               action_cb=None) -> None:
-    """Show a custom in-app toast. kind: info|warn|error. Optional action button."""
+               action_cb=None, dwell_ms: int = 0) -> None:
+    """Show a custom in-app toast. kind: info|warn|error. Optional action button.
+
+    dwell_ms overrides the default auto-dismiss time — used for toasts whose
+    action needs the user to do something first (focus a field, say)."""
     _toast_q.put({"message": message, "kind": kind,
-                  "action_label": action_label, "action_cb": action_cb})
+                  "action_label": action_label, "action_cb": action_cb,
+                  "dwell_ms": dwell_ms})
 
 
 def flash_screen_edge(colour: str = _BLUE) -> None:
@@ -335,6 +342,13 @@ def set_rerecord_callback(fn) -> None:
     """Set the callback invoked when user presses Ctrl+R in the preview panel."""
     global _on_rerecord
     _on_rerecord = fn
+
+
+def set_insert_failed_callback(fn) -> None:
+    """fn(text, status) — called when an insert fired from the panel did not
+    land in the target (status is inject.CLIPBOARD or inject.FAILED)."""
+    global _on_insert_failed
+    _on_insert_failed = fn
 
 
 _partial_q: queue.Queue = queue.Queue()
@@ -599,6 +613,7 @@ def _show_anchored_toast(t: dict) -> None:
     _toast_offset += h + 10
 
     winfx.apply_rounded_region(win, radius=10)
+    winfx.apply_no_activate(win)  # clicking the action must not pull focus off the target
     _apply_backdrop(win)
     winfx.fade_in(win, target=0.96, duration_ms=160)
 
@@ -616,7 +631,7 @@ def _show_anchored_toast(t: dict) -> None:
         _pulse()
 
     # Auto-dismiss after 4.5s (or stay if action button present)
-    dismiss_ms = 7000 if action_label else 4500
+    dismiss_ms = int(t.get("dwell_ms") or 0) or (7000 if action_label else 4500)
 
     def _dismiss():
         global _toast_offset
@@ -1786,7 +1801,13 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         _close()
         to_paste = (" " + result) if append_var.get() else result
         target_fn = inject.inject_text_and_submit if submit else inject.inject_text
-        threading.Thread(target=target_fn, args=(to_paste, hwnd), daemon=True).start()
+
+        def _insert_worker() -> None:
+            status = target_fn(to_paste, hwnd)
+            if status != inject.INSERTED and _on_insert_failed:
+                _on_insert_failed(to_paste, status)
+
+        threading.Thread(target=_insert_worker, daemon=True).start()
 
     def on_cancel() -> None:
         _close()

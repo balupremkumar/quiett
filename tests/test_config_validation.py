@@ -81,6 +81,18 @@ class TestLearnFromEditsConfig:
         assert main._validate_config({"learn_from_edits": False})["learn_from_edits"] is False
 
 
+class TestDashboardPrewarmConfig:
+    def test_default_on(self):
+        assert main._validate_config({})["dashboard_prewarm"] is True
+
+    def test_explicit_off_kept(self):
+        assert main._validate_config({"dashboard_prewarm": False})["dashboard_prewarm"] is False
+
+    def test_non_bool_coerced(self):
+        assert main._validate_config({"dashboard_prewarm": 0})["dashboard_prewarm"] is False
+        assert main._validate_config({"dashboard_prewarm": "yes"})["dashboard_prewarm"] is True
+
+
 class TestReadAloudConfig:
     def test_defaults_applied(self):
         result = main._validate_config({})

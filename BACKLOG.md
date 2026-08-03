@@ -216,7 +216,7 @@ Impact H/M/L, Effort S/M/L.
 136. [ ] Target picker in the panel: choose which window to insert into when the captured one is gone or wrong. (H/M)
 137. [ ] Remember the last five insert targets and offer them as a fallback list. (M/M)
 138. [ ] Retry a failed insert once automatically before falling back to the clipboard. (H/S)
-139. [ ] Make the clipboard fallback loud: a persistent toast with a "Paste now" action that re-attempts the insert. (H/S)
+139. [x] Make the clipboard fallback loud: a persistent toast with a "Paste now" action that re-attempts the insert. (H/S)
 140. [ ] Verify the insert landed by reading back the target's text length where the control allows it. (M/L)
 141. [ ] Per-app insert method learning: record which method worked per exe and prefer it next time. (H/M)
 142. [ ] Detect a UAC-elevated target before recording, not at insert time, while there is still time to switch windows. (M/S)

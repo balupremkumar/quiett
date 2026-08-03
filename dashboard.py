@@ -7,6 +7,12 @@ panel (preview.py) is unchanged — it still appears near the cursor.
 """
 from __future__ import annotations
 
+import time
+
+# Taken before the heavy imports below (PIL, webview) so the boot-timing lines
+# cover the real cold cost of this subprocess, not just the window build.
+_T0 = time.monotonic()
+
 import base64
 import ctypes
 import io
@@ -85,6 +91,16 @@ def _send_control(payload: dict, timeout: float = 1.5) -> bool:
         return False
 
 
+def _perf(msg: str) -> None:
+    """One-line boot/show timing into app.log. Imported lazily so the parent
+    process pays nothing for it."""
+    try:
+        import logger
+        logger.log("dashboard", msg)
+    except Exception:
+        pass
+
+
 def open_window(page: str = "home") -> None:
     """Show the dashboard on `page`: raise and refresh the existing window if
     one is up, otherwise launch the subprocess.
@@ -104,6 +120,39 @@ def open_window(page: str = "home") -> None:
             cwd=_PROJECT_DIR,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
+
+
+def prewarm() -> None:
+    """Boot the dashboard hidden so the first tray click hits the warm control
+    path. No-op if one is already up (the control port is the lock)."""
+    global _proc
+    with _proc_lock:
+        if _send_control({"cmd": "ping"}, timeout=1.0):
+            return
+        if _proc is not None and _proc.poll() is None:
+            return
+        _proc = subprocess.Popen(
+            [sys.executable, _THIS_FILE, "home", "--hidden"],
+            cwd=_PROJECT_DIR,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+
+
+def shutdown() -> None:
+    """End the resident dashboard on app exit. Closing its window only hides
+    it now, so without this a hidden WebView2 tree would outlive the app."""
+    global _proc
+    _send_control({"cmd": "quit"}, timeout=1.5)
+    proc = _proc
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    _proc = None
 
 
 def notify_change(what: str = "history") -> None:
@@ -159,6 +208,7 @@ _KNOWN_CONFIG_KEYS = frozenset({
     "badge_animation", "incognito", "redact_patterns",
     "theme", "animations", "sound_volume", "history_max_entries",
     "recording_retention_days", "dashboard_scale", "dashboard_control_port",
+    "dashboard_prewarm",
     "tts_enabled", "tts_speed", "tts_max_chunk_chars", "tts_reference",
     "study_mode", "study_speed", "study_pause_scale", "learn_from_edits",
 })
@@ -510,8 +560,30 @@ _VALID_PAGES = ("home", "dictation", "voice", "history", "dictionary",
                 "settings", "diagnostics", "about")
 
 
-def _serve_control(srv: "socket.socket", window, ready: threading.Event) -> None:
-    """Handle show/refresh/ping from other instances and from the main app.
+def _purge_history_quietly() -> None:
+    """Retention pruning, off the boot path. The short wait keeps the file lock
+    clear of the first history read the page does."""
+    time.sleep(2.0)
+    try:
+        hist.purge()
+    except Exception:
+        pass
+
+
+def _destroy_window(window) -> None:
+    """Tear the window down for real (the quit command), with a hard exit as a
+    backstop so a wedged WebView2 can't keep the process resident."""
+    try:
+        window.destroy()
+    except Exception:
+        pass
+    time.sleep(3)
+    os._exit(0)
+
+
+def _serve_control(srv: "socket.socket", window, ready: threading.Event,
+                   quitting: "threading.Event | None" = None) -> None:
+    """Handle show/refresh/ping/quit from other instances and from the main app.
 
     Runs on a daemon thread for the life of the window. Every command waits for
     the page to be interactive first, otherwise evaluate_js lands before the
@@ -528,12 +600,31 @@ def _serve_control(srv: "socket.socket", window, ready: threading.Event) -> None
                 msg = json.loads(raw) if raw else {}
                 cmd = msg.get("cmd", "")
                 if cmd == "show":
+                    t0 = time.monotonic()
                     page = msg.get("page", "home")
                     if page not in _VALID_PAGES:
                         page = "home"
+                    # The window may be hidden (closed by the user, or prewarmed
+                    # and never shown yet) — unhide before raising, since
+                    # _raise_self only finds visible windows.
+                    try:
+                        window.show()
+                    except Exception:
+                        pass
                     if ready.wait(timeout=10):
                         window.evaluate_js(f"navigateTo('{page}')")
                     _raise_self()
+                    _perf(f"control show page={page} in "
+                          f"{(time.monotonic() - t0) * 1000:.0f}ms")
+                elif cmd == "quit":
+                    # App shutdown. Let the close through this time, then leave
+                    # the accept loop: the port goes with the process.
+                    if quitting is not None:
+                        quitting.set()
+                    conn.sendall(b"ok\n")
+                    threading.Thread(target=_destroy_window, args=(window,),
+                                     daemon=True).start()
+                    return
                 elif cmd == "refresh":
                     what = str(msg.get("what", "history"))[:32].replace("'", "")
                     if ready.wait(timeout=10):
@@ -847,7 +938,7 @@ class DashboardAPI:
                 return {"ok": False, "error": "No entries to export."}
             chosen.sort(key=lambda e: e.get("timestamp", ""))
             content = spec["fn"](chosen)
-            default_name = (f"voicedictate-history-"
+            default_name = (f"quiett-history-"
                              f"{datetime.now().strftime('%Y%m%d-%H%M%S')}.{spec['ext']}")
 
             dialog_ok = True
@@ -1046,7 +1137,7 @@ class DashboardAPI:
             cfg = _read_cfg()
             cfg.pop("dashboard_window", None)
             content = json.dumps(cfg, indent=2, ensure_ascii=False)
-            default_name = f"voicedictate-settings-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+            default_name = f"quiett-settings-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
 
             dialog_ok = True
             result = None
@@ -3140,35 +3231,41 @@ async function _boot() {
     applyScale(cfg.dashboard_scale || 100);
     setVoicelineMotion(cfg.animations !== false);
 
+    // The page the user asked for goes first, and everything else runs behind
+    // it: awaiting settings/about/history-stamp before the first paint is what
+    // made opening the dashboard feel slow.
+    if (_INIT_PAGE === 'home') loadHome();
+    else navigateTo(_INIT_PAGE);
+
     // Settings/Dictation/Voice controls all share the same data-key config
     // system now, spread across three pages instead of one - hydrate every
     // data-key element document-wide up front, regardless of which page is
-    // showing, then autosave on change wherever it fires.
-    await loadSettings();
-    document.addEventListener('input', (e) => {
-      if (e.target.closest && e.target.closest('[data-key]')) autoSave();
-    });
-    document.addEventListener('change', (e) => {
-      if (e.target.closest && e.target.closest('[data-key]')) autoSave();
-    });
+    // showing, then autosave on change wherever it fires. Not awaited any more,
+    // but the autosave listeners still go on only once hydration is done: an
+    // edit before that would save every other control's empty value.
+    loadSettings().then(() => {
+      document.addEventListener('input', (e) => {
+        if (e.target.closest && e.target.closest('[data-key]')) autoSave();
+      });
+      document.addEventListener('change', (e) => {
+        if (e.target.closest && e.target.closest('[data-key]')) autoSave();
+      });
+    }).catch(() => {});
 
-    try {
-      const about = await window.pywebview.api.get_about();
+    window.pywebview.api.get_about().then((about) => {
       const ver = document.getElementById('verTag');
       if (ver) ver.textContent = 'v' + about.version;
-    } catch (e) {}
+    }).catch(() => {});
 
     refreshVoiceline();
-    refreshNetworkProbe();
     setInterval(refreshVoiceline, 15000);
-    setInterval(refreshNetworkProbe, 20000);
-    _histStamp = await window.pywebview.api.get_history_stamp();
+    // The socket probe is a 2s HTTP call against the main app. Off the boot
+    // path entirely, and after that only while Diagnostics is on screen - the
+    // first run still seeds the header seal.
+    setTimeout(refreshNetworkProbe, 1500);
+    setInterval(() => { if (_currentPage === 'diagnostics') refreshNetworkProbe(); }, 20000);
+    window.pywebview.api.get_history_stamp().then((s) => { _histStamp = s; }).catch(() => {});
     setInterval(pollHistory, 4000);
-    if (_INIT_PAGE === 'home') {
-      await loadHome();
-    } else {
-      navigateTo(_INIT_PAGE);
-    }
   } catch (e) {
     console.error('init error:', e);
     var vl = document.getElementById('vlStatus');
@@ -3209,11 +3306,10 @@ if __name__ == "__main__":
         _ct.windll.user32.SetProcessDpiAwarenessContext(_ct.c_ssize_t(-4))
     except Exception:
         pass
-    try:
-        hist.purge()
-    except Exception:
-        pass
-    _page = sys.argv[1] if len(sys.argv) > 1 else "home"
+    _args = sys.argv[1:]
+    _hidden = "--hidden" in _args              # prewarm: boot, then wait unseen
+    _positional = [a for a in _args if not a.startswith("-")]
+    _page = _positional[0] if _positional else "home"
 
     # Single instance. Binding the control port is the lock: if it's taken,
     # a dashboard is already up — hand it the page and quit rather than
@@ -3224,8 +3320,10 @@ if __name__ == "__main__":
         _srv.listen(8)
     except OSError:
         _srv.close()
-        _send_control({"cmd": "show", "page": _page})
+        if not _hidden:
+            _send_control({"cmd": "show", "page": _page})
         sys.exit(0)
+    _perf(f"spawn->bind {(time.monotonic() - _T0) * 1000:.0f}ms hidden={_hidden}")
 
     _theme_pref = _read_cfg().get("theme", "dark")
     if _theme_pref == "system":
@@ -3258,16 +3356,39 @@ if __name__ == "__main__":
         _win_kwargs.update(x=_geom["x"], y=_geom["y"], width=_geom["w"], height=_geom["h"])
     else:
         _win_kwargs.update(width=980, height=660)
+    if _hidden:
+        _win_kwargs.update(hidden=True)
     _w = webview.create_window(**_win_kwargs)
-    _w.events.shown += lambda: _apply_titlebar_theme(_theme != "light")
+
+    def _on_shown() -> None:
+        _apply_titlebar_theme(_theme != "light")
+        _perf(f"bind->shown {(time.monotonic() - _T0) * 1000:.0f}ms total")
+
+    _w.events.shown += _on_shown
+
+    # Hide on close instead of exiting. The process (and with it the control
+    # port and the loaded WebView2) stays resident, so every later open is the
+    # warm sub-second path. Only the quit command really tears it down.
+    _quitting = threading.Event()
+
+    def _on_closing() -> bool:
+        if _quitting.is_set():
+            return True
+        threading.Timer(0, _w.hide).start()
+        return False
+
+    _w.events.closing += _on_closing
 
     # Page-interactive gate for the control channel. `loaded` fires when the
     # document is ready; the JS api itself is up a beat later, so the handler
     # tolerates a miss rather than assuming.
     _js_ready = threading.Event()
     _w.events.loaded += lambda: _js_ready.set()
-    threading.Thread(target=_serve_control, args=(_srv, _w, _js_ready),
+    threading.Thread(target=_serve_control, args=(_srv, _w, _js_ready, _quitting),
                      daemon=True).start()
+    # History pruning is a file-locked write that used to block the window
+    # build; nothing on screen needs it to have finished.
+    threading.Thread(target=_purge_history_quietly, daemon=True).start()
     # Debounced geometry save on move/resize — avoids hammering config.json
     # while the user is mid-drag.
     _geom_timer: "threading.Timer | None" = None
