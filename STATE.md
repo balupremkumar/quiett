@@ -1,5 +1,7 @@
 # STATE — voice-dictation
 
+Vault: [[HOME]] | [[PORTFOLIO|Portfolio]] | [[projects/active/voice-dictation/BACKLOG|Backlog]]
+
 Seeded 2026-07-03 from the workflow review; verify against reality on first resume, then keep current via the Stop hook.
 
 ## Current state
