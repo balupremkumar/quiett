@@ -403,6 +403,33 @@ class TestModifierFlush:
         inject._flush_hotkey_modifiers()
         assert sent == []
 
+    def test_force_flush_taps_shift_then_ctrl_after_the_bare_ups(self, monkeypatch):
+        """Bare key-ups alone did not unlatch a remote Ctrl (2026-08-12): a layer
+        in the chain ignores an up for a key it never saw go down, so the flush
+        also taps Shift then Ctrl — the manual "tap Ctrl to unstick" fix. Shift
+        first so repeated flushes never land 5 Shift taps and trip StickyKeys."""
+        sent = []
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        inject._flush_all_modifiers(force=True)
+        assert len(sent) == 1, "ordering must be atomic — one SendInput call"
+        events = [(inp.ki.wScan, bool(inp.ki.dwFlags & inject._KEYEVENTF_KEYUP))
+                  for inp in sent[0]]
+        expected_ups = [(s, True) for s, _ in inject._MOD_RELEASE_SCANCODES]
+        assert events[:len(expected_ups)] == expected_ups
+        assert events[len(expected_ups):] == [(0x2A, False), (0x2A, True),
+                                              (0x1D, False), (0x1D, True)]
+
+    def test_non_force_flush_only_releases_held_keys(self, monkeypatch):
+        """Unchanged: outside RDP we never synthesise a down, and only the keys
+        actually held get an up (spurious ups confuse Electron/VS Code)."""
+        sent = []
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        monkeypatch.setattr(inject, "_modifiers_physically_down", lambda: [inject._VK_CONTROL])
+        inject._flush_all_modifiers(force=False)
+        events = [inp for batch in sent for inp in batch]
+        assert len(events) == 1
+        assert events[0].ki.dwFlags & inject._KEYEVENTF_KEYUP
+
     def test_flush_rdp_if_foreground_flushes_for_rdp(self, monkeypatch):
         sent = []
         monkeypatch.setattr(inject, "time", _FakeTime())

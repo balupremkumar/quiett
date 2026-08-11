@@ -299,6 +299,16 @@ def _make_scan_up(scan: int, extended: bool) -> _INPUT:
     return inp
 
 
+def _make_scan_down(scan: int, extended: bool = False) -> _INPUT:
+    flags = _KEYEVENTF_SCANCODE
+    if extended:
+        flags |= _KEYEVENTF_EXTENDED
+    inp = _INPUT()
+    inp.type = _INPUT_KEYBOARD
+    inp.ki = _KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=0)
+    return inp
+
+
 def _flush_all_modifiers(force: bool = False) -> None:
     if force:
         # RDP targets: mstsc forwards key events to the remote session, and it
@@ -308,7 +318,24 @@ def _flush_all_modifiers(force: bool = False) -> None:
         # misbehaves — and the local physical key state can't see it. While the
         # RDP window has focus, send unconditional key-ups for every modifier
         # variant; unmatched key-ups are no-ops for apps that aren't stuck.
-        _send_inputs([_make_scan_up(s, e) for s, e in _MOD_RELEASE_SCANCODES])
+        inputs = [_make_scan_up(s, e) for s, e in _MOD_RELEASE_SCANCODES]
+        # Bare ups were not enough (Balu, 2026-08-12: every flush logged, remote
+        # Ctrl still latched and scrolling zoomed). Something in the chain —
+        # mstsc's forwarding or the remote app's own modifier tracking — ignores
+        # an up for a key it never saw go down. A full down+up cycle is what the
+        # manual "tap Ctrl to unstick it" fix actually does, so emulate that.
+        # Shift first, then Ctrl: the Ctrl tap in between means repeated flushes
+        # never land 5 Shift taps in a row and pop the remote's StickyKeys prompt.
+        for scan in (0x2A, 0x1D):  # left shift, left ctrl
+            inputs.append(_make_scan_down(scan))
+            inputs.append(_make_scan_up(scan, False))
+        # One SendInput call so the ordering is atomic against other input.
+        n = _send_inputs(inputs)
+        msg = f"force flush: SendInput inserted {n}/{len(inputs)} events"
+        if n < len(inputs):
+            warn("inject", msg)
+        else:
+            log("inject", msg)
         return
     # Only flush keys that are still physically held — don't send spurious
     # synthetic key-ups for already-released keys (confuses Electron/VS Code).
