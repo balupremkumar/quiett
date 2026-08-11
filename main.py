@@ -80,6 +80,8 @@ _CONFIG_DEFAULTS = {
     "max_record_seconds":          120.0,
     "filler_words":                [],
     "clipboard_restore_delay_ms":  150,
+    "rdp_clipboard_settle_ms":     250,   # rdpclip needs longer than local apps before Ctrl+V
+    "rdp_clipboard_restore_delay_ms": 3000,  # ...and the remote may read the clipboard late
     "vad_filter":                  False,
     "corrections":                 {},
     "silence_auto_stop_seconds":   3.0,
@@ -180,6 +182,14 @@ def _validate_config(raw: dict) -> dict:
         cfg["clipboard_restore_delay_ms"] = max(50, int(cfg["clipboard_restore_delay_ms"]))
     except (TypeError, ValueError):
         cfg["clipboard_restore_delay_ms"] = 150
+    try:
+        cfg["rdp_clipboard_settle_ms"] = max(0, int(cfg["rdp_clipboard_settle_ms"]))
+    except (TypeError, ValueError):
+        cfg["rdp_clipboard_settle_ms"] = 250
+    try:
+        cfg["rdp_clipboard_restore_delay_ms"] = max(50, int(cfg["rdp_clipboard_restore_delay_ms"]))
+    except (TypeError, ValueError):
+        cfg["rdp_clipboard_restore_delay_ms"] = 3000
     try:
         cfg["silence_auto_stop_seconds"] = max(0.0, float(cfg["silence_auto_stop_seconds"]))
     except (TypeError, ValueError):
@@ -360,6 +370,8 @@ def main() -> None:
         per_app_paste=_cfg.get("per_app_paste", {}),
         electron_paste_method=_cfg.get("electron_paste_method", "ctrl_v"),
         paste_mode=_cfg.get("paste_mode", "auto"),
+        rdp_clipboard_settle_ms=_cfg["rdp_clipboard_settle_ms"],
+        rdp_clipboard_restore_delay_ms=_cfg["rdp_clipboard_restore_delay_ms"],
     )
     inject.set_paste_failure_callback(
         lambda msg: preview.show_toast(msg, kind="warn")
@@ -632,6 +644,9 @@ def main() -> None:
                 tray.set_state("idle")
 
         def _on_tts_hotkey() -> None:
+            # Ctrl+Shift+S over an RDP window can leave Shift stuck in the remote
+            # session, and every early return below exits without touching inject.
+            inject.flush_hotkey_modifiers_async()
             if tts.is_speaking():
                 log("main", "tts: hotkey pressed while speaking — stopping")
                 tts.stop()
@@ -752,6 +767,8 @@ def main() -> None:
             with _cfg_lock:
                 for key in ("language", "filler_words", "min_record_seconds",
                             "clipboard_restore_delay_ms", "max_record_seconds",
+                            "rdp_clipboard_settle_ms",
+                            "rdp_clipboard_restore_delay_ms",
                             "vad_filter", "corrections", "silence_auto_stop_seconds",
                             "preview_position", "preview_auto_dismiss_seconds",
                             "auto_paste_threshold", "initial_prompt",
@@ -768,6 +785,8 @@ def main() -> None:
                 per_app_paste=validated.get("per_app_paste", {}),
                 electron_paste_method=validated.get("electron_paste_method", "ctrl_v"),
                 paste_mode=validated.get("paste_mode", "auto"),
+                rdp_clipboard_settle_ms=validated["rdp_clipboard_settle_ms"],
+                rdp_clipboard_restore_delay_ms=validated["rdp_clipboard_restore_delay_ms"],
             )
             preview.configure_position(validated["preview_position"])
             preview.refresh_theme()
@@ -842,6 +861,8 @@ def main() -> None:
             per_app_paste=_cfg.get("per_app_paste", {}),
             electron_paste_method=_cfg.get("electron_paste_method", "ctrl_v"),
             paste_mode=new_mode,
+            rdp_clipboard_settle_ms=_cfg["rdp_clipboard_settle_ms"],
+            rdp_clipboard_restore_delay_ms=_cfg["rdp_clipboard_restore_delay_ms"],
         )
         try:
             with open("config.json") as f:

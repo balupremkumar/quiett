@@ -42,6 +42,11 @@ CLIPBOARD = "clipboard"
 FAILED    = "failed"
 
 _restore_delay_ms = 150
+# RDP clipboard timing: rdpclip propagates the format list to the remote session
+# asynchronously and serves the data via delayed rendering, so the local timings
+# above are far too tight for an RDP target.
+_rdp_clipboard_settle_ms = 250
+_rdp_clipboard_restore_delay_ms = 3000
 _per_app_paste: dict = {}   # exe_name_lower → "ctrl_v" | "ctrl_shift_v"
 _electron_paste_method = "ctrl_v"  # how to paste into Electron/Chromium (VS Code, Cursor, browsers)
 _paste_mode = "auto"               # "auto" = inject into target; "clipboard_only" = copy + notify
@@ -357,6 +362,21 @@ def modifiers_physically_down() -> list[int]:
     return _modifiers_physically_down()
 
 
+def flush_rdp_if_foreground() -> None:
+    """Force-flush modifiers right now if an RDP window owns the foreground.
+
+    Synchronous on purpose: callers invoke it at a moment where mstsc still owns
+    the foreground and the flush must happen BEFORE they steal focus (the async
+    watcher below races that focus steal and loses). Costs 50ms only when an RDP
+    window is in front; returns immediately otherwise."""
+    fg = win32gui.GetForegroundWindow()
+    if not fg or not _is_rdp(fg):
+        return
+    time.sleep(0.05)  # let mstsc forward the physical key-ups first
+    _flush_all_modifiers(force=True)
+    log("inject", "RDP foreground at focus-steal time — force-flushed modifier key-ups")
+
+
 def flush_hotkey_modifiers_async() -> None:
     """Fire-and-forget cleanup after ANY recording-hotkey interaction ends.
 
@@ -365,21 +385,29 @@ def flush_hotkey_modifiers_async() -> None:
     logically stuck remotely — shift-click opens new windows, ctrl-click opens
     new tabs, the number row stops working. The paste path already force-
     flushes for RDP targets, but flows that never inject (cancel, too-short)
-    ended with no flush at all. This waits for the
-    physical release, then sends unconditional key-ups while the RDP window
-    still has focus so mstsc forwards them; unmatched key-ups are no-ops for
+    ended with no flush at all.
+
+    Runs a bounded watcher: wait for the physical release, then watch the
+    foreground for up to 4s and force-flush the first time an RDP window holds
+    it. Watching rather than sampling once matters because the preview panel or
+    a toast can own the foreground at the instant the hotkey ends, with the RDP
+    window coming back moments later. Unmatched key-ups are no-ops for
     everything else."""
     threading.Thread(target=_flush_hotkey_modifiers, daemon=True).start()
 
 
 def _flush_hotkey_modifiers() -> None:
     _wait_modifiers_released(timeout_ms=2000)
-    fg = win32gui.GetForegroundWindow()
-    if not fg or not _is_rdp(fg):
-        return
-    time.sleep(0.05)  # let mstsc forward the physical key-ups first
-    _flush_all_modifiers(force=True)
-    log("inject", "hotkey ended with RDP focused — force-flushed modifier key-ups")
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline:
+        fg = win32gui.GetForegroundWindow()
+        if fg and _is_rdp(fg):
+            time.sleep(0.05)  # let mstsc forward the physical key-ups first
+            _flush_all_modifiers(force=True)
+            log("inject", "hotkey ended — force-flushed modifier key-ups with RDP foreground")
+            return
+        time.sleep(0.1)
+    log("inject", "hotkey ended — RDP never took foreground within 4s, no flush needed")
 
 
 # ---------------------------------------------------------------------------
@@ -561,9 +589,16 @@ def _is_higher_integrity_target(hwnd: int) -> bool:
 
 def configure(restore_delay_ms: int, per_app_paste: dict | None = None,
               electron_paste_method: str | None = None,
-              paste_mode: str | None = None) -> None:
+              paste_mode: str | None = None,
+              rdp_clipboard_settle_ms: int | None = None,
+              rdp_clipboard_restore_delay_ms: int | None = None) -> None:
     global _restore_delay_ms, _per_app_paste, _electron_paste_method, _paste_mode
+    global _rdp_clipboard_settle_ms, _rdp_clipboard_restore_delay_ms
     _restore_delay_ms = restore_delay_ms
+    if rdp_clipboard_settle_ms is not None:
+        _rdp_clipboard_settle_ms = rdp_clipboard_settle_ms
+    if rdp_clipboard_restore_delay_ms is not None:
+        _rdp_clipboard_restore_delay_ms = rdp_clipboard_restore_delay_ms
     if per_app_paste is not None:
         _per_app_paste = {k.lower(): v for k, v in per_app_paste.items()}
     if electron_paste_method in ("type", "ctrl_v", "ctrl_shift_v"):
@@ -658,8 +693,9 @@ def _is_rdp(hwnd: int) -> bool:
     cls = _get_class(hwnd)
     if "TscShellContainer" in cls or "RAIL_WINDOW" in cls:
         return True
-    # msrdc (new Remote Desktop / AVD client) doesn't use the mstsc class names
-    return _get_exe_name(hwnd) in ("mstsc.exe", "msrdc.exe")
+    # msrdc / msrdcw (new Remote Desktop, AVD, Windows App) don't use the mstsc
+    # class names
+    return _get_exe_name(hwnd) in ("mstsc.exe", "msrdc.exe", "msrdcw.exe")
 
 
 def prime_foreground(hwnd: int) -> None:
@@ -1104,6 +1140,11 @@ def inject_text(text: str, hwnd: int) -> str:
     # for a few ms while handling the clipboard notification.
     if is_electron:
         time.sleep(0.08)
+    if _is_rdp(hwnd):
+        # rdpclip announces the new format list to the remote session
+        # asynchronously and serves the data by delayed rendering. Ctrl+V sent
+        # before that lands pastes the previous clipboard content, or no-ops.
+        time.sleep(_rdp_clipboard_settle_ms / 1000)
 
     if method == "ctrl_shift_v":
         n = _send_keystroke([_VK_CONTROL, _VK_SHIFT], _VK_V)
@@ -1132,10 +1173,18 @@ def inject_text(text: str, hwnd: int) -> str:
         time.sleep(0.05)
         _flush_all_modifiers(force=True)
 
+    # Evaluated here, not inside the thread: by the time the worker runs the
+    # target window may be gone and _is_rdp would query a dead hwnd.
+    is_rdp_target = _is_rdp(hwnd)
+
     def _restore():
         # Poll until clipboard no longer holds our injected text (paste consumed),
-        # or until the configured deadline — whichever comes first.
-        deadline = time.monotonic() + _restore_delay_ms / 1000 * 3
+        # or until the configured deadline — whichever comes first. RDP gets a far
+        # longer deadline: a remote delayed-render request landing after we restore
+        # pastes the OLD clipboard content into the remote session.
+        deadline = time.monotonic() + (_rdp_clipboard_restore_delay_ms / 1000
+                                       if is_rdp_target
+                                       else _restore_delay_ms / 1000 * 3)
         step = 0.015
         while time.monotonic() < deadline:
             time.sleep(step)

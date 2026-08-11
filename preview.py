@@ -1810,6 +1810,10 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
         threading.Thread(target=_insert_worker, daemon=True).start()
 
     def on_cancel() -> None:
+        # Dismissing the panel (Esc / close / Cancel / Ctrl+R) never reaches
+        # inject, so nothing else would clear a modifier left stuck in the
+        # remote session before the user clicks back into RDP.
+        inject.flush_hotkey_modifiers_async()
         _close()
 
     insert_btn = tk.Button(
@@ -2043,6 +2047,11 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
             return
         if attempt:
             log("preview", f"modifiers released, stealing focus after {attempt * 50}ms deferral")
+        # Flush stuck remote modifiers while mstsc STILL owns the foreground.
+        # The async watcher in inject races this focus steal and can lose it;
+        # doing it here is the one guaranteed moment. Costs 50ms on the Tk
+        # thread, and only when an RDP window is in front.
+        inject.flush_rdp_if_foreground()
         try:
             inject.activate_window(win.winfo_id())
             win.lift()

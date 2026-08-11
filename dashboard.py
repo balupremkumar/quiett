@@ -198,6 +198,7 @@ def _merge_cfg(updates: dict) -> bool:
 _KNOWN_CONFIG_KEYS = frozenset({
     "hotkey", "model", "language", "min_record_seconds", "max_record_seconds",
     "filler_words", "clipboard_restore_delay_ms", "vad_filter", "corrections",
+    "rdp_clipboard_settle_ms", "rdp_clipboard_restore_delay_ms",
     "silence_auto_stop_seconds", "preview_position", "preview_auto_dismiss_seconds",
     "auto_paste_threshold", "initial_prompt", "custom_vocabulary", "input_device",
     "history_paused", "silence_threshold", "per_app_paste", "per_app_context",

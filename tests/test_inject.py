@@ -22,11 +22,34 @@ sys.modules.pop("inject", None)
 import inject  # noqa: E402
 
 
+class _FakeTime:
+    """Stand-in for inject's `time` module: sleeps advance a fake clock instead of
+    the wall clock, so timeout loops (the 4s modifier watcher) finish instantly
+    and the sleep durations themselves become assertable."""
+
+    def __init__(self, recorder: list | None = None):
+        self._now = 1000.0
+        self.slept: list = []
+        self._recorder = recorder
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        if self._recorder is not None:
+            self._recorder.append(("sleep", seconds))
+        self._now += seconds
+
+    def monotonic(self) -> float:
+        return self._now
+
+
 @pytest.fixture(autouse=True)
 def reset_mocks():
     _win32gui.reset_mock()
     _win32api.reset_mock()
     _pyperclip.reset_mock()
+    # reset_mock() keeps side_effect; a leftover scripted foreground sequence
+    # would raise StopIteration inside an unrelated test.
+    _win32gui.GetForegroundWindow.side_effect = None
 
 
 class TestInjectText:
@@ -90,6 +113,44 @@ class TestInjectText:
     def test_configure_sets_restore_delay(self):
         inject.configure(restore_delay_ms=300)
         assert inject._restore_delay_ms == 300
+
+    def test_configure_sets_rdp_clipboard_timings(self):
+        try:
+            inject.configure(restore_delay_ms=150, rdp_clipboard_settle_ms=400,
+                             rdp_clipboard_restore_delay_ms=5000)
+            assert inject._rdp_clipboard_settle_ms == 400
+            assert inject._rdp_clipboard_restore_delay_ms == 5000
+        finally:
+            inject.configure(restore_delay_ms=150, rdp_clipboard_settle_ms=250,
+                             rdp_clipboard_restore_delay_ms=3000)
+
+    def test_rdp_target_settles_before_ctrl_v(self, monkeypatch):
+        """rdpclip propagates the format list asynchronously — Ctrl+V must not be
+        sent until the settle delay has elapsed, or the remote pastes stale text."""
+        _win32gui.IsWindow.return_value = True
+        _win32gui.GetForegroundWindow.return_value = 1234
+        calls = []
+        clock = _FakeTime(recorder=calls)
+        monkeypatch.setattr(inject, "time", clock)
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "ctrl_v")
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: True)
+        monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: False)
+        monkeypatch.setattr(inject, "_force_foreground", lambda h: None)
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_flush_all_modifiers", lambda force=False: None)
+        monkeypatch.setattr(inject, "_clipboard_snapshot", lambda: [])
+        monkeypatch.setattr(inject, "_clipboard_set_text",
+                            lambda t: calls.append(("set_text", t)) or True)
+        monkeypatch.setattr(inject, "_send_keystroke",
+                            lambda mods, key: calls.append(("keystroke", key)) or 4)
+        monkeypatch.setattr(inject.threading, "Thread",
+                            lambda target=None, daemon=None: MagicMock(start=lambda: None))
+        inject.configure(restore_delay_ms=150, rdp_clipboard_settle_ms=250,
+                         rdp_clipboard_restore_delay_ms=3000)
+        assert inject.inject_text("remote text", 1234) == inject.INSERTED
+        i = [n for n, c in enumerate(calls) if c[0] == "keystroke"][0]
+        assert calls[i - 1] == ("sleep", 0.25)
+        assert ("set_text", "remote text") in calls[:i]
 
 
 class TestInjectStatus:
@@ -293,3 +354,69 @@ class TestIsUsableTarget:
         _win32gui.IsWindowVisible.return_value = True
         monkeypatch.setattr(inject, "_is_own_window", lambda h: True)
         assert inject.is_usable_target(4242) is False
+
+
+class TestRdpDetection:
+    def test_msrdcw_is_rdp(self, monkeypatch):
+        """Windows App (msrdcw.exe) hosts remote sessions too and uses neither
+        the mstsc class names nor the msrdc.exe image name."""
+        monkeypatch.setattr(inject, "_get_class", lambda h: "WinUIDesktopWin32WindowClass")
+        monkeypatch.setattr(inject, "_get_exe_name", lambda h: "msrdcw.exe")
+        assert inject._is_rdp(4242) is True
+
+    def test_plain_window_is_not_rdp(self, monkeypatch):
+        monkeypatch.setattr(inject, "_get_class", lambda h: "Notepad")
+        monkeypatch.setattr(inject, "_get_exe_name", lambda h: "notepad.exe")
+        assert inject._is_rdp(4242) is False
+
+
+class TestModifierFlush:
+    """The RDP session keeps a modifier latched when mstsc drops the key-up, and
+    the local key state can't see it — so the flush must actually fire whenever an
+    RDP window holds the foreground, even if it only gets it back a moment later."""
+
+    _RELEASE_SCANS = {s for s, _ in inject._MOD_RELEASE_SCANCODES}
+
+    def _sent_scancodes(self, sent: list) -> set:
+        return {inp.ki.wScan for batch in sent for inp in batch}
+
+    def test_watcher_flushes_when_rdp_takes_foreground_later(self, monkeypatch):
+        """Regression: the preview panel steals focus first, so a single
+        foreground sample sees our own window and never flushes."""
+        sent = []
+        monkeypatch.setattr(inject, "time", _FakeTime())
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: h == 77)
+        _win32gui.GetForegroundWindow.side_effect = [11, 11, 77]
+        inject._flush_hotkey_modifiers()
+        assert sent, "no flush sent once the RDP window regained the foreground"
+        assert self._sent_scancodes(sent) == self._RELEASE_SCANS
+
+    def test_watcher_expires_without_flushing(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(inject, "time", _FakeTime())
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        _win32gui.GetForegroundWindow.return_value = 11
+        inject._flush_hotkey_modifiers()
+        assert sent == []
+
+    def test_flush_rdp_if_foreground_flushes_for_rdp(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(inject, "time", _FakeTime())
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: True)
+        _win32gui.GetForegroundWindow.return_value = 77
+        inject.flush_rdp_if_foreground()
+        assert self._sent_scancodes(sent) == self._RELEASE_SCANS
+
+    def test_flush_rdp_if_foreground_is_a_no_op_otherwise(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(inject, "time", _FakeTime())
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        _win32gui.GetForegroundWindow.return_value = 11
+        inject.flush_rdp_if_foreground()
+        assert sent == []
