@@ -358,3 +358,7 @@ R47. P11 buy/download path: extend kove.nz/work-voice-dictation (showcase + demo
 R48. Early-access cohort: 5-10 NZ users from the privacy verticals (legal, medical, finance) via the lead pipeline
 R49. In-app feedback loop: report-a-mistranscription -> dictionary suggestion
 R50. Launch: signed 1.0.0, showcase re-cut if the UI moved, privacy-vertical outreach campaign
+
+## Sellability roadmap pointer (2026-08-11)
+Phases Q-A/Q-B/Q-C (Dragon-vacancy positioning, verifiable-privacy headline, file transcription, multilingual, snippets restore, model choice, per-app profiles, device-tier pricing US$39/$69/$99) live in [[PRODUCT-STRATEGY-2026-08-11|the product strategy]] section 2, diffed against Q0-Q4 and R1-R50 above.
+Read that section before generating new Quiett feature ideas.
