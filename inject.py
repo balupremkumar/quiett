@@ -299,16 +299,6 @@ def _make_scan_up(scan: int, extended: bool) -> _INPUT:
     return inp
 
 
-def _make_scan_down(scan: int, extended: bool = False) -> _INPUT:
-    flags = _KEYEVENTF_SCANCODE
-    if extended:
-        flags |= _KEYEVENTF_EXTENDED
-    inp = _INPUT()
-    inp.type = _INPUT_KEYBOARD
-    inp.ki = _KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=0)
-    return inp
-
-
 def _flush_all_modifiers(force: bool = False) -> None:
     if force:
         # RDP targets: mstsc forwards key events to the remote session, and it
@@ -318,20 +308,16 @@ def _flush_all_modifiers(force: bool = False) -> None:
         # misbehaves — and the local physical key state can't see it. While the
         # RDP window has focus, send unconditional key-ups for every modifier
         # variant; unmatched key-ups are no-ops for apps that aren't stuck.
+        # Key-UPS ONLY, never downs. The 2026-08-12 down+up "tap" experiment
+        # made things dramatically worse: mstsc sometimes loses key-ups around
+        # focus changes, so injecting a synthetic Ctrl-DOWN into that channel
+        # can latch the remote session by our own hand — a dropped up after our
+        # own down is strictly worse than a stuck key we failed to clear.
+        # Unmatched ups are no-ops everywhere; unmatched downs are landmines.
         inputs = [_make_scan_up(s, e) for s, e in _MOD_RELEASE_SCANCODES]
-        # Bare ups were not enough (Balu, 2026-08-12: every flush logged, remote
-        # Ctrl still latched and scrolling zoomed). Something in the chain —
-        # mstsc's forwarding or the remote app's own modifier tracking — ignores
-        # an up for a key it never saw go down. A full down+up cycle is what the
-        # manual "tap Ctrl to unstick it" fix actually does, so emulate that.
-        # Shift first, then Ctrl: the Ctrl tap in between means repeated flushes
-        # never land 5 Shift taps in a row and pop the remote's StickyKeys prompt.
-        for scan in (0x2A, 0x1D):  # left shift, left ctrl
-            inputs.append(_make_scan_down(scan))
-            inputs.append(_make_scan_up(scan, False))
-        # One SendInput call so the ordering is atomic against other input.
         n = _send_inputs(inputs)
-        msg = f"force flush: SendInput inserted {n}/{len(inputs)} events"
+        msg = (f"force flush: SendInput inserted {n}/{len(inputs)} events; "
+               f"local logical mods down before flush: {_logical_modifiers_down() or 'none'}")
         if n < len(inputs):
             warn("inject", msg)
         else:
@@ -343,6 +329,24 @@ def _flush_all_modifiers(force: bool = False) -> None:
     for vk in (_VK_CONTROL, _VK_MENU, _VK_SHIFT, _VK_LWIN, _VK_RWIN):
         if vk in held:
             _flush_modifier(vk)
+
+
+_LOGICAL_MOD_VKS = (
+    (0xA2, "lctrl"), (0xA3, "rctrl"),
+    (0xA4, "lalt"),  (0xA5, "ralt"),
+    (0xA0, "lshift"), (0xA1, "rshift"),
+    (0x5B, "lwin"),  (0x5C, "rwin"),
+)
+
+
+def _logical_modifiers_down() -> list[str]:
+    """Side-specific snapshot of the LOCAL logical modifier state, for the
+    flush log line. Discriminates the failure layer on the next report: a key
+    listed here while the remote misbehaves means the corruption is local (our
+    synthetic input or the keyboard hook), an empty list means it is on the
+    mstsc/remote side."""
+    return [name for vk, name in _LOGICAL_MOD_VKS
+            if _user32.GetAsyncKeyState(vk) & 0x8000]
 
 
 def _modifiers_physically_down() -> list[int]:
@@ -389,19 +393,23 @@ def modifiers_physically_down() -> list[int]:
     return _modifiers_physically_down()
 
 
-def flush_rdp_if_foreground() -> None:
+def flush_rdp_if_foreground() -> bool:
     """Force-flush modifiers right now if an RDP window owns the foreground.
+    Returns True when it flushed (an RDP window was in front), else False.
 
-    Synchronous on purpose: callers invoke it at a moment where mstsc still owns
-    the foreground and the flush must happen BEFORE they steal focus (the async
-    watcher below races that focus steal and loses). Costs 50ms only when an RDP
-    window is in front; returns immediately otherwise."""
+    Synchronous on purpose: the caller needs to know BEFORE acting whether the
+    foreground is an RDP session — the preview uses True to skip its focus
+    steal entirely, because stealing focus from mstsc (SetForegroundWindow +
+    AttachThreadInput against mstsc's input queue) right after key events were
+    in flight is exactly the moment mstsc loses key-ups. Costs 50ms only when
+    an RDP window is in front; returns immediately otherwise."""
     fg = win32gui.GetForegroundWindow()
     if not fg or not _is_rdp(fg):
-        return
+        return False
     time.sleep(0.05)  # let mstsc forward the physical key-ups first
     _flush_all_modifiers(force=True)
-    log("inject", "RDP foreground at focus-steal time — force-flushed modifier key-ups")
+    log("inject", "RDP foreground — force-flushed modifier key-ups")
+    return True
 
 
 def flush_hotkey_modifiers_async() -> None:
@@ -845,6 +853,12 @@ def _set_focus_on_child(child_hwnd: int) -> None:
 
 
 def _force_foreground(hwnd: int) -> None:
+    if _user32.GetForegroundWindow() == hwnd:
+        # Already in front — do nothing. This matters for RDP targets: the
+        # preview no longer steals focus from mstsc, so at insert time the RDP
+        # window usually still owns the foreground and attaching to mstsc's
+        # input queue here would risk eating in-flight key events for nothing.
+        return
     cur_thread = _kernel32.GetCurrentThreadId()
     fg_hwnd    = _user32.GetForegroundWindow()
     fg_thread  = _user32.GetWindowThreadProcessId(fg_hwnd, None)

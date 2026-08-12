@@ -2047,11 +2047,17 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
             return
         if attempt:
             log("preview", f"modifiers released, stealing focus after {attempt * 50}ms deferral")
-        # Flush stuck remote modifiers while mstsc STILL owns the foreground.
-        # The async watcher in inject races this focus steal and can lose it;
-        # doing it here is the one guaranteed moment. Costs 50ms on the Tk
-        # thread, and only when an RDP window is in front.
-        inject.flush_rdp_if_foreground()
+        # RDP foreground: flush stuck remote modifiers while mstsc still owns
+        # the foreground, then DO NOT steal focus at all. Stealing focus from
+        # mstsc (SetForegroundWindow + AttachThreadInput against its input
+        # queue) right after key events were in flight is precisely when mstsc
+        # loses key-ups and the remote session latches a modifier. The panel
+        # stays usable without OS focus: the suppressed global Enter/Insert/Esc
+        # hooks commit and cancel it, and a click focuses it for editing.
+        if inject.flush_rdp_if_foreground():
+            log("preview", "RDP foreground — leaving focus with the RDP window; "
+                           "panel commit works via global hooks, click to edit")
+            return
         try:
             inject.activate_window(win.winfo_id())
             win.lift()
