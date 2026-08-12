@@ -55,7 +55,7 @@ Balu hands-on pending: real dictation on the new panel (acrylic look + ion wavef
 2026-08-12 (crash recovery): previous session crashed after the RDP round 2-4 commits; recovery session confirmed no code lost (app live on the round-4 build, dictations in app.log), committed the stranded STATE/BACKLOG dashboard edits as 3b5a7a2, refreshed memory resume.md. Unpushed: 6428110..3b5a7a2 (5f5d223, d716efe, 3b5a7a2) — awaiting Balu's push call. config.json drift left as live state (carries the rdp_clipboard_* keys). .serena/ = untracked Serena cache, ignored.
 
 ## Next steps
-- [ ] Push 6428110..3b5a7a2 (RDP rounds 3-4 + dashboards) — ask Balu.
+- [x] Pushed 2026-08-12: 6428110..5675985 (RDP rounds 3-4 + dashboards + crash-recovery note), origin in sync.
 - [x] 2026-07-27: committed b616388, merged to main as f553d83, app restarted on it (PID 27336). NOT pushed to origin — ask Balu.
 - [ ] Balu's hands-on pass on the 2026-07-27 build: dictate once and watch the panel appear (should be quicker), dictate with the dashboard open on History (the row should appear without touching the window), tray → View History twice (one window, raised both times), and a dictation where our own panel still has focus at release (should insert, not fall back to the clipboard).
 - [ ] Five ambiguous mistranscriptions are listed under Open bugs waiting on Balu's ear before they become corrections.
