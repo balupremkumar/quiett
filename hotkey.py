@@ -430,6 +430,18 @@ _reserved_hook      = None      # HHOOK
 _reserved_tid       = 0         # thread id of the pump, for the WM_QUIT
 _reserved_thread    = None
 _reserved_last_fire = 0.0
+# Set by the hook proc, consumed by a worker started at registration. The proc
+# must NEVER create a thread: a low-level keyboard hook blocks all keyboard
+# input on the machine until it returns, and one that overruns
+# LowLevelHooksTimeout (300ms by default) is silently removed by Windows.
+# Thread creation under GIL contention is exactly that risk.
+_reserved_signal = None
+_reserved_stop   = None
+_reserved_worker = None
+# Whether we swallowed the key-DOWN of the press now in progress. Swallowing an
+# up whose down we let through leaves the focused app believing the key is
+# still held, which is the stuck-key symptom.
+_reserved_down_swallowed = False
 # Module-level reference on purpose: a hook proc that gets garbage collected
 # leaves Windows calling into freed memory. Classic silent failure for this API.
 _reserved_proc = None
@@ -461,17 +473,34 @@ def _reserved_hook_proc(n_code, w_param, l_param):
     """Low-level keyboard hook. Incapable of raising: a hook proc that throws
     is torn down by Windows and every keystroke after it stops being seen.
 
-    Returns 1 (swallow) only on an exact scan-code AND extended-flag match, for
-    the key-down and the key-up alike. Swallowing the up as well matters: a
-    stray key-up for a key the app never saw pressed confuses some editors.
+    This runs for EVERY keystroke on the machine and blocks all keyboard input
+    until it returns, so the body is deliberately as cheap as possible and does
+    no allocation on the hot path. Real work is handed to a worker that is
+    already running, by setting an Event.
+
+    Returns 1 (swallow) only on an exact scan-code AND extended-flag match. The
+    key-up is swallowed only when its key-down was, so the focused app can never
+    be left holding a key it never saw released.
     """
+    global _reserved_down_swallowed
     try:
-        if n_code == 0 and w_param in _KEY_MESSAGES and _reserved_spec is not None:
+        spec = _reserved_spec
+        if n_code == 0 and spec is not None and w_param in _KEY_MESSAGES:
             info = ctypes.cast(l_param, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
-            if reserved_key_matches(info.scanCode, info.flags, _reserved_spec):
+            if reserved_key_matches(info.scanCode, info.flags, spec):
                 if w_param in _KEY_DOWN_MESSAGES:
-                    _dispatch_reserved()
-                return 1
+                    _reserved_down_swallowed = True
+                    if not _reserved_debounced(time.monotonic()):
+                        sig = _reserved_signal
+                        if sig is not None:
+                            sig.set()
+                    return 1
+                if _reserved_down_swallowed:
+                    _reserved_down_swallowed = False
+                    return 1
+                # We never swallowed the down for this press (the hook was
+                # installed mid-press). Let the up through so the app is not
+                # left with the key stuck down.
     except Exception:
         pass
     try:
@@ -481,17 +510,27 @@ def _reserved_hook_proc(n_code, w_param, l_param):
 
 
 def _dispatch_reserved() -> None:
-    """Hand the press to a worker. Never does the work inline: the callback
-    inserts text, which takes hundreds of milliseconds, and a low-level hook
-    that blocks that long is removed by Windows, freezing the keyboard for
-    every other app meanwhile."""
-    cb = _reserved_cb
-    if cb is None:
+    """Signal the already-running worker. Kept as a function because the hook
+    proc used to call it and the tests still drive it directly."""
+    if _reserved_cb is None:
         return
     if _reserved_debounced(time.monotonic()):
         return
-    threading.Thread(target=_run_reserved_callback, args=(cb,), daemon=True,
-                     name="quiett-reserved-key").start()
+    sig = _reserved_signal
+    if sig is not None:
+        sig.set()
+
+
+def _reserved_worker_loop(signal, stop, cb) -> None:
+    """Persistent consumer for reserved-key presses. Started once at
+    registration so the hook proc never pays for thread creation."""
+    while not stop.is_set():
+        if not signal.wait(0.2):
+            continue
+        signal.clear()
+        if stop.is_set():
+            return
+        _run_reserved_callback(cb)
 
 
 def _run_reserved_callback(cb) -> None:
@@ -535,11 +574,25 @@ def _reserved_pump(ready: threading.Event) -> None:
             pass
 
 
+def _stop_reserved_worker() -> None:
+    """Stop the press consumer. Safe to call when none is running."""
+    global _reserved_signal, _reserved_stop, _reserved_worker
+    stop, sig, worker = _reserved_stop, _reserved_signal, _reserved_worker
+    _reserved_stop = _reserved_signal = _reserved_worker = None
+    if stop is not None:
+        stop.set()
+    if sig is not None:
+        sig.set()   # wake it so it sees the stop without waiting out the timeout
+    if worker is not None and worker is not threading.current_thread():
+        worker.join(timeout=1.0)
+
+
 def register_reserved_key(name: str, cb) -> bool:
     """Reserve one key, by name from RESERVED_KEYS, for as long as the app
     runs. `cb()` fires once per press, on a worker thread, and the key never
     reaches the focused app. Returns True when the hook is live."""
     global _reserved_cb, _reserved_spec, _reserved_name, _reserved_thread
+    global _reserved_signal, _reserved_stop, _reserved_worker
     key = (name or "").strip().lower()
     spec = RESERVED_KEYS.get(key)
     if spec is None or cb is None:
@@ -552,11 +605,18 @@ def register_reserved_key(name: str, cb) -> bool:
         _reserved_cb     = cb
         _reserved_spec   = spec
         _reserved_name   = key
+        _reserved_signal = threading.Event()
+        _reserved_stop   = threading.Event()
+        _reserved_worker = threading.Thread(
+            target=_reserved_worker_loop, args=(_reserved_signal, _reserved_stop, cb),
+            daemon=True, name="quiett-reserved-key-worker")
+        _reserved_worker.start()
         _reserved_thread = threading.Thread(target=_reserved_pump, args=(ready,),
                                             daemon=True, name="quiett-reserved-key-hook")
         _reserved_thread.start()
     ready.wait(1.0)
     if not _reserved_hook:
+        _stop_reserved_worker()
         with _reserved_lock:
             _reserved_cb     = None
             _reserved_spec   = None
@@ -570,6 +630,9 @@ def register_reserved_key(name: str, cb) -> bool:
 def unregister_reserved_key() -> None:
     """Give the key back to Windows. Safe to call when nothing is reserved."""
     global _reserved_cb, _reserved_spec, _reserved_name, _reserved_thread
+    global _reserved_down_swallowed
+    _stop_reserved_worker()
+    _reserved_down_swallowed = False
     with _reserved_lock:
         _reserved_cb   = None
         _reserved_spec = None

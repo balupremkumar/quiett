@@ -823,6 +823,22 @@ class TestReservedKeyHookProc:
         monkeypatch.setattr(hotkey, "_reserved_spec",
                             hotkey.RESERVED_KEYS["numpad_decimal"])
         monkeypatch.setattr(hotkey, "_reserved_cb", None)
+        monkeypatch.setattr(hotkey, "_reserved_down_swallowed", False)
+        # The hook proc must never create a thread, so it signals a worker that
+        # is already running. Start a real one here: these tests then exercise
+        # the production path end to end rather than a stubbed shortcut.
+        signal, stop = threading.Event(), threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_signal", signal)
+        monkeypatch.setattr(hotkey, "_reserved_stop", stop)
+        worker = threading.Thread(
+            target=hotkey._reserved_worker_loop,
+            args=(signal, stop, lambda: (hotkey._reserved_cb or (lambda: None))()),
+            daemon=True)
+        worker.start()
+        yield
+        stop.set()
+        signal.set()
+        worker.join(timeout=1.0)
 
     def test_the_key_down_is_swallowed_and_fires_off_the_hook_thread(self, monkeypatch):
         fired = threading.Event()
@@ -831,14 +847,40 @@ class TestReservedKeyHookProc:
         assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) == 1
         assert fired.wait(2.0)
 
-    def test_the_key_up_is_swallowed_too_but_fires_nothing(self, monkeypatch):
-        """A stray key-up for a key the app never saw pressed confuses some
-        editors, so both halves of the press are eaten."""
+    def test_the_key_up_is_swallowed_when_its_down_was(self, monkeypatch):
+        """Both halves of a press we own are eaten, so no stray key-up reaches
+        the focused app."""
         fired = threading.Event()
         monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fired.set())
         ev = _kbd_event(83)
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) == 1
         assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYUP, ctypes.addressof(ev)) == 1
+
+    def test_an_unpaired_key_up_passes_through(self, monkeypatch):
+        """THE STUCK-KEY REGRESSION. If the hook is installed between a key
+        going down and coming up, swallowing that up leaves the focused app
+        believing the key is still held. Balu reported exactly that symptom
+        ("it looks like it's being held even though I'm not"), so an up whose
+        down we did not swallow must reach the app."""
+        fired = threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fired.set())
+        monkeypatch.setattr(hotkey, "_reserved_down_swallowed", False)
+        ev = _kbd_event(83)
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYUP, ctypes.addressof(ev)) != 1
         assert not fired.wait(0.2)
+
+    def test_the_hook_proc_creates_no_threads(self, monkeypatch):
+        """A low-level keyboard hook blocks ALL keyboard input on the machine
+        until it returns, and Windows silently removes one that overruns
+        LowLevelHooksTimeout. Creating a thread in there under GIL contention
+        is exactly that risk, and was the original cause of the freeze."""
+        import threading as _t
+        before = _t.active_count()
+        ev = _kbd_event(83)
+        for _ in range(50):
+            hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev))
+            hotkey._reserved_hook_proc(0, hotkey._WM_KEYUP, ctypes.addressof(ev))
+        assert _t.active_count() <= before + 1
 
     def test_the_syskey_variants_are_handled_the_same(self, monkeypatch):
         fired = threading.Event()
