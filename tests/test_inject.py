@@ -759,3 +759,104 @@ class TestUnstickModifiers:
 
     def _sent_scancodes(self, sent: list) -> set:
         return {inp.ki.wScan for batch in sent for inp in batch}
+
+
+# ---------------------------------------------------------------------------
+# Paste method selection (2026-08-23)
+#
+# The reserved place key came out and terminal delivery went in. 80-90% of
+# Balu's inserts land in a terminal, where Ctrl+V is not the paste binding.
+# ---------------------------------------------------------------------------
+
+class TestPasteMethodChoice:
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        monkeypatch.setattr(inject, "_per_app_paste", {})
+        monkeypatch.setattr(inject, "_electron_paste_method", "ctrl_v")
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+
+    def _target(self, monkeypatch, cls: str, exe: str = "app.exe"):
+        monkeypatch.setattr(inject, "_get_class", lambda h: cls)
+        monkeypatch.setattr(inject, "_get_exe_name", lambda h: exe)
+
+    def test_legacy_conhost_gets_shift_insert(self, monkeypatch):
+        """cmd.exe and the old PowerShell console have NO Ctrl+Shift+V binding,
+        which is why right-click was the only paste that worked there."""
+        self._target(monkeypatch, "ConsoleWindowClass", "cmd.exe")
+        assert inject._decide_method(1) == "shift_insert"
+
+    def test_every_terminal_class_gets_the_same_keystroke(self, monkeypatch):
+        """Shift+Insert is bound in conhost, Windows Terminal, mintty, ConEmu
+        and Alacritty alike, so one keystroke covers every terminal we detect."""
+        for cls in inject._TERMINAL_CLASSES:
+            self._target(monkeypatch, cls)
+            assert inject._decide_method(1) == "shift_insert", cls
+
+    def test_tauri_goes_to_the_clipboard_not_the_keyboard(self, monkeypatch):
+        """Flightdeck is a Tauri (WebView2) app. Its class matched no rule, so
+        it fell through to character typing and failed six inserts in a row on
+        2026-08-23 before one finally verified."""
+        self._target(monkeypatch, "Tauri Window", "fd-scaffold.exe")
+        assert inject._decide_method(1) == "ctrl_v"
+
+    def test_tauri_also_gets_the_webview_settle_delay(self):
+        assert any("Tauri" in s for s in inject._SLOW_FOCUS_CLASSES_SUBSTR)
+
+    def test_a_plain_win32_control_still_gets_typed(self, monkeypatch):
+        self._target(monkeypatch, "Notepad", "notepad.exe")
+        assert inject._decide_method(1) == "type"
+
+    def test_a_per_app_override_wins_and_accepts_every_method(self, monkeypatch):
+        self._target(monkeypatch, "Notepad", "notepad.exe")
+        for method in inject.PASTE_METHODS:
+            monkeypatch.setattr(inject, "_per_app_paste", {"notepad.exe": method})
+            assert inject._decide_method(1) == method
+
+    def test_an_app_pinned_to_a_terminal_keystroke_counts_as_a_terminal(self, monkeypatch):
+        self._target(monkeypatch, "Notepad", "notepad.exe")
+        for method in ("ctrl_shift_v", "shift_insert"):
+            monkeypatch.setattr(inject, "_per_app_paste", {"notepad.exe": method})
+            assert inject._is_terminal(1) is True
+
+    def test_an_unknown_override_is_ignored(self, monkeypatch):
+        self._target(monkeypatch, "Notepad", "notepad.exe")
+        monkeypatch.setattr(inject, "_per_app_paste", {"notepad.exe": "telepathy"})
+        assert inject._decide_method(1) == "type"
+
+
+class TestShiftInsertKeystroke:
+    """THE NUMPAD-0 TRAP. MapVirtualKey(VK_INSERT) returns scan 0x52, and scan
+    0x52 WITHOUT the extended bit is numpad 0. Sent that way, a Shift+Insert
+    paste types a literal "0" into the target whenever NumLock is on. Same
+    scan-code shadowing that made the numpad "." collide with Delete."""
+
+    def test_insert_carries_the_extended_flag(self):
+        inp = inject._make_key_input(inject._VK_INSERT, key_up=False)
+        assert inp.ki.dwFlags & inject._KEYEVENTF_EXTENDED
+
+    def test_the_key_up_carries_it_too(self):
+        inp = inject._make_key_input(inject._VK_INSERT, key_up=True)
+        assert inp.ki.dwFlags & inject._KEYEVENTF_EXTENDED
+        assert inp.ki.dwFlags & inject._KEYEVENTF_KEYUP
+
+    def test_ordinary_keys_are_not_marked_extended(self):
+        for vk in (inject._VK_CONTROL, inject._VK_SHIFT, inject._VK_V):
+            inp = inject._make_key_input(vk, key_up=False)
+            assert not (inp.ki.dwFlags & inject._KEYEVENTF_EXTENDED), hex(vk)
+
+    def test_the_paste_path_sends_shift_plus_insert(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "shift_insert")
+        monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: False)
+        monkeypatch.setattr(inject, "_force_foreground", lambda h: None)
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_clipboard_snapshot", lambda: [])
+        monkeypatch.setattr(inject, "_clipboard_get_text", lambda: "old")
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
+        monkeypatch.setattr(inject, "_send_keystroke",
+                            lambda holds, main: sent.append((tuple(holds), main)) or 4)
+        monkeypatch.setattr(inject.threading, "Thread",
+                            lambda *a, **k: MagicMock())
+        _win32gui.IsWindow.return_value = True
+        inject.inject_text("hello", 1)
+        assert sent == [((inject._VK_SHIFT,), inject._VK_INSERT)]

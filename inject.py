@@ -74,7 +74,16 @@ _retain_on_unconfirmed = True
 # above are far too tight for an RDP target.
 _rdp_clipboard_settle_ms = 250
 _rdp_clipboard_restore_delay_ms = 3000
-_per_app_paste: dict = {}   # exe_name_lower → "ctrl_v" | "ctrl_shift_v"
+# How a target receives text. "type" is SendInput KEYEVENTF_UNICODE; the rest
+# put the text on the clipboard and send that app's paste keystroke.
+PASTE_METHODS = ("type", "ctrl_v", "ctrl_shift_v", "shift_insert")
+# Terminals get Shift+Insert, not Ctrl+Shift+V. Legacy conhost (cmd.exe, the
+# old PowerShell console) has no Ctrl+Shift+V binding at all, which is why
+# right-click was the only paste that worked there. Shift+Insert is bound in
+# conhost, Windows Terminal, mintty, ConEmu and Alacritty alike, so it is the
+# one keystroke that covers every terminal we detect.
+_TERMINAL_PASTE_METHOD = "shift_insert"
+_per_app_paste: dict = {}   # exe_name_lower → one of PASTE_METHODS
 _electron_paste_method = "ctrl_v"  # how to paste into Electron/Chromium (VS Code, Cursor, browsers)
 _paste_mode = "auto"               # "auto" = inject into target; "clipboard_only" = copy + notify
 
@@ -90,6 +99,7 @@ _KEYEVENTF_UNICODE  = 0x0004
 _KEYEVENTF_SCANCODE = 0x0008
 _KEYEVENTF_EXTENDED = 0x0001
 
+_VK_INSERT = 0x2D
 _VK_RETURN = 0x0D
 _VK_TAB    = 0x09
 _VK_BACK   = 0x08
@@ -130,6 +140,7 @@ _SLOW_FOCUS_CLASSES_SUBSTR = (
     "MozillaWindowClass", # Firefox
     "TscShellContainer",  # mstsc.exe (RDP client)
     "RAIL_WINDOW",        # RDP RAIL apps
+    "Tauri Window",       # Tauri apps (WebView2) — Flightdeck
 )
 
 
@@ -165,6 +176,15 @@ class _INPUT(ctypes.Structure):
     ]
 
 
+# Virtual keys that MUST carry LLKHF_EXTENDED, because their scan code is
+# shared with a numpad key and the extended bit is the only thing telling them
+# apart. MapVirtualKey(VK_INSERT) returns 0x52, and scan 0x52 WITHOUT the
+# extended bit is numpad 0 — so a Shift+Insert paste sent without this types a
+# literal "0" into the target whenever NumLock is on. Same shadowing that made
+# the numpad "." collide with Delete (hotkey.py).
+_EXTENDED_VKS = frozenset({_VK_INSERT})
+
+
 def _make_key_input(vk: int, key_up: bool) -> _INPUT:
     hkl = _user32.GetKeyboardLayout(0)
     scan = (_user32.MapVirtualKeyExW(vk, _MAPVK_VK_TO_VSC, hkl) or
@@ -172,7 +192,8 @@ def _make_key_input(vk: int, key_up: bool) -> _INPUT:
     flags = _KEYEVENTF_SCANCODE
     if key_up:
         flags |= _KEYEVENTF_KEYUP
-    # Extended keys (right ctrl/alt, arrows, etc.) — not strictly needed for V/Ctrl/Shift
+    if vk in _EXTENDED_VKS:
+        flags |= _KEYEVENTF_EXTENDED
     inp = _INPUT()
     inp.type = _INPUT_KEYBOARD
     inp.ki = _KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=0)
@@ -958,10 +979,11 @@ def _get_exe_name(hwnd: int) -> str:
 def _is_terminal(hwnd: int) -> bool:
     if _get_class(hwnd) in _TERMINAL_CLASSES:
         return True
-    # Check per-app override first — if user pinned this exe to ctrl_shift_v it acts as terminal
+    # Check per-app override first — an exe the user pinned to a terminal paste
+    # keystroke is being told it is a terminal, so treat it as one.
     exe = _get_exe_name(hwnd)
     override = _per_app_paste.get(exe)
-    if override == "ctrl_shift_v":
+    if override in ("ctrl_shift_v", "shift_insert"):
         return True
     return False
 
@@ -1295,25 +1317,26 @@ def should_restore_clipboard(status: str, retain_on_unconfirmed: bool | None = N
 
 
 def _decide_method(hwnd: int) -> str:
-    """Pick the paste method for this target. Returns 'type' | 'ctrl_v' | 'ctrl_shift_v'."""
+    """Pick the paste method for this target. Returns one of PASTE_METHODS."""
     exe = _get_exe_name(hwnd)
     override = _per_app_paste.get(exe)
-    if override in ("type", "ctrl_v", "ctrl_shift_v"):
+    if override in PASTE_METHODS:
         return override
     if _is_terminal(hwnd):
-        # Terminals work well with Ctrl+Shift+V clipboard paste and benefit from
-        # the speed when output is long. Don't slow them down by typing.
-        return "ctrl_shift_v"
+        # Clipboard paste, not typing: terminals benefit from the speed on long
+        # output. See _TERMINAL_PASTE_METHOD for why it is Shift+Insert.
+        return _TERMINAL_PASTE_METHOD
     if _is_rdp(hwnd):
         # Synthetic Unicode typing is unreliable over RDP — the KEYEVENTF_UNICODE
         # events frequently don't propagate into the remote session. Clipboard
         # Ctrl+V matches what works when pasting into a remote desktop by hand.
         return "ctrl_v"
     cls = _get_class(hwnd)
-    if any(s in cls for s in ("Chrome_WidgetWin", "MozillaWindowClass")):
-        # VS Code / Cursor / Electron / browsers: clipboard Ctrl+V is the reliable
-        # default (typing gets swallowed under focus races). Configurable via
-        # electron_paste_method for users who prefer typing.
+    if any(s in cls for s in ("Chrome_WidgetWin", "MozillaWindowClass", "Tauri Window")):
+        # VS Code / Cursor / Electron / Tauri / browsers: clipboard Ctrl+V is the
+        # reliable default (typing gets swallowed under focus races). Tauri joined
+        # this list 2026-08-23: Flightdeck fell through to typing and failed six
+        # inserts in a row. Configurable via electron_paste_method.
         return _electron_paste_method
     # Default: Unicode typing for plain Win32 controls / dialogs.
     return "type"
@@ -1553,8 +1576,8 @@ def inject_text(text: str, hwnd: int) -> str:
         warn("inject", "type path inserted 0 chars; falling back to clipboard Ctrl+V")
         method = "ctrl_v"
 
-    # Clipboard paste path — terminals (Ctrl+Shift+V), RDP/Electron (Ctrl+V), and the
-    # type-path fallback above.
+    # Clipboard paste path — terminals (Shift+Insert), RDP/Electron/Tauri
+    # (Ctrl+V), and the type-path fallback above.
     snapshot = _clipboard_snapshot()  # save ALL formats (CF_HDROP, CF_DIB, HTML, etc.)
     if not _clipboard_set_text(text):
         _notify_failure("Could not place text on clipboard")
@@ -1573,6 +1596,8 @@ def inject_text(text: str, hwnd: int) -> str:
 
     if method == "ctrl_shift_v":
         n = _send_keystroke([_VK_CONTROL, _VK_SHIFT], _VK_V)
+    elif method == "shift_insert":
+        n = _send_keystroke([_VK_SHIFT], _VK_INSERT)
     else:
         n = _send_keystroke([_VK_CONTROL], _VK_V)
 
@@ -1581,7 +1606,7 @@ def inject_text(text: str, hwnd: int) -> str:
         # SendInput inserted nothing at all — it's fully blocked for this target
         # (not just ignored). Last resort: WM_PASTE goes through SendMessage, not
         # SendInput, so it can still reach a plain Win32 edit control.
-        warn("inject", "Ctrl+V keystroke blocked by SendInput; trying WM_PASTE fallback")
+        warn("inject", f"{method} keystroke blocked by SendInput; trying WM_PASTE fallback")
         if not _try_wm_paste(hwnd):
             paste_blocked = True
             _notify_failure("Paste blocked — text is in your clipboard, press Ctrl+V to paste")

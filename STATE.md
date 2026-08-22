@@ -13,19 +13,23 @@ Scope ruled 2026-07-25: dictation in, read-aloud out, nothing else. No LLM runs 
 
 Insert reliability overhaul shipped 2026-08-22. An insert is only reported as landed when it is verified; otherwise the dictation stays on the clipboard and parked in `stash.py` with a tray dot, so it is never destroyed. `targetprobe.py` decides whether a field can receive text (Win32 caret, then UI Automation) and a confident "no field" refuses the insert rather than typing into nothing. Notices now draw on the monitor the target is on. Design record: `PASTE_UX_PLAN.md`.
 
-**Place key: DISABLED 2026-08-23** (`place_key: ""`). The reserved numpad `.` was pressing itself: `inject.py` types via SendInput `KEYEVENTF_UNICODE`, which puts the UTF-16 code unit in `wScan`, and `ord("S") == 83` is the numpad `.` scan code. Every capital S in a dictation was swallowed out of the insert (so verification failed and the stash stayed unconsumed) and re-fired place mode, which typed the same text again. One press, 14 inserts. Fixed in `d3af1e2` and the key left off pending the redesign below.
-Place mode still reaches the tray `Place last dictation` item and the recovery panel.
+**The reserved place key is REMOVED** (2026-08-23). It was pressing itself: `inject.py` types via SendInput `KEYEVENTF_UNICODE`, which puts the UTF-16 code unit in `wScan`, and `ord("S") == 83` is the numpad `.` scan code. Every capital S in a dictation was swallowed out of the insert, so verification failed and the stash stayed unconsumed, then re-fired place mode, which typed the same text again. One press, 14 inserts. Do not reinstate an unmodified global key: no shipped dictation tool has one ([[research/2026-08-23-dictation-insert-patterns|dossier]]). The confirm gesture is Enter or Insert inside the preview panel, which already has focus.
+Place mode keeps the tray `Place last dictation` item, the recovery panel, the optional `place_hotkey` chord and click-to-place.
+
+**Terminals now paste with Shift+Insert, not Ctrl+Shift+V** (2026-08-23). Legacy conhost has no Ctrl+Shift+V binding, which is why right-click was the only paste that worked; a control run typed a literal `^V` into the console. Shift+Insert is bound in conhost, Windows Terminal, mintty, ConEmu and Alacritty alike. Verified end to end against a live conhost by reading the console screen buffer back. `VK_INSERT` must carry `KEYEVENTF_EXTENDED` or scan 0x52 is numpad 0 and it types a literal "0" with NumLock on.
+Tauri windows (`Tauri Window` class, Flightdeck) now route to clipboard Ctrl+V with the webview settle delay. They matched no rule and fell through to character typing, which failed six inserts in a row on 2026-08-23.
+
 Also on: `ctrl+shift+u` unstick modifiers, tray `Unstick modifiers`.
 
-563 tests green. main in sync, `d3af1e2` not yet pushed.
+524 tests green (51 reserved-key tests removed, 12 paste-method tests added). Not yet pushed.
 
 ## Next steps
 
 - [ ] Delete the empty `D:\Dev\ai\projects\active\voice-dictation` folder. It survived the rename because a shell was parked inside it, which pins a directory on Windows.
 - [ ] Confirm the Stop hook's `state_check.py` still fires after the rename; it may point at the old path.
-- [ ] Decide the confirm-gesture redesign ([[research/2026-08-23-dictation-insert-patterns|insert patterns dossier]]). No shipped dictation tool reserves an unmodified global key; all 10 surveyed auto-insert on release into the HWND captured at hotkey-down. Options in preference order: confirm with Enter inside the already-focused preview panel (kills the global-key problem entirely), or `RegisterHotKey` + `MOD_NOREPEAT` on a chord (the OS de-duplicates auto-repeat, so a storm is impossible by construction). Do not re-enable the low-level hook for this.
-- [ ] Settle the gap ledger item that needs hardware: does `RegisterHotKey` suppress the key from the foreground app? 20-line script, Notepad, see if a `.` appears.
-- [ ] Hook watchdog. Windows silently removes a low-level hook that overruns `LowLevelHooksTimeout` and never tells the app. That is a stuck-key generator on the hold-to-record hook too, which is staying.
+- [ ] Balu to confirm in real use: dictate into a terminal and into Flightdeck, both should land first go now.
+- [ ] Hook watchdog. Windows silently removes a low-level hook that overruns `LowLevelHooksTimeout` and never tells the app. The reserved-key hook is gone but the hold-to-record path still uses the `keyboard` library's shared hook, so the failure mode survives.
+- [ ] Consider Handy's other two insert settings: a tunable paste delay (defaults to 60ms there) and an explicit clipboard-restore toggle.
 - [ ] Hands-on, needs no fullscreen game running: target ring and armed overlay render, are click-through, correct at 125% DPI on the second monitor; a toast lands on DISPLAY2; RDP behaviour.
 - [ ] Five ambiguous mistranscriptions under Open bugs need Balu's ear before they become corrections.
 - [ ] Balu to answer the 3 open questions at the end of `STUDY_MODE_PLAN.md` before Study Mode P3 (transport controls).

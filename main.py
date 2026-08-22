@@ -126,14 +126,9 @@ _CONFIG_DEFAULTS = {
     "clipboard_retain_on_unconfirmed": True,  # keep the dictation on the clipboard when we cannot confirm it landed
     "target_probe":                True,    # probe the target before/after inserting; False = pre-plan behaviour
     "target_ring":                 True,    # outline the resolved target while recording
-    # Place mode's everyday entry point: ONE key, no modifiers, reserved by
-    # Quiett while it runs (hotkey.RESERVED_KEYS lists the names). "" disables.
-    # Disabled 2026-08-23 on Balu's instruction while the reserved-key
-    # approach is re-thought against how shipped dictation apps do this.
-    # Place mode still reaches the tray item and the recovery panel.
-    "place_key":                   "",
-    # Optional extra chord for place mode, off by default now the key above
-    # exists. NEVER pick a ctrl+alt+<x> combo here: ctrl+alt is the record hold
+    # Optional chord for place mode, off by default: the preview panel's own
+    # Enter/Insert is the confirm gesture, so no global key is needed for the
+    # normal flow. NEVER pick a ctrl+alt+<x> combo here: ctrl+alt is the record hold
     # and hotkey._on_key only tests that every modifier is down, so extra keys
     # are ignored and the combo starts a recording before it does its own job.
     "place_hotkey":                "",
@@ -291,16 +286,6 @@ def _validate_config(raw: dict) -> dict:
                          ("unstick_hotkey", "ctrl+shift+u")):
         value = cfg.get(key)
         cfg[key] = value.strip().lower() if isinstance(value, str) and value.strip() else default
-    # place_key names a physical key Quiett reserves outright, so an unknown
-    # name cannot be honoured at all: fall back rather than silently leaving
-    # place mode with no key. "" is a deliberate "no reserved key".
-    raw_place_key = cfg.get("place_key", "")
-    place_key = raw_place_key.strip().lower() if isinstance(raw_place_key, str) else None
-    if place_key is None or (place_key and place_key not in hotkey.RESERVED_KEYS):
-        warn("main", f"place_key {raw_place_key!r} is not a key Quiett can reserve, "
-                     "reserving nothing")
-        place_key = ""
-    cfg["place_key"] = place_key
     return cfg
 
 
@@ -403,9 +388,9 @@ def insert_text_now(text: str, hwnd: int = 0, submit: bool = False,
     work: the user focuses the field they wanted, presses "Place it", and the
     text goes there rather than back into whatever was in front before.
 
-    escalate=False returns the status and shows nothing, for the one caller
-    that has its own answer to a refusal (the place key, which arms instead).
-    The stash half of the decision still applies either way.
+    escalate=False returns the status and shows nothing, for a caller with its
+    own answer to a refusal. The stash half of the decision still applies
+    either way.
     """
     # Not stripped: a panel insert with "append" on carries a leading space
     # that the retry has to preserve.
@@ -474,40 +459,6 @@ def toggle_place_mode() -> str:
         return "empty"
     _arm_place_mode(text)
     return "armed"
-
-
-def place_key_pressed() -> str:
-    """The reserved place key (the numpad "." by default). One key, no
-    modifiers, because this is reached for constantly.
-
-    Placing beats arming as the default outcome: by the time the user hits it
-    they have already clicked into the field they want, so the honest reading
-    of the press is "put it here". Arming, with the overlay and the pick-by-
-    click, is the fallback for the one case where the pre-flight probe is
-    CONFIDENT there is no field to place into. Anything less than confident
-    still inserts, which is the rule that keeps working apps working.
-
-    Returns "disarmed" | "empty" | "placed" | "armed" for the log and the tests.
-    """
-    if place_mode_armed():
-        disarm_place_mode("place key pressed again")
-        return "disarmed"
-
-    item = stash.get() or {}
-    text = item.get("text", "")
-    if not stash.has_unconsumed() or not text.strip():
-        preview.show_toast("Nothing to place yet")
-        return "empty"
-
-    # escalate=False: a refusal here is not a dead end, it is the cue to arm.
-    # One press, one outcome, one notice - the recovery panel would be a second.
-    status = insert_text_now(text, escalate=False)
-    if status == _REFUSED_NOT_EDITABLE:
-        log("main", "place key: no field had focus, arming place mode instead")
-        _arm_place_mode(text)
-        return "armed"
-    escalate_insert(text, status)
-    return "placed"
 
 
 def _cancel_recording_for_place() -> None:
@@ -928,19 +879,6 @@ def main() -> None:
     _place_hk = _cfg.get("place_hotkey", "")
     if _place_hk:
         hotkey.register_tap(_place_hk, toggle_place_mode)
-
-    # ...and the everyday entry point: one reserved key, no modifiers, on its
-    # own low-level hook so the key is swallowed before the focused app sees
-    # it. The nav-cluster Delete shares scan code 83 with the numpad "." and is
-    # told apart by the extended flag, so it keeps working (hotkey.py).
-    _place_key = _cfg.get("place_key", "")
-    if _place_key:
-        if hotkey.register_reserved_key(_place_key, place_key_pressed):
-            _scan = hotkey.RESERVED_KEYS.get(_place_key, ("?",))[0]
-            log("main", f"reserved place key: {_place_key} (scan {_scan})")
-        else:
-            log_error("main", f"place key {_place_key} could not be reserved; place mode "
-                              "is only on the tray and the optional chord until restart")
 
     import keyboard as _kb
 

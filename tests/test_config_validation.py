@@ -112,39 +112,11 @@ class TestReadAloudConfig:
 
 
 
-class TestPlaceKeyValidation:
-    """place_key names a physical key Quiett reserves outright, so anything
-    that is not a name this build can reserve resolves to "" — reserve nothing
-    — rather than to a guess. Reserving a key nobody asked for is how the
-    2026-08-23 repeat storm reached a user in the first place."""
-
-    def test_nothing_is_reserved_by_default(self):
-        """Disabled 2026-08-23 while the reserved-key approach is re-thought.
-        Place mode still reaches the tray item and the recovery panel."""
-        assert main._validate_config({})["place_key"] == ""
-
-    def test_a_known_name_is_kept_and_normalised(self):
-        assert main._validate_config({"place_key": "  Numpad_Plus "})["place_key"] == "numpad_plus"
-
-    def test_an_unknown_name_reserves_nothing(self):
-        assert main._validate_config({"place_key": "f13"})["place_key"] == ""
-
-    def test_a_non_string_reserves_nothing(self):
-        assert main._validate_config({"place_key": 83})["place_key"] == ""
-        assert main._validate_config({"place_key": None})["place_key"] == ""
-
-    def test_an_empty_string_disables_it(self):
-        assert main._validate_config({"place_key": ""})["place_key"] == ""
-        assert main._validate_config({"place_key": "   "})["place_key"] == ""
-
-    def test_every_reservable_name_survives_validation(self):
-        import hotkey
-        for name in hotkey.RESERVED_KEYS:
-            assert main._validate_config({"place_key": name})["place_key"] == name
-
-    def test_the_chord_no_longer_defaults_to_anything(self):
-        """One key replaced it. The chord stays supported for anyone who wants
-        an extra one, it just is not the way in any more."""
+class TestPlaceHotkeyValidation:
+    def test_the_chord_does_not_default_to_anything(self):
+        """The preview panel's own Enter/Insert is the confirm gesture, so the
+        normal flow needs no global key at all. The chord stays supported for
+        anyone who wants one."""
         assert main._validate_config({})["place_hotkey"] == ""
 
     def test_a_chord_is_still_honoured_when_set(self):

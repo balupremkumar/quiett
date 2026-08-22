@@ -83,6 +83,13 @@ Insert failure is raised to that class so a missed insert is heard, not just dra
 
 ## 4. Place mode — arm, click, insert (P1)
 
+> **Amended 2026-08-23. The reserved single key is gone; place mode itself stays.**
+> Between this plan and now, place mode's entry point became one reserved unmodified key (numpad `.`) on a dedicated `WH_KEYBOARD_LL` hook.
+> That is removed. It could not be told apart from the app's own typing: `inject.py` types via `SendInput` `KEYEVENTF_UNICODE`, which carries the UTF-16 code unit in `wScan`, and `ord("S") == 83` is the numpad `.` scan code.
+> The hook swallowed the S out of the text it was inserting, so verification failed and the stash stayed unconsumed, then re-fired place mode, which typed the same text again. One press produced 14 inserts.
+> The design finding matters as much as the bug: no shipped dictation tool reserves an unmodified global key, and all ten surveyed auto-insert on release. See the dossier at `research/2026-08-23-dictation-insert-patterns` in the vault.
+> The confirm gesture now lives where it always belonged, on Enter or Insert inside the preview panel, which already has focus. Place mode keeps its tray item, its recovery panel, the optional `place_hotkey` chord and the click-to-place capture. If a global confirm is ever needed again, use `RegisterHotKey` with `MOD_NOREPEAT`, never a low-level hook.
+
 The requested "hold a key, pick a field, paste" flow, built as arm-then-click.
 Chosen over hold-and-release deliberately: holding a modifier over RDP is the same mechanism that latches Ctrl remotely, so the fix must not depend on it.
 
@@ -190,7 +197,7 @@ Five chunks. P1 is the whole answer to "I'm missing the inserts"; P2 is the answ
 |---|---|---|---|
 | A | Clipboard retention + `stash.py` + tray state | `inject.py`, `stash.py`, `tray.py`, `main.py` | P1 |
 | B | Monitor-correct toasts + edge flash + escalation panel | `winfx.py`, `preview.py`, `main.py` | P1 |
-| C | Place mode: hotkey, armed overlay, mouse hook, insert | `hotkey.py`, `preview.py`, `main.py` | P1 |
+| C | Place mode: hotkey, armed overlay, mouse hook, insert | `hotkey.py`, `preview.py`, `main.py` | P1 (reserved key removed 2026-08-23) |
 | D | `targetprobe.py`, target ring, badge label, post-verify | `targetprobe.py`, `preview.py`, `inject.py`, `main.py` | P2 |
 | E | RDP round 5: foreground hook, unstick hotkey, logging, README | `inject.py`, `hotkey.py`, `tray.py`, `README.md` | P2 |
 
