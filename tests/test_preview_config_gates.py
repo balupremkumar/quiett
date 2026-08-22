@@ -49,6 +49,33 @@ class TestPanelAcrylicGate:
         assert preview._panel_acrylic_enabled() is False
 
 
+class TestTargetProbeGate:
+    """PASTE_UX_PLAN section 7: target_probe: false reverts to pre-plan
+    behaviour, so the ring stops claiming to know what the focused element is."""
+
+    def test_default_true_when_key_absent(self, config_file):
+        config_file({})
+        assert preview._target_probe_enabled() is True
+
+    def test_explicit_false(self, config_file):
+        config_file({"target_probe": False})
+        assert preview._target_probe_enabled() is False
+
+    def test_missing_file_defaults_true(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(preview, "_CONFIG_FILE", str(tmp_path / "nope.json"))
+        assert preview._target_probe_enabled() is True
+
+
+class TestTargetRingGate:
+    def test_default_true_when_key_absent(self, config_file):
+        config_file({})
+        assert preview._target_ring_enabled() is True
+
+    def test_explicit_false(self, config_file):
+        config_file({"target_ring": False})
+        assert preview._target_ring_enabled() is False
+
+
 class TestThemeFlattening:
     """The palette preview.py hands out must trace straight back to
     theme.py's Tk-flat tokens — no second hand-maintained palette."""

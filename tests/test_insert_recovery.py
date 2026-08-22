@@ -15,13 +15,19 @@ import pytest
 sys.modules.pop("main", None)
 
 import main  # noqa: E402
+import stash  # noqa: E402
 import tray  # noqa: E402
 
 
 class FakeInject:
     INSERTED  = "inserted"
+    INSERTED_UNCONFIRMED = "inserted_unconfirmed"
     CLIPBOARD = "clipboard"
     FAILED    = "failed"
+
+    @staticmethod
+    def landed(status):
+        return status in (FakeInject.INSERTED, FakeInject.INSERTED_UNCONFIRMED)
 
     def __init__(self, status="inserted", foreground=0, usable=False):
         self.status = status
@@ -50,12 +56,17 @@ class FakeInject:
 class FakePreview:
     def __init__(self):
         self.toasts = []
+        self.recoveries = []
 
     def show_toast(self, message, kind="info", action_label="", action_cb=None,
-                   dwell_ms=0):
+                   dwell_ms=0, target_hwnd=0):
         self.toasts.append({"message": message, "kind": kind,
                             "action_label": action_label, "action_cb": action_cb,
                             "dwell_ms": dwell_ms})
+
+    def show_recovery_panel(self, text, reason, on_place, on_dismiss):
+        self.recoveries.append({"text": text, "reason": reason,
+                                "on_place": on_place, "on_dismiss": on_dismiss})
 
 
 @pytest.fixture
@@ -66,6 +77,8 @@ def fakes(monkeypatch):
     monkeypatch.setattr(main, "preview", fp)
     monkeypatch.setattr(main, "_cfg", {})
     monkeypatch.setattr(main, "_recording_target", {"hwnd": 0})
+    monkeypatch.setattr(stash, "_item", None)
+    stash.set_change_callback(None)
     return fi, fp
 
 
@@ -100,6 +113,7 @@ class TestInsertTextNow:
         assert main.insert_text_now("hello") == FakeInject.INSERTED
         assert fi.calls == [("hello", 4242)]
         assert fp.toasts == []
+        assert fp.recoveries == []
 
     def test_explicit_target_is_used_as_given(self, fakes):
         fi, _ = fakes
@@ -126,26 +140,65 @@ class TestInsertTextNow:
         main.insert_text_now("hello", submit=True)
         assert fi.submit_calls == [("hello", 4242)]
 
-    def test_clipboard_fallback_shows_retry_toast(self, fakes):
+    def test_clipboard_fallback_opens_the_recovery_panel(self, fakes):
         fi, fp = fakes
         fi.status = FakeInject.CLIPBOARD
         fi.foreground = 4242
         assert main.insert_text_now("hello") == FakeInject.CLIPBOARD
-        assert len(fp.toasts) == 1
-        toast = fp.toasts[0]
-        assert toast["kind"] == "warn"
-        assert toast["action_label"] == "Insert again"
-        assert toast["action_cb"] is not None
-        assert toast["dwell_ms"] == main._INSERT_RETRY_DWELL_MS
-        assert "clipboard" in toast["message"].lower()
+        assert fp.toasts == []          # the corner toast is for notices now
+        assert len(fp.recoveries) == 1
+        panel = fp.recoveries[0]
+        assert panel["text"] == "hello"
+        assert "clipboard" in panel["reason"].lower()
+        assert panel["on_place"] is not None
+        assert panel["on_dismiss"] is not None
 
-    def test_hard_failure_shows_retry_toast(self, fakes):
+    def test_hard_failure_opens_the_recovery_panel(self, fakes):
         fi, fp = fakes
         fi.status = FakeInject.FAILED
         fi.foreground = 4242
         assert main.insert_text_now("hello") == FakeInject.FAILED
-        assert len(fp.toasts) == 1
-        assert fp.toasts[0]["action_label"] == "Insert again"
+        assert len(fp.recoveries) == 1
+        assert "clipboard copy" in fp.recoveries[0]["reason"].lower()
+
+    def test_unconfirmed_insert_says_nothing(self, fakes):
+        """Corrected escalation policy (PASTE_UX_PLAN section 5): "no signal"
+        is not failure. Terminals, RDP and every app without an accessibility
+        layer land here, so escalating would put a failure notice on most
+        successful inserts. Retention plus the tray dot is the whole response."""
+        fi, fp = fakes
+        fi.status = FakeInject.INSERTED_UNCONFIRMED
+        fi.foreground = 4242
+        assert main.insert_text_now("hello") == FakeInject.INSERTED_UNCONFIRMED
+        assert fp.toasts == []
+        assert fp.recoveries == []
+
+    def test_unconfirmed_insert_stays_quiet_when_retention_is_off(self, fakes, monkeypatch):
+        """Unconfirmed is silent either way; retention only decides whether the
+        previous clipboard comes back, which is inject's call, not this one."""
+        fi, fp = fakes
+        fi.status = FakeInject.INSERTED_UNCONFIRMED
+        fi.foreground = 4242
+        monkeypatch.setattr(main, "_cfg", {"clipboard_retain_on_unconfirmed": False})
+        main.insert_text_now("hello")
+        assert fp.toasts == []
+        assert fp.recoveries == []
+
+    def test_unconfirmed_insert_leaves_the_stash_armed(self, fakes):
+        fi, _ = fakes
+        fi.status = FakeInject.INSERTED_UNCONFIRMED
+        fi.foreground = 4242
+        stash.put("hello", 4242)
+        main.insert_text_now("hello")
+        assert stash.has_unconsumed()
+
+    def test_confirmed_insert_consumes_the_stash(self, fakes):
+        fi, _ = fakes
+        fi.status = FakeInject.INSERTED
+        fi.foreground = 4242
+        stash.put("hello", 4242)
+        main.insert_text_now("hello")
+        assert not stash.has_unconsumed()
 
     def test_clipboard_only_mode_stays_quiet(self, fakes, monkeypatch):
         """Copying instead of inserting is the whole point of that mode."""
@@ -154,41 +207,51 @@ class TestInsertTextNow:
         monkeypatch.setattr(main, "_cfg", {"paste_mode": "clipboard_only"})
         main.insert_text_now("hello")
         assert fp.toasts == []
+        assert fp.recoveries == []
 
 
 class TestRetryAction:
-    def test_retry_reinserts_into_the_window_focused_at_click_time(self, fakes):
+    def test_place_it_reinserts_into_the_window_focused_at_click_time(self, fakes):
         fi, fp = fakes
         fi.status = FakeInject.CLIPBOARD
         fi.foreground = 4242
         main.insert_text_now("hello")
 
-        # User clicks into a different field, then presses "Insert again".
+        # User clicks into a different field, then presses "Place it".
         fi.foreground = 777
         fi.status = FakeInject.INSERTED
         fi.done.clear()
-        fp.toasts[0]["action_cb"]()
+        fp.recoveries[0]["on_place"]()
         assert fi.done.wait(2.0), "retry never ran"
         assert fi.calls[-1] == ("hello", 777)
 
-    def test_retry_that_fails_again_offers_another_retry(self, fakes):
+    def test_a_retry_that_fails_again_reopens_the_panel(self, fakes):
         fi, fp = fakes
         fi.status = FakeInject.CLIPBOARD
         fi.foreground = 4242
         main.insert_text_now("hello")
         fi.done.clear()
-        fp.toasts[0]["action_cb"]()
+        fp.recoveries[0]["on_place"]()
         assert fi.done.wait(2.0)
-        assert len(fp.toasts) == 2
-        assert fp.toasts[1]["action_label"] == "Insert again"
+        assert len(fp.recoveries) == 2
+
+    def test_dismiss_drops_the_parked_copy(self, fakes):
+        fi, fp = fakes
+        fi.status = FakeInject.CLIPBOARD
+        fi.foreground = 4242
+        stash.put("hello", 4242)
+        main.insert_text_now("hello")
+        assert stash.has_unconsumed()      # armed until the user says otherwise
+        fp.recoveries[0]["on_dismiss"]()
+        assert stash.get() is None
 
 
 class TestPreviewWiring:
     def test_preview_failure_callback_signature_matches(self):
-        """preview calls back with (text, status) — main's toast helper takes
-        exactly that."""
+        """preview calls back with (text, status), which is exactly what
+        main's escalation entry point takes."""
         import inspect
-        assert list(inspect.signature(main.show_insert_retry_toast).parameters) == \
+        assert list(inspect.signature(main.escalate_insert).parameters) == \
             ["text", "status"]
 
     def test_setter_stores_the_callback(self):
@@ -248,3 +311,71 @@ class TestInsertLastDictation:
         monkeypatch.setattr(tray, "notify", lambda title, msg: None)
         monkeypatch.setattr(tray, "_on_insert_last", lambda t: None)
         tray._insert_last(None, None)  # must not raise
+
+
+class TestTrayStashItem:
+    """The tray reflects a parked dictation: dot on the icon, "Place last
+    dictation" as the first menu item."""
+
+    @pytest.fixture(autouse=True)
+    def clean_stash(self, monkeypatch):
+        monkeypatch.setattr(stash, "_item", None)
+        stash.set_change_callback(None)
+        yield
+        stash.set_change_callback(None)
+        stash._item = None
+
+    def test_hidden_until_something_is_parked(self):
+        assert not tray._has_stashed()
+        stash.put("parked text", 4242)
+        assert tray._has_stashed()
+
+    def test_consumed_item_hides_it_again(self):
+        stash.put("parked text", 4242)
+        stash.mark_consumed()
+        assert not tray._has_stashed()
+
+    def test_label_carries_the_text_inline(self):
+        stash.put("remember the milk", 4242)
+        assert tray._place_last_label() == "Place last dictation: remember the milk"
+
+    def test_label_truncates_long_text(self):
+        stash.put("x" * 200, 4242)
+        label = tray._place_last_label()
+        body = label.split(": ", 1)[1]
+        assert len(body) == tray._STASH_LABEL_TRUNCATE
+        assert body.endswith("\u2026")
+
+    def test_label_collapses_newlines(self):
+        """A multi-line dictation must not break the menu row."""
+        stash.put("first line\nsecond line", 4242)
+        assert tray._place_last_label() == "Place last dictation: first line second line"
+
+    def test_placing_sends_the_stashed_text_not_the_newest_history_entry(self, monkeypatch):
+        import history
+        monkeypatch.setattr(history, "load", lambda: [{"text": "some newer thing"}])
+        stash.put("the parked one", 4242)
+        sent = []
+        monkeypatch.setattr(tray, "_on_insert_last", lambda t: sent.append(t))
+        tray._place_last(None, None)
+        assert sent == ["the parked one"]
+
+    def test_placing_an_empty_stash_notifies_instead(self, monkeypatch):
+        notes, sent = [], []
+        monkeypatch.setattr(tray, "notify", lambda title, msg: notes.append(msg))
+        monkeypatch.setattr(tray, "_on_insert_last", lambda t: sent.append(t))
+        tray._place_last(None, None)
+        assert sent == []
+        assert notes == ["Nothing to place"]
+
+    def test_icon_carries_a_dot_while_parked(self):
+        assert tray._icon_for("idle") is tray._ICONS["idle"]
+        stash.put("parked text", 4242)
+        assert tray._icon_for("idle") is tray._STASH_ICONS["idle"]
+
+    def test_a_broken_stash_never_takes_the_menu_down(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("stash exploded")
+
+        monkeypatch.setattr(stash, "has_unconsumed", _boom)
+        assert tray._has_stashed() is False

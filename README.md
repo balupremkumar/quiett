@@ -43,6 +43,14 @@ The `keyboard` library installs a global low-level keyboard hook. If hotkeys are
 venv\Scripts\python main.py
 ```
 
+## Remote Desktop note
+
+If a modifier stays stuck inside a remote session (mouse scrolling zooms because Ctrl is latched), set
+mstsc → **Local Resources** → **Keyboard** → *Apply Windows key combinations* to **On this computer**.
+RDP sends modifiers in a packet separate from the keystroke they modify, and that packet can arrive late,
+which is a documented source of modifier desync. To clear one that is already stuck, use
+**Tray → More → Unstick modifiers** or press **Ctrl+Alt+Shift+U**.
+
 ## Usage
 
 | Action | Behaviour |

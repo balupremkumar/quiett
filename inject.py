@@ -37,11 +37,38 @@ from logger import log, warn
 
 # inject_text() outcome, so callers can offer a retry instead of the text
 # silently ending up only on the clipboard (or nowhere at all).
+#
+# INSERTED vs INSERTED_UNCONFIRMED is the distinction the app lacked: SendInput
+# accepting our events only means Windows queued them, never that the target
+# consumed them. With no editable element focused the characters go nowhere,
+# and reporting that as success is what destroyed dictations.
 INSERTED  = "inserted"
+INSERTED_UNCONFIRMED = "inserted_unconfirmed"
 CLIPBOARD = "clipboard"
 FAILED    = "failed"
+# Distinct from CLIPBOARD so the recovery panel can say WHY. A plain CLIPBOARD
+# has six different causes; this one means the pre-flight probe was confident
+# there was no editable field, so nothing was ever sent.
+REFUSED_NOT_EDITABLE = "refused_not_editable"
+
+# Pre-flight verdicts (see set_preflight_callback).
+EDITABLE     = "EDITABLE"
+NOT_EDITABLE = "NOT_EDITABLE"
+UNKNOWN      = "UNKNOWN"
+
+
+def landed(status: str) -> bool:
+    """True when the text went out to the target. Not the same as confirmed:
+    an unconfirmed insert probably landed and must not be re-sent, or the user
+    gets it twice."""
+    return status in (INSERTED, INSERTED_UNCONFIRMED)
+
 
 _restore_delay_ms = 150
+# Whether the user's previous clipboard stays dropped when we could not confirm
+# the insert landed. True = never lose the dictation, at the cost of the old
+# clipboard contents. See should_restore_clipboard().
+_retain_on_unconfirmed = True
 # RDP clipboard timing: rdpclip propagates the format list to the remote session
 # asynchronously and serves the data via delayed rendering, so the local timings
 # above are far too tight for an RDP target.
@@ -442,7 +469,224 @@ def _flush_hotkey_modifiers() -> None:
             log("inject", "hotkey ended — force-flushed modifier key-ups with RDP foreground")
             return
         time.sleep(0.1)
-    log("inject", "hotkey ended — RDP never took foreground within 4s, no flush needed")
+    # Naming what IS in front is the whole value of this line. The old version
+    # said only that RDP was not, which is why four rounds of this fix were
+    # argued from no evidence at all.
+    log("inject", "hotkey ended, RDP never took foreground within 4s, no flush "
+                  f"needed; foreground now: {_describe_window(win32gui.GetForegroundWindow())}")
+
+
+# ---------------------------------------------------------------------------
+# Persistent foreground watcher (PASTE_UX_PLAN section 6, RDP round 5).
+#
+# The 4s window above provably never fires: every hotkey release in app.log
+# logged "RDP never took foreground within 4s" while Ctrl stayed latched in the
+# remote session. The client is mstsc, which _is_rdp already matches, so the
+# miss is the window of observation, not the detection. A SetWinEventHook on
+# EVENT_SYSTEM_FOREGROUND has no window at all: whenever an RDP session takes
+# the foreground, minutes later or seconds, the key-ups go in.
+#
+# Key-ups only, forever. See the comment in _flush_all_modifiers: the
+# 2026-08-12 synthetic-down "tap" experiment made the latch dramatically worse
+# and is permanently reverted.
+# ---------------------------------------------------------------------------
+
+_EVENT_SYSTEM_FOREGROUND = 0x0003
+_WINEVENT_OUTOFCONTEXT   = 0x0000
+_WINEVENT_SKIPOWNPROCESS = 0x0002
+_WM_QUIT                 = 0x0012
+
+# Never flush more than this often, so alt-tabbing between two RDP windows
+# cannot flood SendInput.
+_FG_FLUSH_MIN_INTERVAL = 0.25
+# How long mstsc gets to settle after taking the foreground before we send.
+_FG_FLUSH_SETTLE = 0.05
+
+_WINEVENTPROC = ctypes.WINFUNCTYPE(
+    None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND,
+    wintypes.LONG, wintypes.LONG, wintypes.DWORD, wintypes.DWORD)
+
+_user32.SetWinEventHook.restype  = wintypes.HANDLE
+_user32.SetWinEventHook.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE,
+                                    _WINEVENTPROC, wintypes.DWORD, wintypes.DWORD,
+                                    wintypes.DWORD]
+_user32.UnhookWinEvent.argtypes  = [wintypes.HANDLE]
+
+# Module-level on purpose. The ctypes trampoline must outlive the call that
+# installed it: if it is garbage collected the hook stays registered and every
+# foreground change calls into freed memory. That is the classic silent failure
+# for this API and it takes the watcher with it.
+_fg_hook_proc = None
+_fg_hook_handle = 0
+_fg_hook_thread = None
+_fg_hook_tid = 0
+_last_fg_flush = 0.0
+_fg_lock = threading.Lock()
+
+
+def _describe_window(hwnd: int) -> str:
+    """exe, class and title for a diagnostic log line. Cheap and never raises."""
+    if not hwnd:
+        return "no foreground window"
+    try:
+        title = str(win32gui.GetWindowText(hwnd) or "")
+    except Exception:
+        title = ""
+    if len(title) > 60:
+        title = title[:57] + "..."
+    return (f"exe={_get_exe_name(hwnd) or '?'} "
+            f"class={_get_class(hwnd) or '?'} title={title!r}")
+
+
+def _fg_flush_allowed() -> bool:
+    """Rate limiter for the foreground watcher. True at most once per 250ms."""
+    global _last_fg_flush
+    now = time.monotonic()
+    with _fg_lock:
+        if now - _last_fg_flush < _FG_FLUSH_MIN_INTERVAL:
+            return False
+        _last_fg_flush = now
+        return True
+
+
+def _settle_and_flush(hwnd: int) -> None:
+    """Let mstsc finish taking focus, then send the key-ups. Runs off the hook
+    thread so the callback itself stays cheap."""
+    time.sleep(_FG_FLUSH_SETTLE)
+    _flush_all_modifiers(force=True)
+    log("inject", f"RDP took foreground, force-flushed modifier key-ups: "
+                  f"{_describe_window(hwnd)}")
+
+
+_last_declined: str = ""   # dedupe key for the non-RDP decline log
+
+
+def _handle_foreground_window(hwnd: int) -> None:
+    """One foreground change. Split out of the ctypes callback so the callback
+    body is nothing but a try/except."""
+    global _last_declined
+    if not hwnd:
+        return
+    if not _is_rdp(hwnd):
+        # Log the decline, but only when the window identity actually changes.
+        # Every alt-tab fires this hook, and an unconditional line adds a few
+        # hundred entries a day to the log we rely on for RDP diagnosis. The
+        # identity is still what matters: if the RDP client ever shows up here
+        # instead of in the flush branch, _is_rdp is the thing that is wrong.
+        desc = _describe_window(hwnd)
+        if desc != _last_declined:
+            _last_declined = desc
+            log("inject", f"foreground changed, not RDP, no flush: {desc}")
+        return
+    if not _fg_flush_allowed():
+        log("inject", "RDP foreground again within 250ms, flush rate-limited")
+        return
+    threading.Thread(target=_settle_and_flush, args=(hwnd,), daemon=True).start()
+
+
+def _on_foreground_change(hook, event, hwnd, id_object, id_child, thread_id, ts) -> None:
+    """WinEvent callback. Must never let an exception escape: one that does
+    tears the hook down and the watcher is lost for the rest of the session,
+    silently. Everything it can do is therefore inside the try."""
+    try:
+        _handle_foreground_window(hwnd)
+    except Exception as exc:
+        try:
+            warn("inject", f"foreground watcher callback failed: {exc}")
+        except Exception:
+            pass
+
+
+def _foreground_watch_loop(ready: threading.Event) -> None:
+    """Install the hook and pump messages for it. An out-of-context WinEvent
+    hook is delivered through the installing thread's message queue, so it
+    needs a GetMessage loop of its own; without one the callback never fires."""
+    global _fg_hook_proc, _fg_hook_handle, _fg_hook_tid
+    try:
+        _fg_hook_tid = _kernel32.GetCurrentThreadId()
+        _fg_hook_proc = _WINEVENTPROC(_on_foreground_change)
+        _fg_hook_handle = _user32.SetWinEventHook(
+            _EVENT_SYSTEM_FOREGROUND, _EVENT_SYSTEM_FOREGROUND, None,
+            _fg_hook_proc, 0, 0,
+            _WINEVENT_OUTOFCONTEXT | _WINEVENT_SKIPOWNPROCESS)
+        if not _fg_hook_handle:
+            warn("inject", "SetWinEventHook failed, no persistent RDP modifier flush")
+            return
+        log("inject", "foreground watcher installed")
+    except Exception as exc:
+        warn("inject", f"foreground watcher failed to start: {exc}")
+        return
+    finally:
+        ready.set()
+    try:
+        msg = wintypes.MSG()
+        while _user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) > 0:
+            _user32.TranslateMessage(ctypes.byref(msg))
+            _user32.DispatchMessageW(ctypes.byref(msg))
+    finally:
+        # UnhookWinEvent belongs on the thread that installed the hook.
+        try:
+            _user32.UnhookWinEvent(_fg_hook_handle)
+        except Exception:
+            pass
+        _fg_hook_handle = 0
+        log("inject", "foreground watcher stopped")
+
+
+def start_foreground_watch() -> bool:
+    """Watch for RDP windows taking the foreground and flush modifier key-ups
+    into them, for the life of the process. Idempotent; returns True when the
+    hook is live."""
+    global _fg_hook_thread
+    with _fg_lock:
+        if _fg_hook_thread is not None and _fg_hook_thread.is_alive():
+            return bool(_fg_hook_handle)
+        ready = threading.Event()
+        _fg_hook_thread = threading.Thread(
+            target=_foreground_watch_loop, args=(ready,),
+            name="fg-watch", daemon=True)
+        thread = _fg_hook_thread
+    thread.start()
+    ready.wait(2.0)
+    return bool(_fg_hook_handle)
+
+
+def stop_foreground_watch() -> None:
+    """Stop the pump; the loop unhooks itself on the way out. Safe to call when
+    the watcher never started."""
+    global _fg_hook_thread
+    thread, tid = _fg_hook_thread, _fg_hook_tid
+    if thread is None or not tid:
+        return
+    try:
+        _user32.PostThreadMessageW(tid, _WM_QUIT, 0, 0)
+    except Exception:
+        pass
+    thread.join(timeout=1.0)
+    _fg_hook_thread = None
+
+
+def unstick_modifiers() -> str:
+    """Manual escape hatch: force-flush every modifier key-up into whatever
+    holds the foreground right now, whatever it is.
+
+    Every automatic path in this file first has to guess that an RDP window is
+    involved. This one guesses nothing, which is the point: it still works when
+    every heuristic in the app is wrong. Key-ups only, so it is a no-op when
+    nothing is actually stuck. Returns a short line for the toast."""
+    try:
+        fg = win32gui.GetForegroundWindow()
+    except Exception:
+        fg = 0
+    where = _describe_window(fg)
+    before = _logical_modifiers_down() or ["none"]
+    _flush_all_modifiers(force=True)
+    after = _logical_modifiers_down() or ["none"]
+    log("inject", f"unstick: flushed modifier key-ups into {where}; "
+                  f"local logical mods before=[{','.join(before)}] "
+                  f"after=[{','.join(after)}]")
+    exe = _get_exe_name(fg) if fg else ""
+    return f"Modifiers released into {exe or 'the focused window'}"
 
 
 # ---------------------------------------------------------------------------
@@ -626,10 +870,13 @@ def configure(restore_delay_ms: int, per_app_paste: dict | None = None,
               electron_paste_method: str | None = None,
               paste_mode: str | None = None,
               rdp_clipboard_settle_ms: int | None = None,
-              rdp_clipboard_restore_delay_ms: int | None = None) -> None:
+              rdp_clipboard_restore_delay_ms: int | None = None,
+              clipboard_retain_on_unconfirmed: bool = True) -> None:
     global _restore_delay_ms, _per_app_paste, _electron_paste_method, _paste_mode
     global _rdp_clipboard_settle_ms, _rdp_clipboard_restore_delay_ms
+    global _retain_on_unconfirmed
     _restore_delay_ms = restore_delay_ms
+    _retain_on_unconfirmed = bool(clipboard_retain_on_unconfirmed)
     if rdp_clipboard_settle_ms is not None:
         _rdp_clipboard_settle_ms = rdp_clipboard_settle_ms
     if rdp_clipboard_restore_delay_ms is not None:
@@ -950,6 +1197,103 @@ def _notify_info(msg: str) -> None:
             pass
 
 
+# ---------------------------------------------------------------------------
+# Target probing, best effort. Never allowed to block an insert on its own
+# uncertainty (PASTE_UX_PLAN section 1). targetprobe.py supplies both hooks;
+# with neither set the behaviour is today's, minus the false "inserted".
+# ---------------------------------------------------------------------------
+
+_preflight_fn = None
+_verify_fn = None
+
+
+def set_preflight_callback(fn) -> None:
+    """fn(hwnd) -> "EDITABLE" | "NOT_EDITABLE" | "UNKNOWN", called before the
+    insert. Only a confident NOT_EDITABLE stops it; UNKNOWN always attempts,
+    because the probe is blind on Tk, canvas apps and RDP sessions and
+    refusing on uncertainty would break apps that work today."""
+    global _preflight_fn
+    _preflight_fn = fn
+
+
+def set_verify_callback(fn) -> None:
+    """fn(hwnd, before_token) -> True | False | None, called after the insert.
+
+    True = confirmed landed, False = confirmed did NOT land, None = no signal
+    available for this target. before_token carries what the insert knew
+    (expected char count, method, start time) so the verifier can compare its
+    own pre-insert snapshot, taken during the pre-flight, against the target
+    now."""
+    global _verify_fn
+    _verify_fn = fn
+
+
+def _preflight(hwnd: int) -> str:
+    """Pre-flight verdict for hwnd. A probe that raises is no signal at all,
+    never a reason to refuse an insert."""
+    fn = _preflight_fn
+    if fn is None:
+        return UNKNOWN
+    try:
+        verdict = fn(hwnd)
+    except Exception as exc:
+        warn("inject", f"pre-flight probe failed: {exc}")
+        return UNKNOWN
+    return verdict if verdict in (EDITABLE, NOT_EDITABLE, UNKNOWN) else UNKNOWN
+
+
+def _verify(hwnd: int, before_token: dict) -> bool | None:
+    """Post-insert verification signal for hwnd, or None when there is none."""
+    fn = _verify_fn
+    if fn is None:
+        return None
+    try:
+        result = fn(hwnd, before_token)
+    except Exception as exc:
+        warn("inject", f"insert verification failed: {exc}")
+        return None
+    return result if result is None else bool(result)
+
+
+def _post_insert_status(hwnd: int, before_token: dict, text: str,
+                        on_clipboard: bool) -> str:
+    """Grade an insert that SendInput accepted.
+
+    Accepted is not landed, so this returns INSERTED only on a confident yes,
+    INSERTED_UNCONFIRMED when there is no signal (the normal case until the
+    probe is wired in), and CLIPBOARD/FAILED on a confident no.
+    """
+    verdict = _verify(hwnd, before_token)
+    if verdict is True:
+        log("inject", "insert confirmed landed in the target")
+        return INSERTED
+    if verdict is None:
+        log("inject", "insert unconfirmed: no verification signal for this target")
+        return INSERTED_UNCONFIRMED
+    warn("inject", "insert verified as NOT landed in the target")
+    copied = on_clipboard or _clipboard_set_text(text)
+    _notify_failure("The text did not reach the field. "
+                    + ("It is on your clipboard, press Ctrl+V to paste."
+                       if copied else "The clipboard copy failed too."))
+    return CLIPBOARD if copied else FAILED
+
+
+def should_restore_clipboard(status: str, retain_on_unconfirmed: bool | None = None) -> bool:
+    """Whether the user's previous clipboard goes back after an insert.
+
+    Restoring on an unconfirmed insert is what destroyed dictations: the
+    characters never reached the target and 150-450ms later the old clipboard
+    came back over the top of the only remaining copy. So the previous
+    clipboard only returns on a confirmed insert, unless retention is switched
+    off, which reverts to the old behaviour wholesale.
+    """
+    if retain_on_unconfirmed is None:
+        retain_on_unconfirmed = _retain_on_unconfirmed
+    if status == INSERTED:
+        return True
+    return not retain_on_unconfirmed
+
+
 def _decide_method(hwnd: int) -> str:
     """Pick the paste method for this target. Returns 'type' | 'ctrl_v' | 'ctrl_shift_v'."""
     exe = _get_exe_name(hwnd)
@@ -1046,9 +1390,12 @@ def inject_text_and_submit(text: str, hwnd: int) -> str:
     """Insert text, then forward a single Enter to the target (insert-and-send).
 
     Returns the same status string as inject_text(); the Enter forward never
-    downgrades an insert that already landed."""
+    downgrades an insert that already landed. An unconfirmed insert still gets
+    the Enter: the input almost certainly went in, and withholding it would
+    make insert-and-send silently stop working on every target the probe
+    cannot read."""
     status = inject_text(text, hwnd)
-    if status != INSERTED:
+    if not landed(status):
         return status
     if _paste_mode == "clipboard_only":
         return status
@@ -1068,7 +1415,10 @@ def inject_text_and_submit(text: str, hwnd: int) -> str:
 def inject_text(text: str, hwnd: int) -> str:
     """Insert text into hwnd. Returns one of:
 
-    INSERTED  — the text went into the target window (or there was nothing to do)
+    INSERTED  - the text is confirmed to have gone into the target window
+                (or there was nothing to do)
+    INSERTED_UNCONFIRMED - the input went out and probably landed, but
+                nothing could confirm it; the text stays on the clipboard
     CLIPBOARD — the insert did not land, but the text is on the clipboard
     FAILED    — the insert did not land and the clipboard copy failed too
     """
@@ -1157,13 +1507,47 @@ def inject_text(text: str, hwnd: int) -> str:
         _force_foreground(hwnd)
         time.sleep(0.15)
 
+    # Pre-flight: only a CONFIDENT "there is nowhere to type here" stops the
+    # insert. UNKNOWN and EDITABLE both proceed, and that asymmetry is the rule
+    # that keeps the probe from making working apps worse.
+    #
+    # This runs HERE, not before the foreground steal, and the ordering is the
+    # whole point: the probe reads the focused UI element, so asking before
+    # _force_foreground describes whatever happened to be in front (our own
+    # preview panel, or the app the user was in), not the target we are about
+    # to type into. Found by the E2E harness, 2026-08-22.
+    if _preflight(hwnd) == NOT_EDITABLE:
+        warn("inject", f"pre-flight says no editable field in hwnd={hwnd} "
+                       f"({target_exe or 'unknown'}), not injecting, "
+                       f"{len(text)} chars left on the clipboard")
+        copied = _clipboard_set_text(text)
+        _notify_failure(
+            "No text field is focused. "
+            + ("The text is on your clipboard. Click into the field you want, then insert again."
+               if copied else "The clipboard copy failed too.")
+        )
+        return REFUSED_NOT_EDITABLE if copied else FAILED
+
+    # Opaque handle for the verifier: what we are about to send, and when.
+    before_token = {"chars": len(text), "method": method, "started": time.monotonic()}
+
     if method == "type":
         # Type characters via SendInput KEYEVENTF_UNICODE (no clipboard involvement).
         sent = _send_unicode_text(text)
         log("inject", f"typed {sent} chars via KEYEVENTF_UNICODE")
         if sent > 0:
             _last_insert = {"hwnd": hwnd, "chars": sent}
-            return INSERTED
+            status = _post_insert_status(hwnd, before_token, text, on_clipboard=False)
+            if status == INSERTED_UNCONFIRMED and _retain_on_unconfirmed:
+                # The type path never touches the clipboard, so an unconfirmed
+                # insert would leave the user nothing to paste. Park it there
+                # (plan section 2); dropping their previous clipboard is the
+                # deliberate trade for never losing a dictation.
+                if _clipboard_set_text(text):
+                    log("inject", f"unconfirmed insert: {len(text)} chars parked on the clipboard")
+                else:
+                    warn("inject", "unconfirmed insert and the clipboard park failed too")
+            return status
         # SendInput inserted nothing (throttled / blocked / secure desktop). Safe to
         # fall back to clipboard paste because nothing landed — no duplication risk.
         warn("inject", "type path inserted 0 chars; falling back to clipboard Ctrl+V")
@@ -1241,8 +1625,14 @@ def inject_text(text: str, hwnd: int) -> str:
         except Exception as exc:
             warn("inject", f"clipboard restore failed: {exc}")
 
-    threading.Thread(target=_restore, daemon=True).start()
-    return INSERTED
+    status = _post_insert_status(hwnd, before_token, text, on_clipboard=True)
+    if should_restore_clipboard(status):
+        log("inject", f"clipboard restore armed (status={status})")
+        threading.Thread(target=_restore, daemon=True).start()
+    else:
+        log("inject", f"clipboard restore skipped (status={status}): "
+                      f"{len(text)} chars left on the clipboard for a manual paste")
+    return status
 
 
 def _is_descendant(child_hwnd: int, ancestor_hwnd: int) -> bool:

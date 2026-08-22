@@ -10,6 +10,8 @@
     "you know"
   ],
   "clipboard_restore_delay_ms": 150,
+  "rdp_clipboard_settle_ms": 250,
+  "rdp_clipboard_restore_delay_ms": 3000,
   "vad_filter": false,
   "corrections": {
     "Selvin": "Selwyn",
@@ -115,7 +117,7 @@
   "vad_silence_mode": false,
   "theme": "dark",
   "animations": true,
-  "badge_animation": "pulse",
+  "badge_animation": "waveform",
   "sound_volume": 100,
   "live_preview_enabled": true,
   "retain_audio": true,
@@ -134,14 +136,25 @@
   },
   "panel_position": {
     "\\\\.\\DISPLAY1": {
-      "x": 1410,
-      "y": 843
+      "x": 692,
+      "y": 860
+    },
+    "\\\\.\\DISPLAY2": {
+      "x": -1018,
+      "y": 446
     }
   },
-  "dashboard_scale": "100",
+  "dashboard_scale": "125",
   "incognito": false,
   "redact_patterns": [],
   "study_mode": false,
   "study_speed": 0.95,
-  "study_pause_scale": 1.0
+  "study_pause_scale": 1,
+  "tts_speed": 1.25,
+  "learn_from_edits": true,
+  "clipboard_retain_on_unconfirmed": true,
+  "target_probe": true,
+  "target_ring": true,
+  "place_hotkey": "shift+alt+z",
+  "unstick_hotkey": "ctrl+shift+u"
 }

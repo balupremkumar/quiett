@@ -38,6 +38,7 @@ import hotkey
 import inject
 import preview
 import profile
+import stash
 import tray
 import transcribe
 import tts
@@ -121,6 +122,15 @@ _CONFIG_DEFAULTS = {
     "panel_acrylic":               True,    # Win11 acrylic backdrop on the panel/badge (QUIETT_UI_PLAN P4)
     "learn_from_edits":            True,    # auto-promote a correction to a rule after 3 repeats (P6)
     "dashboard_prewarm":           True,    # boot the dashboard hidden at startup so it opens instantly
+    # PASTE_UX_PLAN section 7, insert reliability. All default to the new behaviour.
+    "clipboard_retain_on_unconfirmed": True,  # keep the dictation on the clipboard when we cannot confirm it landed
+    "target_probe":                True,    # probe the target before/after inserting; False = pre-plan behaviour
+    "target_ring":                 True,    # outline the resolved target while recording
+    # NEVER pick a ctrl+alt+<x> combo here: ctrl+alt is the record hold and
+    # hotkey._on_key only tests that every modifier is down, so extra keys are
+    # ignored and the combo starts a recording before it does its own job.
+    "place_hotkey":                "shift+alt+z",   # arm, click a field, insert the parked dictation
+    "unstick_hotkey":              "ctrl+shift+u",  # force-flush modifiers stuck in an RDP session
 }
 
 _RECORDINGS_DIR = "recordings"
@@ -267,6 +277,13 @@ def _validate_config(raw: dict) -> dict:
     cfg["panel_acrylic"] = bool(cfg.get("panel_acrylic", True))
     cfg["learn_from_edits"] = bool(cfg.get("learn_from_edits", True))
     cfg["dashboard_prewarm"] = bool(cfg.get("dashboard_prewarm", True))
+    cfg["clipboard_retain_on_unconfirmed"] = bool(cfg.get("clipboard_retain_on_unconfirmed", True))
+    cfg["target_probe"] = bool(cfg.get("target_probe", True))
+    cfg["target_ring"] = bool(cfg.get("target_ring", True))
+    for key, default in (("place_hotkey", "shift+alt+z"),
+                         ("unstick_hotkey", "ctrl+shift+u")):
+        value = cfg.get(key)
+        cfg[key] = value.strip().lower() if isinstance(value, str) and value.strip() else default
     return cfg
 
 
@@ -275,9 +292,75 @@ def _get_cfg() -> dict:
         return dict(_cfg)
 
 
-# A failed insert toast has to outlive the normal dwell: the user reads it,
-# clicks into the field they actually wanted, and only then hits the action.
-_INSERT_RETRY_DWELL_MS = 15000
+# ---------------------------------------------------------------------------
+# Escalation after an insert (PASTE_UX_PLAN section 5, corrected 2026-08-22)
+#
+# Silence is not the same as failure. Verification legitimately returns "no
+# signal" for terminals, RDP sessions and every app with no accessibility
+# layer, so escalating on merely-unconfirmed would put a failure notice on
+# most SUCCESSFUL inserts and train the user to ignore the one that matters.
+# Clipboard retention plus the tray dot is the silent safety net; the loud
+# path is reserved for positive evidence that the text did not land.
+# ---------------------------------------------------------------------------
+
+ESCALATE_NONE     = "none"       # nothing on screen beyond the tray dot
+ESCALATE_RECOVERY = "recovery"   # panel at the cursor, error chime
+
+# A pre-flight refusal is kept distinct from the other five clipboard
+# fallbacks so the recovery panel can name the real reason.
+_REFUSED_NOT_EDITABLE = inject.REFUSED_NOT_EDITABLE
+
+
+def escalation_for(status: str, paste_mode: str = "auto") -> dict:
+    """Pure decision table for a finished insert: no side effects, no config
+    reads, everything it needs is an argument.
+
+    consume_stash - is the parked copy safe to drop?
+    ui            - which surface, if any, the user sees.
+    reason        - honest wording for that surface.
+    """
+    if paste_mode == "clipboard_only":
+        # Copying instead of inserting is the whole point of that mode, so
+        # nothing here is a failure and nothing here consumed the stash.
+        return {"consume_stash": False, "ui": ESCALATE_NONE, "reason": ""}
+    if status == inject.INSERTED:
+        return {"consume_stash": True, "ui": ESCALATE_NONE, "reason": ""}
+    if status == inject.INSERTED_UNCONFIRMED:
+        # No signal. Retained clipboard, armed stash, tray dot, no toast.
+        return {"consume_stash": False, "ui": ESCALATE_NONE, "reason": ""}
+    if status == _REFUSED_NOT_EDITABLE:
+        return {"consume_stash": False, "ui": ESCALATE_RECOVERY,
+                "reason": "No text field was focused, so nothing was typed. Click into "
+                          "the field you want, then Place it."}
+    if status == inject.FAILED:
+        return {"consume_stash": False, "ui": ESCALATE_RECOVERY,
+                "reason": "The text did not reach the field, and the clipboard copy "
+                          "failed too. Click into the field you want, then Place it."}
+    return {"consume_stash": False, "ui": ESCALATE_RECOVERY,
+            "reason": "The text did not reach the field. It is on your clipboard. "
+                      "Click into the field you want, then Place it."}
+
+
+def _apply_escalation(text: str, decision: dict) -> None:
+    """Show whatever the table asked for. Confirmed-landed and no-signal both
+    show nothing, which is the point of the corrected policy."""
+    if decision.get("ui") != ESCALATE_RECOVERY:
+        return
+
+    def _place() -> None:
+        threading.Thread(target=insert_text_now, args=(text,), daemon=True).start()
+
+    def _dismiss() -> None:
+        stash.clear()
+
+    preview.show_recovery_panel(text, decision.get("reason", ""), _place, _dismiss)
+
+
+def escalate_insert(text: str, status: str) -> None:
+    """Escalation entry point for an insert that ran somewhere else - the
+    preview panel fires its own and consumes the stash there, so this applies
+    only the user-visible half of the table."""
+    _apply_escalation(text, escalation_for(status, _get_cfg().get("paste_mode", "auto")))
 
 
 def _resolve_paste_target() -> int:
@@ -296,11 +379,11 @@ def _resolve_paste_target() -> int:
 
 
 def insert_text_now(text: str, hwnd: int = 0, submit: bool = False) -> str:
-    """Insert text into the target and, when it does not land, offer a retry.
+    """Insert text into the target and escalate only on evidence it missed.
 
-    hwnd=0 resolves the target at call time, which is what makes the retry
-    work: the user focuses the field they wanted, clicks "Insert again", and
-    the text goes there rather than back into whatever was in front before.
+    hwnd=0 resolves the target at call time, which is what makes recovery
+    work: the user focuses the field they wanted, presses "Place it", and the
+    text goes there rather than back into whatever was in front before.
     """
     # Not stripped: a panel insert with "append" on carries a leading space
     # that the retry has to preserve.
@@ -309,25 +392,11 @@ def insert_text_now(text: str, hwnd: int = 0, submit: bool = False) -> str:
     target = hwnd if hwnd else _resolve_paste_target()
     fn = inject.inject_text_and_submit if submit else inject.inject_text
     status = fn(text, target)
-    if status != inject.INSERTED:
-        show_insert_retry_toast(text, status)
+    decision = escalation_for(status, _get_cfg().get("paste_mode", "auto"))
+    if decision["consume_stash"]:
+        stash.mark_consumed()   # confirmed landed: nothing left to recover
+    _apply_escalation(text, decision)
     return status
-
-
-def show_insert_retry_toast(text: str, status: str) -> None:
-    """Loud, actionable clipboard-fallback notice (BACKLOG item 139)."""
-    if _get_cfg().get("paste_mode") == "clipboard_only":
-        return  # copying instead of inserting is the point of that mode
-    if status == inject.FAILED:
-        msg = "The text did not go in and the clipboard copy failed. Click into the field you want, then try again."
-    else:
-        msg = "The text did not go in. It is on your clipboard. Click into the field you want, then insert again."
-
-    def _retry() -> None:
-        threading.Thread(target=insert_text_now, args=(text,), daemon=True).start()
-
-    preview.show_toast(msg, kind="warn", action_label="Insert again",
-                       action_cb=_retry, dwell_ms=_INSERT_RETRY_DWELL_MS)
 
 
 def insert_last_dictation(text: str) -> None:
@@ -337,6 +406,168 @@ def insert_last_dictation(text: str) -> None:
         time.sleep(0.25)
         insert_text_now(text)
     threading.Thread(target=_worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Place mode - arm, click, insert (PASTE_UX_PLAN section 4)
+#
+# Tap to arm, never hold. Pressing and HOLDING a modifier is the exact
+# mechanism that latches Ctrl inside an RDP session, so the recovery for a
+# lost insert must not be built on it.
+#
+# The mouse hook lives only while armed (hotkey.capture_next_click) and the
+# click is never swallowed: it has to reach the target app or the field the
+# user picked never gets focus.
+# ---------------------------------------------------------------------------
+
+_PLACE_TIMEOUT_SECONDS = 30.0   # armed and forgotten disarms itself
+_PLACE_SETTLE_SECONDS  = 0.25   # let the click land and focus settle before inserting
+
+_place_lock = threading.Lock()
+_place: dict = {"armed": False, "text": "", "timer": None}
+
+
+def place_mode_armed() -> bool:
+    with _place_lock:
+        return bool(_place["armed"])
+
+
+def toggle_place_mode() -> str:
+    """The place hotkey. Returns "armed" | "disarmed" | "empty" for the log and
+    the tests; what the user sees is the overlay or the toast."""
+    if place_mode_armed():
+        disarm_place_mode("hotkey pressed again")
+        return "disarmed"
+
+    # The default place hotkey (ctrl+alt+v) shares its prefix with the ctrl+alt
+    # record hold, so the modifiers alone have already started a recording by
+    # the time the V lands. Drop it: the user asked to place, not to dictate.
+    _cancel_recording_for_place()
+
+    item = stash.get() or {}
+    text = item.get("text", "")
+    if not stash.has_unconsumed() or not text.strip():
+        preview.show_toast("Nothing to place yet")
+        return "empty"
+    _arm_place_mode(text)
+    return "armed"
+
+
+def _cancel_recording_for_place() -> None:
+    if not audio.is_recording():
+        return
+    log("main", "place hotkey cancelled the recording its own modifiers started")
+    try:
+        audio.cancel()
+        hotkey.set_external_recording(False)
+        tray.set_state("idle")
+        preview.hide_badge()
+        preview.hide_target_ring()
+    except Exception as exc:
+        log_error("main", f"could not cancel the recording before arming place mode: {exc}")
+
+
+def _arm_place_mode(text: str) -> None:
+    timer = threading.Timer(_PLACE_TIMEOUT_SECONDS, lambda: disarm_place_mode("timed out"))
+    timer.daemon = True
+    with _place_lock:
+        _place["armed"] = True
+        _place["text"] = text
+        _place["timer"] = timer
+    timer.start()
+    preview.show_place_overlay(text)
+    # Esc has to be a global tap: the overlay is click-through and never takes
+    # focus, so it can never receive a key event of its own. Registered only
+    # while armed, so Esc is untouched the rest of the time.
+    hotkey.register_tap("esc", lambda: disarm_place_mode("esc"))
+    if not hotkey.capture_next_click(_on_place_click):
+        # No hook, no place mode. Say so rather than leaving an overlay up
+        # that will never do anything.
+        log_error("main", "place mode could not install the mouse hook")
+        disarm_place_mode("no mouse hook")
+        preview.show_toast("Windows would not give Quiett a mouse hook. "
+                           "Use the tray's Place last dictation instead.", kind="warn")
+        return
+    log("main", "place mode armed")
+
+
+def disarm_place_mode(reason: str = "") -> None:
+    """Idempotent: Esc, a second hotkey press, the insert and the timeout all
+    land here, and several of them can race."""
+    with _place_lock:
+        if not _place["armed"]:
+            return
+        _place["armed"] = False
+        _place["text"] = ""
+        timer = _place["timer"]
+        _place["timer"] = None
+    if timer is not None:
+        timer.cancel()
+    hotkey.unregister_tap("esc")
+    hotkey.cancel_click_capture()
+    preview.hide_place_overlay()
+    log("main", f"place mode disarmed ({reason or 'no reason given'})")
+
+
+def _on_place_click() -> None:
+    """The click that picked a target. Runs on hotkey.py's worker thread, after
+    the click has been delivered to whatever the user clicked."""
+    with _place_lock:
+        if not _place["armed"]:
+            return
+        text = _place["text"]
+    disarm_place_mode("placed")
+    if not text.strip():
+        return
+    # The click is delivered but the app has not necessarily finished moving
+    # focus into the control it hit, and inserting into a half-settled target
+    # is how text lands somewhere the user did not choose.
+    time.sleep(_PLACE_SETTLE_SECONDS)
+    insert_text_now(text)   # hwnd=0: resolve the window the user just picked
+
+
+def _wire_target_probe() -> None:
+    """Connect targetprobe to inject, or leave inserts unverified.
+
+    The pre-flight call is also where the verifier's pre-insert snapshot is
+    taken. That is deliberate: it is the last moment before the text goes out,
+    and probing the target twice would pay the cost twice for the same answer.
+
+    A missing or broken probe is never fatal. Without it every insert grades as
+    unconfirmed, which keeps the dictation on the clipboard and the tray dot
+    lit, so the safety net still holds; only the silent-success case is lost.
+    """
+    if not _get_cfg().get("target_probe", True):
+        log("main", "target probe disabled by config, inserts stay unverified")
+        return
+    try:
+        import targetprobe
+    except Exception as exc:
+        log_error("main", f"targetprobe unavailable, inserts stay unverified: {exc}")
+        return
+
+    targetprobe.warm_up()   # 84-102ms of COM init, off the insert path
+    # One insert runs at a time, so a single slot is enough and cannot leak.
+    pending = {"hwnd": 0, "token": None}
+
+    def _preflight(hwnd: int) -> str:
+        verdict = targetprobe.probe(hwnd).verdict
+        try:
+            pending["hwnd"], pending["token"] = hwnd, targetprobe.verify_token(hwnd)
+        except Exception:
+            pending["hwnd"], pending["token"] = 0, None
+        return verdict
+
+    def _verify(hwnd: int, before_token: dict):
+        token = pending["token"] if pending["hwnd"] == hwnd else None
+        pending["hwnd"], pending["token"] = 0, None
+        if token is None:
+            return None
+        return targetprobe.verify_landed(hwnd, token)
+
+    inject.set_preflight_callback(_preflight)
+    inject.set_verify_callback(_verify)
+    log("main", "target probe wired, UIA readiness follows from targetprobe")
 
 
 def main() -> None:
@@ -372,16 +603,18 @@ def main() -> None:
         paste_mode=_cfg.get("paste_mode", "auto"),
         rdp_clipboard_settle_ms=_cfg["rdp_clipboard_settle_ms"],
         rdp_clipboard_restore_delay_ms=_cfg["rdp_clipboard_restore_delay_ms"],
+        clipboard_retain_on_unconfirmed=_cfg["clipboard_retain_on_unconfirmed"],
     )
+    _wire_target_probe()
     inject.set_paste_failure_callback(
         lambda msg: preview.show_toast(msg, kind="warn")
     )
     inject.set_paste_info_callback(
         lambda msg: preview.show_toast(msg, kind="info")
     )
-    # An insert fired from the preview panel that only reached the clipboard
-    # comes back here for the retry toast.
-    preview.set_insert_failed_callback(show_insert_retry_toast)
+    # An insert fired from the preview panel that did not land comes back here
+    # for the escalation table.
+    preview.set_insert_failed_callback(escalate_insert)
     preview.configure_position(_cfg["preview_position"])
     preview.start()
 
@@ -446,6 +679,12 @@ def main() -> None:
                                kind="info")
             return
 
+        # Park it before anything can go wrong with the insert. The clipboard
+        # is not a safe place for the only copy of a dictation, and history
+        # says nothing about whether it ever landed (PASTE_UX_PLAN section 2).
+        if text.strip():
+            stash.put(text.strip(), hwnd)
+
         # Incognito (item 86): single gate for both the transcript and the
         # raw audio — nothing from this dictation reaches disk.
         incognito = cfg.get("incognito", False)
@@ -486,6 +725,7 @@ def main() -> None:
 
     def _on_audio_stop(chunks: list) -> None:
         hotkey.set_external_recording(False)  # release hold-mode suppression
+        preview.hide_target_ring()             # recording over, nothing to outline
         inject.flush_hotkey_modifiers_async()  # un-stick modifiers in a focused RDP session
         hwnd = _resolve_paste_target()
         duration = (sum(len(c) for c in chunks) / audio.SAMPLE_RATE) if chunks else 0.0
@@ -551,6 +791,10 @@ def main() -> None:
         # (item 46 — previously this double-fired alongside the badge).
         tray.set_state("recording")
         preview.show_badge("recording")
+        # Outline the target while recording (PASTE_UX_PLAN section 5), so
+        # "is there a field to receive this" is answered before speaking
+        # rather than after. Probes on its own worker; never blocks the start.
+        preview.show_ring_for_window(_recording_target["hwnd"])
         try:
             audio.start()
         except Exception as exc:
@@ -559,6 +803,7 @@ def main() -> None:
             log_error("main", f"audio.start failed — no microphone? {exc}")
             hotkey.set_external_recording(False)
             tray.set_state("idle")
+            preview.hide_target_ring()
             preview.show_badge("mic_error")
             threading.Timer(2.5, preview.hide_badge).start()
             return
@@ -586,6 +831,7 @@ def main() -> None:
 
     def _on_cancel() -> None:
         audio.cancel()
+        preview.hide_target_ring()             # recording over, nothing to outline
         inject.flush_hotkey_modifiers_async()  # cancelled recordings never reach inject
 
     def _on_not_ready() -> None:
@@ -618,6 +864,12 @@ def main() -> None:
         hotkey_mode=_cfg.get("hotkey_mode", "hold"),
     )
     hotkey.start()
+
+    # Place mode (PASTE_UX_PLAN section 4). A tap hotkey, on its own
+    # registration path, so the hold-to-record hook above is untouched.
+    _place_hk = _cfg.get("place_hotkey", "shift+alt+z")
+    if _place_hk:
+        hotkey.register_tap(_place_hk, toggle_place_mode)
 
     import keyboard as _kb
 
@@ -665,6 +917,30 @@ def main() -> None:
             log("main", f"tts hotkey registered: {_tts_hk}")
         except Exception as exc:
             log_error("main", f"tts hotkey failed: {exc}")
+
+    # Manual modifier escape hatch (PASTE_UX_PLAN section 6). This is the one
+    # RDP fix that cannot be defeated by a wrong detection heuristic, which is
+    # exactly why it exists: rounds 1-4 all depended on correctly spotting the
+    # RDP window, and the log shows that watcher never fired.
+    _unstick_hk = _cfg.get("unstick_hotkey", "ctrl+shift+u")
+    if _unstick_hk:
+        def _on_unstick_hotkey() -> None:
+            threading.Thread(
+                target=lambda: preview.show_toast(inject.unstick_modifiers()),
+                daemon=True).start()
+
+        try:
+            _kb.add_hotkey(_unstick_hk, _on_unstick_hotkey, suppress=False)
+            log("main", f"unstick hotkey registered: {_unstick_hk}")
+        except Exception as exc:
+            log_error("main", f"unstick hotkey failed: {exc}")
+
+    # Persistent RDP modifier flush (PASTE_UX_PLAN section 6). Replaces nothing:
+    # the 4s post-hotkey watcher and preview's flush_rdp_if_foreground both stay,
+    # because this hook only fires on foreground CHANGES and cannot see a session
+    # that holds focus throughout.
+    if inject.start_foreground_watch():
+        atexit.register(inject.stop_foreground_watch)
 
     # ------------------------------------------------------------------
     # Model loading
@@ -778,7 +1054,9 @@ def main() -> None:
                             "retain_audio_min_seconds", "redact_patterns",
                             "tts_speed", "tts_max_chunk_chars",
                             "study_speed", "study_pause_scale",
-                            "panel_acrylic", "learn_from_edits"):
+                            "panel_acrylic", "learn_from_edits",
+                            "clipboard_retain_on_unconfirmed",
+                            "target_probe", "target_ring"):
                     _cfg[key] = validated[key]
             inject.configure(
                 restore_delay_ms=validated["clipboard_restore_delay_ms"],
@@ -787,6 +1065,7 @@ def main() -> None:
                 paste_mode=validated.get("paste_mode", "auto"),
                 rdp_clipboard_settle_ms=validated["rdp_clipboard_settle_ms"],
                 rdp_clipboard_restore_delay_ms=validated["rdp_clipboard_restore_delay_ms"],
+                clipboard_retain_on_unconfirmed=validated["clipboard_retain_on_unconfirmed"],
             )
             preview.configure_position(validated["preview_position"])
             preview.refresh_theme()
@@ -863,6 +1142,7 @@ def main() -> None:
             paste_mode=new_mode,
             rdp_clipboard_settle_ms=_cfg["rdp_clipboard_settle_ms"],
             rdp_clipboard_restore_delay_ms=_cfg["rdp_clipboard_restore_delay_ms"],
+            clipboard_retain_on_unconfirmed=_cfg.get("clipboard_retain_on_unconfirmed", True),
         )
         try:
             with open("config.json") as f:
@@ -950,6 +1230,8 @@ def main() -> None:
         tts_speed=(_cfg.get("study_speed", 0.95) if _cfg.get("study_mode", False)
                    else _cfg.get("tts_speed", 1.0)),
     )
+    # Parked-dictation state drives the tray dot and its first menu item.
+    stash.set_change_callback(tray.refresh_stash)
     print("Hold Ctrl+Alt to dictate. Right-click tray icon to quit.")
     tray.run()
 

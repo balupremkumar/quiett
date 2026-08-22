@@ -21,6 +21,7 @@ import pyperclip
 import keyboard as _keyboard
 import win32api
 import win32con
+import win32gui
 from PIL import Image, ImageDraw, ImageEnhance, ImageTk
 
 import audio
@@ -28,11 +29,18 @@ import chime
 import hotkey
 import inject
 import profile
+import stash
 import theme
 import tray
 import widgets
 import winfx
 from logger import log, warn, error as log_error
+
+try:
+    import targetprobe
+except Exception as _probe_exc:   # pragma: no cover - module is optional by design
+    targetprobe = None
+    warn("preview", f"targetprobe unavailable, rings fall back to window rects: {_probe_exc}")
 
 _CONFIG_FILE = "config.json"
 
@@ -61,6 +69,9 @@ _settings_q:     queue.Queue = queue.Queue()
 _badge_q:        queue.Queue = queue.Queue()
 _toast_q:        queue.Queue = queue.Queue()
 _flash_q:        queue.Queue = queue.Queue()
+_ring_q:         queue.Queue = queue.Queue()
+_recovery_q:     queue.Queue = queue.Queue()
+_place_q:        queue.Queue = queue.Queue()
 _root:        tk.Tk | None = None
 _ready = threading.Event()
 
@@ -209,6 +220,29 @@ def _panel_acrylic_enabled() -> bool:
         return True
 
 
+def _target_ring_enabled() -> bool:
+    """Config kill-switch for the target ring overlay (PASTE_UX_PLAN section
+    5, config key target_ring), default on. Same direct config read as the
+    other display-only toggles above."""
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            return bool(json.load(f).get("target_ring", True))
+    except Exception:
+        return True
+
+
+def _target_probe_enabled() -> bool:
+    """Config kill-switch for the accessibility probe (PASTE_UX_PLAN section
+    7, config key target_probe), default on. Off means the ring outlines the
+    whole window instead of the focused element, and says "unknown" about it,
+    which is honest: with the probe off nothing here knows any better."""
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            return bool(json.load(f).get("target_probe", True))
+    except Exception:
+        return True
+
+
 def _learn_from_edits_enabled() -> bool:
     """Dictionary auto-learn gate (QUIETT_UI_PLAN P6, config key
     learn_from_edits, default on). When off, corrections stop being logged —
@@ -308,19 +342,76 @@ def hide_badge() -> None:
 
 
 def show_toast(message: str, kind: str = "info", action_label: str = "",
-               action_cb=None, dwell_ms: int = 0) -> None:
+               action_cb=None, dwell_ms: int = 0, target_hwnd: int = 0) -> None:
     """Show a custom in-app toast. kind: info|warn|error. Optional action button.
 
     dwell_ms overrides the default auto-dismiss time — used for toasts whose
-    action needs the user to do something first (focus a field, say)."""
+    action needs the user to do something first (focus a field, say).
+
+    target_hwnd: the window this notice is about, when there is one. The toast
+    is drawn on that window's monitor, falling back to the monitor under the
+    cursor. New keyword, appended so existing positional callers are
+    unaffected."""
     _toast_q.put({"message": message, "kind": kind,
                   "action_label": action_label, "action_cb": action_cb,
-                  "dwell_ms": dwell_ms})
+                  "dwell_ms": dwell_ms, "target_hwnd": target_hwnd})
 
 
 def flash_screen_edge(colour: str = _BLUE) -> None:
     """Quick screen-edge flash to confirm a hotkey press registered."""
     _flash_q.put(colour)
+
+
+def show_target_ring(rect: tuple[int, int, int, int], colour_key: str = "ok",
+                     label: str = "") -> None:
+    """Outline `rect` (left, top, right, bottom, virtual-desktop pixels) with
+    a click-through ring on that rect's own monitor, so the user can see where
+    a dictation is about to land before speaking (PASTE_UX_PLAN section 5).
+
+    colour_key: "ok" for a confident editable target, "warn"/"unknown" for
+    anything the probe could not vouch for. Calling it again just moves the
+    ring. No-ops when the target_ring config key is off. Any thread."""
+    _ring_q.put({"rect": tuple(rect), "colour": colour_key, "label": label or ""})
+
+
+def hide_target_ring() -> None:
+    """Remove the target ring. Safe to call when none is showing. Any thread."""
+    _ring_q.put(None)
+
+
+def show_place_overlay(text: str) -> None:
+    """Armed-state overlay for place mode (PASTE_UX_PLAN section 4): a
+    click-through card near the cursor showing what is parked and how to place
+    or cancel it. While it is up, the target ring follows the focused window so
+    the user can see where the click will land the text. Any thread."""
+    _place_q.put({"text": text or ""})
+
+
+def hide_place_overlay() -> None:
+    """Take the armed overlay and its target ring down. Any thread."""
+    _place_q.put(None)
+
+
+def show_ring_for_window(hwnd: int) -> None:
+    """Probe `hwnd` on a worker thread and put the target ring on the result.
+
+    The one entry point both callers use: the recording badge (so the user
+    knows before speaking whether there is a field to receive the text) and
+    place mode's focus poll. Silent no-op when the ring is switched off, and
+    a plain window outline when the probe is unavailable or switched off, so
+    losing the probe degrades the ring rather than breaking it. Any thread."""
+    if not _target_ring_enabled():
+        return
+    threading.Thread(target=_ring_worker, args=(int(hwnd or 0),), daemon=True).start()
+
+
+def show_recovery_panel(text: str, reason: str, on_place, on_dismiss) -> None:
+    """Escalation surface for an insert that did not land (PASTE_UX_PLAN
+    section 3): reopens a panel at the cursor holding the text, with `Place
+    it` and `Dismiss`. A corner toast is not enough for text that would
+    otherwise be lost. Any thread."""
+    _recovery_q.put({"text": text or "", "reason": reason or "",
+                     "on_place": on_place, "on_dismiss": on_dismiss})
 
 
 def close_current_preview() -> None:
@@ -546,6 +637,68 @@ def _tick() -> None:
         except queue.Empty:
             break
 
+    # Drain target-ring queue - every item is a move or a hide, both cheap,
+    # so they're applied in order rather than collapsed to the last one. The
+    # handler gets its own guard: an exception escaping here would take the
+    # after() chain, and with it the whole preview thread, down with it.
+    while True:
+        try:
+            ring_cmd = _ring_q.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            _handle_target_ring(ring_cmd)
+        except Exception as e:
+            log_error("preview", f"target ring failed, dropping it: {e}")
+            _destroy_target_ring()
+
+    # Drain the place-mode queue - arm/disarm commands, applied in order, with
+    # the same guard as the ring: an exception escaping here would take the
+    # after() chain down and with it the whole preview thread.
+    while True:
+        try:
+            place_cmd = _place_q.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            _handle_place_overlay(place_cmd)
+        except Exception as e:
+            log_error("preview", f"place overlay failed, dropping it: {e}")
+            _destroy_place_overlay()
+
+    # While armed, follow the focused window with the target ring so the user
+    # can see where the click will land the text before they commit to it.
+    if _place_armed:
+        try:
+            _poll_place_target()
+        except Exception as e:
+            log_error("preview", f"place target poll failed: {e}")
+
+    # Drain recovery-panel queue - keep only the latest, and let it replace an
+    # open preview the same way a fresh transcription does.
+    latest_recovery = None
+    while True:
+        try:
+            latest_recovery = _recovery_q.get_nowait()
+        except queue.Empty:
+            break
+    if latest_recovery is not None:
+        if _preview_open and _current_preview_win is not None:
+            try:
+                _current_preview_win.destroy()
+            except Exception:
+                pass
+            _current_preview_win = None
+        _preview_open = True
+        try:
+            _open_recovery_panel(latest_recovery)
+        except Exception as e:
+            log_error("preview", f"recovery panel failed to open: {e}")
+            _preview_open = False
+            _current_preview_win = None
+            _show_anchored_toast({"message": "Insert did not land. The text is still on the clipboard",
+                                  "kind": "error"})
+
     _root.after(50, _tick)
 
 
@@ -553,11 +706,29 @@ def _tick() -> None:
 # Anchored toast (bottom-right of screen) + action button
 # ---------------------------------------------------------------------------
 
-_toast_offset: int = 0  # stack toasts vertically when several arrive together
+# Stack toasts vertically when several arrive together, keyed by work-area
+# rect, i.e. per monitor, since two toasts on two screens do not stack on
+# each other and a shared counter would push the second one off its screen.
+_toast_offsets: dict[tuple, int] = {}
+
+
+def _toast_work_area(target_hwnd: int) -> tuple[int, int, int, int]:
+    """Which monitor a toast belongs on: the target window's, then the one
+    under the cursor, then the primary. Tk's winfo_screenwidth() answers
+    "primary" every time on Windows (PASTE_UX_PLAN D2), which is how the
+    clipboard-fallback and retry notices ended up on a screen the user was
+    not looking at."""
+    try:
+        if target_hwnd:
+            area = winfx.work_area_for_window(int(target_hwnd))
+            if area:
+                return area
+        return winfx.work_area_for_cursor()
+    except Exception:
+        return winfx.primary_work_area()
 
 
 def _show_anchored_toast(t: dict) -> None:
-    global _toast_offset
     msg = t.get("message", "")
     kind = t.get("kind", "info")
     action_label = t.get("action_label", "")
@@ -605,12 +776,16 @@ def _show_anchored_toast(t: dict) -> None:
     win.update_idletasks()
     w = win.winfo_reqwidth()
     h = win.winfo_reqheight()
-    sw = win.winfo_screenwidth()
-    sh = win.winfo_screenheight()
-    # Stack above the badge area
-    y = sh - h - 130 - _toast_offset
-    win.geometry(f"{w}x{h}+{sw - w - 20}+{y}")
-    _toast_offset += h + 10
+    work = _toast_work_area(t.get("target_hwnd", 0))
+    left, top, right, bottom = work
+    offset = _toast_offsets.get(work, 0)
+    # Bottom-right of the monitor in play, stacked above the badge area, then
+    # clamped so a tall toast or a short secondary display can't push it off.
+    x = right - w - 20
+    y = bottom - h - 130 - offset
+    x, y = _clamp_to_workarea(x, y, w, h, work)
+    win.geometry(f"{w}x{h}+{x}+{y}")
+    _toast_offsets[work] = offset + h + 10
 
     winfx.apply_rounded_region(win, radius=10)
     winfx.apply_no_activate(win)  # clicking the action must not pull focus off the target
@@ -634,8 +809,7 @@ def _show_anchored_toast(t: dict) -> None:
     dismiss_ms = int(t.get("dwell_ms") or 0) or (7000 if action_label else 4500)
 
     def _dismiss():
-        global _toast_offset
-        _toast_offset = max(0, _toast_offset - h - 10)
+        _toast_offsets[work] = max(0, _toast_offsets.get(work, 0) - h - 10)
         winfx.fade_out_then_destroy(win, duration_ms=180)
 
     win.after(dismiss_ms, _dismiss)
@@ -646,20 +820,390 @@ def _show_anchored_toast(t: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _show_edge_flash(colour: str) -> None:
-    """Thin horizontal bar at the top of the screen, fades in then out fast."""
+    """Thin horizontal bar along the top of the work area the cursor is on,
+    fades in then out fast. Cursor-anchored, not primary-anchored: a hotkey
+    confirmation the user cannot see confirms nothing (PASTE_UX_PLAN D2)."""
     win = tk.Toplevel(_root)
     win.overrideredirect(True)
     win.attributes("-topmost", True)
     win.attributes("-alpha", 0.0)
     win.configure(bg=colour)
 
-    sw = win.winfo_screenwidth()
-    win.geometry(f"{sw}x3+0+0")
+    left, top, right, _bottom = winfx.work_area_for_cursor()
+    win.geometry(f"{max(1, right - left)}x3+{left}+{top}")
 
     # Fade in fast, hold briefly, fade out
     winfx.fade_to(win, 0.65, duration_ms=80,
                   on_done=lambda: win.after(
                       120, lambda: winfx.fade_out_then_destroy(win, duration_ms=180)))
+
+
+# ---------------------------------------------------------------------------
+# Target ring (PASTE_UX_PLAN section 5)
+#
+# A click-through outline over the window or element a dictation is about to
+# land in, so "where will this text go" is answered before speaking instead
+# of afterwards. Standalone widget: show_target_ring/hide_target_ring are the
+# whole surface, the recording and place-mode wiring lives with the caller.
+# ---------------------------------------------------------------------------
+
+_ring_win:    tk.Toplevel | None = None
+_ring_canvas: tk.Canvas | None = None
+_ring_chip:   tk.Label | None = None
+
+# Punched out of the overlay via -transparentcolor so only the outline and the
+# chip paint. Deliberately a colour no theme token uses.
+_RING_KEY_COLOUR = "#ff00fe"
+_RING_ALPHA      = 0.95
+_RING_MIN_PX     = 12     # smaller than this and there is nothing to outline
+
+
+def _ring_colour(colour_key: str) -> str:
+    """Ring colour from the palette, never a literal: the accent for a target
+    we trust, amber for one the probe could not vouch for. Anything
+    unrecognised is treated as unknown, because guessing "fine" is the
+    failure this whole overlay exists to prevent."""
+    return {"ok": _BLUE, "warn": _PAUSE, "unknown": _PAUSE}.get(colour_key, _PAUSE)
+
+
+def _ring_alive() -> bool:
+    global _ring_win, _ring_canvas, _ring_chip
+    if _ring_win is None:
+        return False
+    try:
+        return bool(_ring_win.winfo_exists())
+    except Exception:
+        _ring_win = None
+        _ring_canvas = None
+        _ring_chip = None
+        return False
+
+
+def _destroy_target_ring() -> None:
+    global _ring_win, _ring_canvas, _ring_chip
+    win = _ring_win
+    _ring_win = None
+    _ring_canvas = None
+    _ring_chip = None
+    if win is None:
+        return
+    try:
+        if _animations_enabled():
+            winfx.fade_out_then_destroy(win, duration_ms=120)
+        else:
+            win.destroy()
+    except Exception:
+        pass
+
+
+def _draw_ring_outline(canvas: tk.Canvas, x0: int, y0: int, x1: int, y1: int,
+                       radius: int, colour: str, width: int) -> None:
+    """Rounded outline as four corner arcs plus four straight sides: the Tk
+    canvas has no rounded-rectangle primitive."""
+    d = radius * 2
+    for bbox, start in (((x0, y0, x0 + d, y0 + d), 90),
+                        ((x1 - d, y0, x1, y0 + d), 0),
+                        ((x0, y1 - d, x0 + d, y1), 180),
+                        ((x1 - d, y1 - d, x1, y1), 270)):
+        canvas.create_arc(*bbox, start=start, extent=90, style=tk.ARC,
+                          outline=colour, width=width)
+    canvas.create_line(x0 + radius, y0, x1 - radius, y0, fill=colour, width=width)
+    canvas.create_line(x0 + radius, y1, x1 - radius, y1, fill=colour, width=width)
+    canvas.create_line(x0, y0 + radius, x0, y1 - radius, fill=colour, width=width)
+    canvas.create_line(x1, y0 + radius, x1, y1 - radius, fill=colour, width=width)
+
+
+def _build_target_ring() -> None:
+    global _ring_win, _ring_canvas, _ring_chip
+    win = tk.Toplevel(_root)
+    win.overrideredirect(True)
+    win.attributes("-topmost", True)
+    win.attributes("-alpha", 0.0)
+    win.configure(bg=_RING_KEY_COLOUR)
+    try:
+        win.attributes("-transparentcolor", _RING_KEY_COLOUR)
+    except Exception:
+        pass
+    canvas = tk.Canvas(win, bg=_RING_KEY_COLOUR, highlightthickness=0, bd=0)
+    canvas.pack(fill=tk.BOTH, expand=True)
+    chip = tk.Label(win, text="", bg=_BG, fg=_FG, font=_FONT_CHIP,
+                    padx=_px(6), pady=_px(2))
+    _ring_win, _ring_canvas, _ring_chip = win, canvas, chip
+
+
+def _handle_target_ring(cmd: dict | None) -> None:
+    """Move/repaint the ring, or take it down. Runs on the tkinter thread."""
+    if cmd is None or not _target_ring_enabled():
+        _destroy_target_ring()
+        return
+    try:
+        left, top, right, bottom = (int(v) for v in (cmd.get("rect") or ()))
+    except Exception:
+        _destroy_target_ring()
+        return
+    if right - left < _RING_MIN_PX or bottom - top < _RING_MIN_PX:
+        _destroy_target_ring()
+        return
+
+    colour = _ring_colour(cmd.get("colour", "ok"))
+    label  = (cmd.get("label") or "").strip()
+    stroke = _px(2)
+    pad    = _px(4)          # the outline sits just outside the target rect
+    radius = _px(6)
+
+    fresh = not _ring_alive()
+    if fresh:
+        _build_target_ring()
+    win, canvas, chip = _ring_win, _ring_canvas, _ring_chip
+    if win is None or canvas is None:
+        return
+
+    w = (right - left) + pad * 2
+    h = (bottom - top) + pad * 2
+    # No work-area clamp here: the ring must stay registered with the target
+    # even when the target itself runs off the edge of its monitor.
+    win.geometry(f"{w}x{h}+{left - pad}+{top - pad}")
+    canvas.configure(width=w, height=h)
+    canvas.delete("all")
+    inset = max(1, stroke // 2)
+    _draw_ring_outline(canvas, inset, inset, w - inset - 1, h - inset - 1,
+                       radius, colour, stroke)
+
+    if label and chip is not None:
+        chip.configure(text=label, fg=colour)
+        chip.place(x=pad, y=pad)
+    elif chip is not None:
+        chip.place_forget()
+
+    win.update_idletasks()
+    exstyle = winfx.apply_click_through(win)
+    if not exstyle & win32con.WS_EX_TRANSPARENT:
+        # A ring that swallows the user's clicks is worse than no ring, so a
+        # failed style change takes the overlay down rather than leaving a
+        # hit-testable sheet over the target.
+        log_error("preview", "target ring is not click-through, dropping it")
+        _destroy_target_ring()
+        return
+    try:
+        win.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    if fresh:
+        if _animations_enabled():   # already folds in winfx.reduce_motion()
+            winfx.fade_in(win, target=_RING_ALPHA, duration_ms=140)
+        else:
+            try:
+                win.attributes("-alpha", _RING_ALPHA)
+            except Exception:
+                pass
+
+
+# Verdict -> ring colour. EDITABLE is the only answer that earns the accent;
+# NOT_EDITABLE and UNKNOWN both get amber, because "we could not tell" and
+# "there is nowhere to type" are equally worth a second look before speaking.
+_RING_COLOUR_FOR_VERDICT = {"EDITABLE": "ok", "NOT_EDITABLE": "warn", "UNKNOWN": "warn"}
+
+
+def _foreground_hwnd() -> int:
+    try:
+        return int(win32gui.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
+def _window_ring(hwnd: int) -> tuple | None:
+    """Fallback ring spec: outline the whole window, claim nothing about it."""
+    try:
+        rect = win32gui.GetWindowRect(hwnd)
+    except Exception:
+        return None
+    return rect, "unknown", ""
+
+
+def _ring_spec(hwnd: int) -> tuple | None:
+    """(rect, colour_key, label) for hwnd, or None when there is nothing to
+    outline. Runs off the tkinter thread: targetprobe.probe has a 250ms budget
+    and the after() loop has 50ms."""
+    if not hwnd:
+        return None
+    if targetprobe is None or not _target_probe_enabled():
+        return _window_ring(hwnd)
+    try:
+        target = targetprobe.probe(hwnd)
+    except Exception as exc:
+        warn("preview", f"target probe failed, outlining the window instead: {exc}")
+        return _window_ring(hwnd)
+    colour = _RING_COLOUR_FOR_VERDICT.get(getattr(target, "verdict", ""), "warn")
+    rect = getattr(target, "rect", None)
+    if not rect:
+        fallback = _window_ring(hwnd)
+        if fallback is None:
+            return None
+        return fallback[0], colour, getattr(target, "label", "")
+    return rect, colour, getattr(target, "label", "")
+
+
+def _ring_worker(hwnd: int) -> None:
+    """Worker body behind show_ring_for_window."""
+    global _place_ring_hwnd
+    try:
+        spec = _ring_spec(hwnd)
+    except Exception as exc:
+        warn("preview", f"ring resolution failed: {exc}")
+        return
+    if spec is None:
+        hide_target_ring()
+        return
+    _place_ring_hwnd = hwnd
+    show_target_ring(spec[0], spec[1], spec[2])
+
+
+# ---------------------------------------------------------------------------
+# Place mode armed overlay (PASTE_UX_PLAN section 4)
+#
+# Click-through and never focusable, same as the ring and for the same reason:
+# the very next click has to reach the field the user is choosing. All of it
+# runs on the tkinter thread, driven off _place_q in _tick.
+# ---------------------------------------------------------------------------
+
+_place_win: tk.Toplevel | None = None
+_place_armed = False           # tkinter thread only
+_place_poll_tick = 0
+_place_ring_hwnd = 0           # last window the ring was resolved for
+_place_probe_busy = False
+
+_PLACE_POLL_TICKS   = 4        # _tick runs every 50ms, so ~200ms between polls
+_PLACE_ALPHA        = 0.96
+_PLACE_TEXT_CHARS   = 64       # first line of the parked text, truncated to this
+_PLACE_CURSOR_GAP   = 18       # px between the cursor and the card
+
+
+def _place_preview_line(text: str) -> str:
+    """First line of the parked text, truncated. The overlay answers "which
+    dictation is this", not "what does it say" - the panel already did that."""
+    first = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    if len(first) > _PLACE_TEXT_CHARS:
+        return first[:_PLACE_TEXT_CHARS - 1].rstrip() + "…"
+    return first
+
+
+def _destroy_place_overlay() -> None:
+    global _place_win, _place_armed, _place_ring_hwnd, _place_poll_tick
+    win = _place_win
+    _place_win = None
+    _place_armed = False
+    _place_ring_hwnd = 0
+    _place_poll_tick = 0
+    _destroy_target_ring()
+    if win is None:
+        return
+    try:
+        if _animations_enabled():
+            winfx.fade_out_then_destroy(win, duration_ms=120)
+        else:
+            win.destroy()
+    except Exception:
+        pass
+
+
+def _handle_place_overlay(cmd: dict | None) -> None:
+    """Build or tear down the armed overlay. Runs on the tkinter thread."""
+    global _place_win, _place_armed
+    if cmd is None:
+        _destroy_place_overlay()
+        return
+
+    _destroy_place_overlay()    # re-arming replaces the card rather than stacking
+    refresh_theme()
+    try:
+        cx, cy = win32api.GetCursorPos()
+    except Exception:
+        cx, cy = 200, 200
+
+    win = tk.Toplevel(_root)
+    win.overrideredirect(True)
+    win.attributes("-topmost", True)
+    win.attributes("-alpha", 0.0)
+    win.configure(bg=_BORDER2)
+
+    inner = tk.Frame(win, bg=_BG, padx=14, pady=10)
+    inner.pack(padx=1, pady=1)
+
+    head = tk.Frame(inner, bg=_BG)
+    head.pack(fill=tk.X)
+    tk.Label(head, text="●", bg=_BG, fg=_BLUE,
+             font=(_FONT_FAM_TEXT, 9)).pack(side=tk.LEFT, padx=(0, 7))
+    tk.Label(head, text="ARMED", bg=_BG, fg=_BLUE,
+             font=(_FONT_FAM_DISPLAY, 9, "bold")).pack(side=tk.LEFT)
+
+    line = _place_preview_line(cmd.get("text", ""))
+    if line:
+        tk.Label(inner, text=line, bg=_BG, fg=_FG, font=_FONT_BODY,
+                 wraplength=_px(300), justify="left", anchor="w").pack(
+                     fill=tk.X, pady=(6, 0))
+
+    tk.Label(inner, text="Click the field to insert", bg=_BG, fg=_FG2,
+             font=_FONT_HINT, anchor="w").pack(fill=tk.X, pady=(8, 0))
+    tk.Label(inner, text="Esc to cancel", bg=_BG, fg=_FG3,
+             font=_FONT_HINT, anchor="w").pack(fill=tk.X)
+
+    win.update_idletasks()
+    w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+    work = _monitor_key_and_workarea(cx, cy)[1]
+    x, y = _clamp_to_workarea(cx + _PLACE_CURSOR_GAP, cy + _PLACE_CURSOR_GAP,
+                              w, h, work)
+    win.geometry(f"{w}x{h}+{x}+{y}")
+
+    exstyle = winfx.apply_click_through(win)
+    if not exstyle & win32con.WS_EX_TRANSPARENT:
+        # Same rule as the ring: an overlay that swallows the next click is
+        # worse than no overlay, and the next click is the whole feature.
+        log_error("preview", "place overlay is not click-through, dropping it")
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        return
+
+    _place_win = win
+    _place_armed = True
+    if _animations_enabled():
+        winfx.fade_in(win, target=_PLACE_ALPHA, duration_ms=140)
+    else:
+        try:
+            win.attributes("-alpha", _PLACE_ALPHA)
+        except Exception:
+            pass
+
+
+def _poll_place_target() -> None:
+    """While armed, follow the focused window with the target ring.
+
+    On the after() loop rather than a thread of its own, and only the probe
+    itself goes to a worker. The ring is only re-resolved when the focused
+    window actually changes, so moving around costs a GetForegroundWindow per
+    poll and nothing else."""
+    global _place_poll_tick, _place_probe_busy
+    _place_poll_tick += 1
+    if _place_poll_tick % _PLACE_POLL_TICKS:
+        return
+    if _place_probe_busy or not _target_ring_enabled():
+        return
+    hwnd = _foreground_hwnd()
+    if not hwnd or hwnd == _place_ring_hwnd:
+        return
+
+    _place_probe_busy = True
+
+    def _worker() -> None:
+        global _place_probe_busy
+        try:
+            _ring_worker(hwnd)
+        finally:
+            _place_probe_busy = False
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -1804,7 +2348,16 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
         def _insert_worker() -> None:
             status = target_fn(to_paste, hwnd)
-            if status != inject.INSERTED and _on_insert_failed:
+            if status == inject.INSERTED:
+                # Confirmed landed, so nothing is left to recover. Without
+                # this the tray dot stayed lit forever after a panel insert.
+                stash.mark_consumed()
+            # Escalation table (PASTE_UX_PLAN section 5): only a status that
+            # did not land escalates. INSERTED_UNCONFIRMED means no signal,
+            # not failure - terminals, RDP and every app with no accessibility
+            # layer land there, and shouting at all of them would train the
+            # user to ignore the notice that matters.
+            if not inject.landed(status) and _on_insert_failed:
                 _on_insert_failed(to_paste, status)
 
         threading.Thread(target=_insert_worker, daemon=True).start()
@@ -2165,6 +2718,158 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
         _dismiss_cancel_ref[0] = _dismiss_cancel
         _dismiss_start()
+
+
+# ---------------------------------------------------------------------------
+# Recovery panel (PASTE_UX_PLAN section 3): the escalation surface for an
+# insert that did not land. A corner toast is not enough for text that would
+# otherwise be lost, so this reopens a panel at the cursor, which puts it on
+# the screen the user is on by construction.
+#
+# Same panel construction idiom as _open_window (outer ring, accent bar,
+# header, text box, button row, rounded corners, backdrop, entrance) but a
+# separate function: _open_window is the dictation flow itself (correction
+# learning, raw/cleaned toggle, append-to-selection, per-word confidence, the
+# countdown/pin state machine, the global Enter/Insert/Esc hooks and the
+# RDP-aware deferred focus steal), all keyed off an hwnd this panel exists
+# precisely because we can no longer trust. Threading two modes through those
+# 600 lines would put the main dictation path at risk for a surface that
+# needs a text box and two buttons.
+# ---------------------------------------------------------------------------
+
+def _open_recovery_panel(cmd: dict) -> None:
+    global _current_preview_win
+
+    text       = cmd.get("text", "")
+    reason     = cmd.get("reason", "")
+    on_place   = cmd.get("on_place")
+    on_dismiss = cmd.get("on_dismiss")
+
+    # Audible cue on a real miss (PASTE_UX_PLAN section 3). This panel only
+    # ever opens on positive evidence that the insert did not land, so it is
+    # the error class, same as a kind="error" toast.
+    chime.play_error()
+
+    refresh_theme()
+    try:
+        cx, cy = win32api.GetCursorPos()
+    except Exception:
+        cx, cy = 200, 200
+
+    win = tk.Toplevel(_root)
+    _current_preview_win = win
+    win.overrideredirect(True)
+    win.configure(bg=_BG)
+    win.attributes("-topmost", True)
+    win.attributes("-alpha", 0.0)   # winfx fades in at the end
+
+    accent = _PAUSE      # this panel only ever appears on a failure
+    accent_hv = _hex_blend(accent, "#ffffff", 0.22)
+
+    ring = tk.Frame(win, bg=_BORDER2, bd=0)
+    ring.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+    tk.Frame(ring, bg=accent, height=3).pack(fill=tk.X, side=tk.TOP)
+
+    frame = tk.Frame(ring, bg=_BG, padx=20, pady=16)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    header_row = tk.Frame(frame, bg=_BG)
+    header_row.pack(fill=tk.X, pady=(0, 8))
+    tk.Label(header_row, text="Quiett", bg=_BG, fg=_FG3,
+             font=(_FONT_FAM_DISPLAY, 9, "normal"), anchor="w").pack(side=tk.LEFT)
+    tk.Label(header_row, text="●", bg=_BG, fg=accent,
+             font=(_FONT_FAM_TEXT, 7, "normal")).pack(side=tk.LEFT, padx=(6, 0))
+    tk.Label(header_row, text="Not inserted", bg=_BG, fg=accent,
+             font=(_FONT_FAM_TEXT, 8, "normal"), anchor="e").pack(side=tk.RIGHT)
+
+    # Read-only on purpose: the panel never takes the foreground (see
+    # apply_no_activate below, same reason as the toast: the placement that
+    # follows targets whatever the user focuses next), so an editable box
+    # would offer typing that cannot reach it. Selecting and copying still
+    # work, and the text is on the clipboard as well.
+    entry = tk.Text(
+        frame, font=_FONT_BODY, wrap=tk.WORD,
+        bg=_BG2, fg=_FG, relief="flat", bd=0,
+        highlightthickness=1,
+        highlightbackground=_BORDER, highlightcolor=accent,
+        height=4, padx=10, pady=8,
+    )
+    entry.insert("1.0", text or "(nothing captured)")
+    entry.configure(state="disabled")
+    entry.pack(fill=tk.X, pady=(0, 6))
+
+    tk.Label(
+        frame, text=(reason or "The text did not reach the target window."),
+        bg=_BG, fg=_FG2, font=_FONT_HINT, anchor="w",
+        wraplength=380, justify="left",
+    ).pack(fill=tk.X, pady=(0, 12))
+
+    def _close() -> None:
+        global _preview_open, _current_preview_win
+        _preview_open = False
+        _current_preview_win = None
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    def _fire(cb) -> None:
+        # Close first: the callback re-targets another window, and our own
+        # panel sitting on top of it is one more thing in the way.
+        _close()
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            log_error("preview", f"recovery panel callback failed: {e}")
+
+    btns = tk.Frame(frame, bg=_BG)
+    btns.pack(anchor=tk.W)
+
+    place_btn = tk.Button(
+        btns, text="Place it", command=lambda: _fire(on_place), width=10,
+        bg=accent, fg="#ffffff",
+        activebackground=accent_hv, activeforeground="#ffffff",
+        relief="flat", bd=0,
+        font=_FONT_BTN, padx=8, pady=6, cursor="hand2",
+    )
+    place_btn.bind("<Enter>", lambda e: place_btn.config(bg=accent_hv))
+    place_btn.bind("<Leave>", lambda e: place_btn.config(bg=accent))
+    place_btn.pack(side=tk.LEFT)
+
+    dismiss_wrap = tk.Frame(btns, bg=_BORDER, padx=1, pady=1)
+    tk.Button(
+        dismiss_wrap, text="Dismiss", command=lambda: _fire(on_dismiss), width=10,
+        bg=_BG, fg=_FG2,
+        activebackground=_BG2, activeforeground=_FG,
+        relief="flat", bd=0,
+        font=_FONT_BTN, padx=8, pady=6, cursor="hand2",
+    ).pack()
+    dismiss_wrap.pack(side=tk.LEFT, padx=(8, 0))
+
+    # Only fire if the user has clicked the panel into focus; without that it
+    # has no OS keyboard focus and these never see a key.
+    win.bind("<Escape>", lambda e: _fire(on_dismiss))
+    win.bind("<Return>", lambda e: _fire(on_place))
+
+    # ── Size & position, on the cursor's monitor ───────────────────────────
+    win.update_idletasks()
+    w = max(420, win.winfo_reqwidth())
+    h = win.winfo_reqheight()
+    work = _monitor_key_and_workarea(cx, cy)[1]
+    left, top, right, bottom = work
+    # _calc_position works in single-screen coordinates, so hand it the work
+    # area as if it were the screen and translate the answer back.
+    x, y = _calc_position(cx - left, cy - top, w, h,
+                          right - left, bottom - top, "cursor")
+    x, y = _clamp_to_workarea(x + left, y + top, w, h, work)
+    win.geometry(f"{w}x{h}+{x}+{y}")
+
+    winfx.apply_rounded_region(win, radius=12)
+    winfx.apply_no_activate(win)   # placing must not pull focus off the next target
+    _apply_backdrop(win)
+    _play_entrance(win, 1.0, dy=_px(14), duration_ms=200)
 
 
 # ---------------------------------------------------------------------------

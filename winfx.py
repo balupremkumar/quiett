@@ -50,6 +50,117 @@ def reduce_motion() -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Monitor geometry (PASTE_UX_PLAN section 3): Tk's winfo_screenwidth() on
+# Windows reports the PRIMARY display, never the virtual desktop, so anything
+# placed from it lands on the wrong screen for a two-monitor user. These
+# answer "which work area is this point / window / cursor on", work area
+# meaning the monitor minus the taskbar. Every one degrades to the primary
+# work area instead of raising: a monitor can be unplugged between two calls
+# and no popup is worth taking the app down for.
+# ---------------------------------------------------------------------------
+MONITOR_DEFAULTTONULL = 0
+MONITOR_DEFAULTTOPRIMARY = 1
+MONITOR_DEFAULTTONEAREST = 2
+
+_SM_CXSCREEN = 0
+_SM_CYSCREEN = 1
+_FALLBACK_WORK_AREA = (0, 0, 1920, 1080)
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD)]
+
+
+try:
+    # HMONITOR is a pointer; ctypes' default c_int return truncates it on
+    # 64-bit Windows and every GetMonitorInfoW that follows then fails.
+    ctypes.windll.user32.MonitorFromPoint.restype = wintypes.HMONITOR
+    ctypes.windll.user32.MonitorFromWindow.restype = wintypes.HMONITOR
+except Exception:
+    pass
+
+
+def _work_area_of(hmon) -> tuple[int, int, int, int] | None:
+    """(left, top, right, bottom) work area of an HMONITOR. None when the
+    handle is null/stale or GetMonitorInfoW refuses."""
+    if not hmon:
+        return None
+    info = _MONITORINFO()
+    info.cbSize = ctypes.sizeof(_MONITORINFO)
+    if not ctypes.windll.user32.GetMonitorInfoW(
+            wintypes.HMONITOR(hmon), ctypes.pointer(info)):
+        return None
+    r = info.rcWork
+    if r.right <= r.left or r.bottom <= r.top:
+        return None
+    return int(r.left), int(r.top), int(r.right), int(r.bottom)
+
+
+def primary_work_area() -> tuple[int, int, int, int]:
+    """Work area of the primary display, the last-resort fallback for every
+    other helper here, and never allowed to fail."""
+    try:
+        area = _work_area_of(ctypes.windll.user32.MonitorFromPoint(
+            wintypes.POINT(0, 0), MONITOR_DEFAULTTOPRIMARY))
+        if area:
+            return area
+    except Exception:
+        pass
+    try:
+        w = int(ctypes.windll.user32.GetSystemMetrics(_SM_CXSCREEN))
+        h = int(ctypes.windll.user32.GetSystemMetrics(_SM_CYSCREEN))
+        if w > 0 and h > 0:
+            return 0, 0, w, h
+    except Exception:
+        pass
+    return _FALLBACK_WORK_AREA
+
+
+def work_area_for_point(x: int, y: int) -> tuple[int, int, int, int]:
+    """Work area of the monitor containing (x, y) in virtual-desktop
+    coordinates. Nearest monitor when the point is off every screen."""
+    try:
+        area = _work_area_of(ctypes.windll.user32.MonitorFromPoint(
+            wintypes.POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST))
+        if area:
+            return area
+    except Exception:
+        pass
+    return primary_work_area()
+
+
+def work_area_for_window(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Work area of the monitor holding most of `hwnd`. None (not the
+    primary area) for a falsy or invalid hwnd, so callers can tell "no target
+    window" apart from "target window is on the primary screen" and fall
+    through to the cursor instead."""
+    if not hwnd:
+        return None
+    try:
+        if not ctypes.windll.user32.IsWindow(wintypes.HWND(int(hwnd))):
+            return None
+        hmon = ctypes.windll.user32.MonitorFromWindow(
+            wintypes.HWND(int(hwnd)), MONITOR_DEFAULTTONEAREST)
+        return _work_area_of(hmon) or primary_work_area()
+    except Exception:
+        return primary_work_area()
+
+
+def work_area_for_cursor() -> tuple[int, int, int, int]:
+    """Work area of the monitor the mouse pointer is currently on."""
+    try:
+        pt = wintypes.POINT()
+        if ctypes.windll.user32.GetCursorPos(ctypes.pointer(pt)):
+            return work_area_for_point(int(pt.x), int(pt.y))
+    except Exception:
+        pass
+    return primary_work_area()
+
+
 class _MARGINS(ctypes.Structure):
     _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
                 ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
@@ -112,6 +223,28 @@ def apply_no_activate(win) -> None:
                                style | win32con.WS_EX_NOACTIVATE)
     except Exception:
         pass
+
+
+def apply_click_through(win) -> int:
+    """Make an overlay invisible to the mouse and to the focus chain, for
+    windows that only ever decorate the screen (the target ring).
+
+    WS_EX_TRANSPARENT drops the window out of hit-testing so every click goes
+    to whatever is underneath, WS_EX_LAYERED is what lets it be drawn without
+    a hit region at all (Tk also needs it for -transparentcolor/-alpha),
+    WS_EX_NOACTIVATE keeps it out of the foreground, WS_EX_TOOLWINDOW keeps
+    it out of Alt+Tab. Returns the resulting ex-style, 0 on failure. An
+    overlay that eats the user's clicks is worse than no overlay, so callers
+    can assert the bits actually landed."""
+    try:
+        hwnd = _toplevel_hwnd(win)
+        style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+        style |= (win32con.WS_EX_TRANSPARENT | win32con.WS_EX_LAYERED
+                  | win32con.WS_EX_NOACTIVATE | win32con.WS_EX_TOOLWINDOW)
+        win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, style)
+        return win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+    except Exception:
+        return 0
 
 
 def _apply_drop_shadow(hwnd: int) -> None:

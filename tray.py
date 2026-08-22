@@ -21,6 +21,7 @@ import pyperclip
 import pystray
 from PIL import Image, ImageDraw
 
+import stash
 import theme
 
 _CONFIG_FILE = "config.json"
@@ -76,6 +77,11 @@ _DOT = {  # state -> indicator dot colour, from theme.py (QUIETT_UI_PLAN P5);
     "recording":  _hex_to_rgb(theme.DARK["rec"]),
     "processing": _hex_to_rgb(theme.DARK["pause"]),
 }
+
+# Parked-dictation marker: shown over any state, so it needs its own colour
+# rather than a state entry.
+_STASH_DOT = _hex_to_rgb(theme.DARK["ion"])
+_STASH_LABEL_TRUNCATE = 40
 
 
 # ---------------------------------------------------------------------------
@@ -214,13 +220,15 @@ def _build_pulse_frames() -> list[Image.Image]:
 
 _theme_light: bool | None = None
 _ICONS: dict = {}
+_STASH_ICONS: dict = {}
 _PULSE_FRAMES: list = []
 
 
 def _rebuild_icons() -> None:
-    global _ICONS, _PULSE_FRAMES, _theme_light
+    global _ICONS, _STASH_ICONS, _PULSE_FRAMES, _theme_light
     _theme_light = _system_light_taskbar()
     _ICONS = {s: _make_icon(s) for s in _TOOLTIPS}
+    _STASH_ICONS = {s: _make_icon(s, dot=_STASH_DOT) for s in _TOOLTIPS}
     _PULSE_FRAMES = _build_pulse_frames()
 
 
@@ -234,7 +242,7 @@ def refresh_theme() -> None:
     _rebuild_icons()
     if _icon is not None:
         try:
-            _icon.icon = _ICONS.get(_state, _ICONS["idle"])
+            _icon.icon = _icon_for(_state)
         except Exception:
             pass
 
@@ -442,6 +450,32 @@ def _with_incognito_suffix(title: str) -> str:
     return f"{title}  ·  \U0001F576 Incognito" if _incognito else title
 
 
+def _has_stashed() -> bool:
+    """True while a dictation is parked and unplaced. Never allowed to raise
+    into the tray: a broken stash must not take the menu with it."""
+    try:
+        return stash.has_unconsumed()
+    except Exception:
+        return False
+
+
+def _icon_for(state: str) -> Image.Image:
+    """State icon, carrying the parked-dictation dot when there is something
+    the user has not placed yet."""
+    icons = _STASH_ICONS if _has_stashed() else _ICONS
+    return icons.get(state, icons["idle"])
+
+
+def refresh_stash() -> None:
+    """The stash changed: re-render the dot and the menu. Any thread."""
+    with _lock:
+        if _icon is None:
+            return
+        if _state != "recording":   # the pulse owns the icon while recording
+            _icon.icon = _icon_for(_state)
+        _icon.update_menu()
+
+
 def set_state(state: str) -> None:
     global _state
     with _lock:
@@ -454,7 +488,7 @@ def set_state(state: str) -> None:
                 _icon.icon = _ICONS["recording"]
                 _start_pulse()
             else:
-                _icon.icon = _ICONS.get(state, _ICONS["idle"])
+                _icon.icon = _icon_for(state)
             _icon.title = _with_incognito_suffix(
                 _pause_tooltip() if _paused else _TOOLTIPS.get(state, f"Quiett — {state}"))
             _icon.update_menu()
@@ -571,6 +605,29 @@ def _latest_history_text() -> str:
     return ""
 
 
+def _place_last_label(_item=None) -> str:
+    """First menu item while a dictation is parked, with the text inline so
+    the user can see which one it is before placing it."""
+    parked = stash.get() or {}
+    text = " ".join((parked.get("text") or "").split())
+    if len(text) > _STASH_LABEL_TRUNCATE:
+        text = text[:_STASH_LABEL_TRUNCATE - 1] + "…"
+    return f"Place last dictation: {text}" if text else "Place last dictation"
+
+
+def _place_last(icon, item):
+    """Recovery for a dictation that never confirmed: re-insert the parked text
+    into whatever is focused now, then let the insert path decide whether it
+    counts as consumed."""
+    parked = stash.get() or {}
+    text = (parked.get("text") or "").strip()
+    if not text:
+        notify("Quiett", "Nothing to place")
+        return
+    if _on_insert_last:
+        _on_insert_last(text)
+
+
 def _insert_last(icon, item):
     """Re-insert the newest dictation into whatever is focused now — the
     recovery path when a paste never landed."""
@@ -676,6 +733,19 @@ def run() -> None:
         if _on_view_profile:
             _on_view_profile()
 
+    def _unstick_modifiers(icon, item):
+        """Manual release for a modifier latched in a remote session (scrolling
+        zooms because Ctrl is stuck). Off the menu thread so SendInput never
+        blocks the tray. Imported lazily, same as the mic menu does with audio."""
+        def _run():
+            try:
+                import inject
+                result = inject.unstick_modifiers()
+            except Exception:
+                result = "Could not release modifiers"
+            notify("Quiett", result)
+        threading.Thread(target=_run, daemon=True).start()
+
     def _open_settings(icon, item):
         if _on_open_settings:
             _on_open_settings()
@@ -729,10 +799,16 @@ def run() -> None:
         pystray.MenuItem("Read-aloud Speed", tts_speed_menu),
         pystray.MenuItem("Speech Profile", _view_profile),
         pystray.MenuItem("Rebuild Voice Profile", _rebuild_voice_profile),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Unstick modifiers", _unstick_modifiers),
         pystray.MenuItem("Open Config", _open_config),
     )
 
     menu = pystray.Menu(
+        # Only present while something is parked, so it is the first thing the
+        # cursor lands on exactly when it is needed.
+        pystray.MenuItem(_place_last_label, _place_last,
+                         visible=lambda item: _has_stashed()),
         pystray.MenuItem(lambda _: _label(), lambda icon, item: None, enabled=False),
         # Hidden default item — fires on left-click, doesn't show up in the right-click menu
         pystray.MenuItem("Open Dashboard", _open_dashboard, default=True, visible=False),

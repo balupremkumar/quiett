@@ -47,3 +47,6 @@ desktop.ini
 recordings/
 voice_profile/
 history.lock
+
+# Serena MCP tool cache, not project code
+.serena/

@@ -147,7 +147,7 @@ class TestInjectText:
                             lambda target=None, daemon=None: MagicMock(start=lambda: None))
         inject.configure(restore_delay_ms=150, rdp_clipboard_settle_ms=250,
                          rdp_clipboard_restore_delay_ms=3000)
-        assert inject.inject_text("remote text", 1234) == inject.INSERTED
+        assert inject.inject_text("remote text", 1234) == inject.INSERTED_UNCONFIRMED
         i = [n for n, c in enumerate(calls) if c[0] == "keystroke"][0]
         assert calls[i - 1] == ("sleep", 0.25)
         assert ("set_text", "remote text") in calls[:i]
@@ -228,18 +228,63 @@ class TestInjectStatus:
         assert inject.inject_text("hello", 1234) == inject.CLIPBOARD
         assert copied == ["hello"]
 
-    def test_typed_text_reports_inserted(self, monkeypatch, live_target):
+    def test_typed_text_reports_unconfirmed_without_a_verifier(self, monkeypatch, live_target):
+        """SendInput accepting the events is not proof the target took them, so
+        with nothing able to confirm it the status must say so."""
+        copied = []
         monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
         monkeypatch.setattr(inject, "_send_unicode_text",
                             lambda t, batch=32, batch_delay_ms=2: len(t))
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: copied.append(t) or True)
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
+        # The type path never touches the clipboard on its own, so an
+        # unconfirmed insert has to park the text there or nothing is left.
+        assert copied == ["hello"]
+
+    def test_typed_text_reports_inserted_when_verified(self, monkeypatch, live_target):
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
+        monkeypatch.setattr(inject, "_send_unicode_text",
+                            lambda t, batch=32, batch_delay_ms=2: len(t))
+        monkeypatch.setattr(inject, "_verify_fn", lambda hwnd, token: True)
         assert inject.inject_text("hello", 1234) == inject.INSERTED
 
-    def test_successful_paste_reports_inserted(self, monkeypatch, live_target):
+    def test_typed_text_verified_as_missing_reports_clipboard(self, monkeypatch, live_target):
+        copied = []
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
+        monkeypatch.setattr(inject, "_send_unicode_text",
+                            lambda t, batch=32, batch_delay_ms=2: len(t))
+        monkeypatch.setattr(inject, "_verify_fn", lambda hwnd, token: False)
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: copied.append(t) or True)
+        assert inject.inject_text("hello", 1234) == inject.CLIPBOARD
+        assert copied == ["hello"]
+
+    def test_a_raising_verifier_is_no_signal(self, monkeypatch, live_target):
+        """A broken probe must never turn into a failed insert."""
+        def _boom(hwnd, token):
+            raise RuntimeError("UIA timed out")
+
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
+        monkeypatch.setattr(inject, "_send_unicode_text",
+                            lambda t, batch=32, batch_delay_ms=2: len(t))
+        monkeypatch.setattr(inject, "_verify_fn", _boom)
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
+
+    def test_successful_paste_reports_unconfirmed(self, monkeypatch, live_target):
         monkeypatch.setattr(inject, "_decide_method", lambda h: "ctrl_v")
         monkeypatch.setattr(inject, "_clipboard_snapshot", lambda: [])
         monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
         monkeypatch.setattr(inject, "_send_keystroke", lambda mods, key: 4)
         monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
+
+    def test_verified_paste_reports_inserted(self, monkeypatch, live_target):
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "ctrl_v")
+        monkeypatch.setattr(inject, "_clipboard_snapshot", lambda: [])
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
+        monkeypatch.setattr(inject, "_send_keystroke", lambda mods, key: 4)
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        monkeypatch.setattr(inject, "_verify_fn", lambda hwnd, token: True)
         assert inject.inject_text("hello", 1234) == inject.INSERTED
 
     def test_blocked_paste_reports_clipboard(self, monkeypatch, live_target):
@@ -274,6 +319,169 @@ class TestInjectStatus:
         monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs))
         assert inject.inject_text_and_submit("hello", 1234) == inject.INSERTED
         assert sent
+
+    def test_submit_forwards_enter_after_an_unconfirmed_insert(self, monkeypatch):
+        """Withholding the Enter on every target the probe cannot read would
+        silently break insert-and-send everywhere."""
+        sent = []
+        monkeypatch.setattr(inject, "inject_text", lambda t, h: inject.INSERTED_UNCONFIRMED)
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_flush_all_modifiers", lambda force=False: None)
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs))
+        assert inject.inject_text_and_submit("hello", 1234) == inject.INSERTED_UNCONFIRMED
+        assert sent
+
+
+class TestLanded:
+    """landed() means "the input went out", not "it is confirmed there". An
+    unconfirmed insert must never be re-sent automatically or the user gets
+    the text twice."""
+
+    def test_both_inserted_states_count_as_landed(self):
+        assert inject.landed(inject.INSERTED)
+        assert inject.landed(inject.INSERTED_UNCONFIRMED)
+
+    def test_clipboard_and_failed_do_not(self):
+        assert not inject.landed(inject.CLIPBOARD)
+        assert not inject.landed(inject.FAILED)
+        assert not inject.landed("something else")
+
+
+class TestRetentionDecision:
+    """The retention table, as a pure function: restoring the old clipboard
+    over an unconfirmed insert is what destroyed dictations (plan D1)."""
+
+    def test_confirmed_insert_always_restores(self):
+        assert inject.should_restore_clipboard(inject.INSERTED, True)
+        assert inject.should_restore_clipboard(inject.INSERTED, False)
+
+    def test_unconfirmed_insert_keeps_the_text_when_retaining(self):
+        assert not inject.should_restore_clipboard(inject.INSERTED_UNCONFIRMED, True)
+
+    def test_unconfirmed_insert_restores_when_retention_is_off(self):
+        assert inject.should_restore_clipboard(inject.INSERTED_UNCONFIRMED, False)
+
+    def test_failure_paths_keep_the_text_when_retaining(self):
+        for status in (inject.CLIPBOARD, inject.FAILED):
+            assert not inject.should_restore_clipboard(status, True)
+            assert inject.should_restore_clipboard(status, False)
+
+    def test_defaults_to_the_configured_flag(self, monkeypatch):
+        monkeypatch.setattr(inject, "_retain_on_unconfirmed", True)
+        assert not inject.should_restore_clipboard(inject.INSERTED_UNCONFIRMED)
+        monkeypatch.setattr(inject, "_retain_on_unconfirmed", False)
+        assert inject.should_restore_clipboard(inject.INSERTED_UNCONFIRMED)
+
+    def test_configure_sets_the_flag(self):
+        try:
+            inject.configure(restore_delay_ms=150, clipboard_retain_on_unconfirmed=False)
+            assert inject._retain_on_unconfirmed is False
+            inject.configure(restore_delay_ms=150, clipboard_retain_on_unconfirmed=True)
+            assert inject._retain_on_unconfirmed is True
+        finally:
+            inject.configure(restore_delay_ms=150)
+
+    def test_unconfirmed_paste_does_not_start_the_restore_thread(self, monkeypatch):
+        """The same rule end to end: no restore thread means the dictated text
+        stays on the clipboard instead of being overwritten 150ms later."""
+        threads = []
+        _win32gui.IsWindow.return_value = True
+        monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: False)
+        monkeypatch.setattr(inject, "_force_foreground", lambda h: None)
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_flush_all_modifiers", lambda force=False: None)
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "ctrl_v")
+        monkeypatch.setattr(inject, "_clipboard_snapshot", lambda: ["old"])
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
+        monkeypatch.setattr(inject, "_send_keystroke", lambda mods, key: 4)
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        monkeypatch.setattr(inject.threading, "Thread",
+                            lambda target=None, daemon=None: threads.append(target)
+                            or MagicMock(start=lambda: None))
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
+        assert threads == []
+
+        monkeypatch.setattr(inject, "_verify_fn", lambda hwnd, token: True)
+        assert inject.inject_text("hello", 1234) == inject.INSERTED
+        assert len(threads) == 1
+
+
+class TestPreflightGate:
+    """Only a confident "there is nowhere to type" stops an insert. UNKNOWN
+    always attempts it, because the probe is blind on Tk, canvas apps and
+    anything inside an RDP session (plan section 1)."""
+
+    @pytest.fixture
+    def probe_target(self, monkeypatch):
+        sent = []
+        _win32gui.IsWindow.return_value = True
+        monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: False)
+        monkeypatch.setattr(inject, "_force_foreground", lambda h: None)
+        monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: True)
+        monkeypatch.setattr(inject, "_flush_all_modifiers", lambda force=False: None)
+        monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: True)
+        monkeypatch.setattr(inject, "_notify_failure", lambda m: None)
+        monkeypatch.setattr(inject, "_send_unicode_text",
+                            lambda t, batch=32, batch_delay_ms=2: sent.append(t) or len(t))
+        return sent
+
+    def test_not_editable_never_sends_input(self, monkeypatch, probe_target):
+        """The Chrome-page-body case: today it types into nothing and reports
+        success."""
+        failures = []
+        monkeypatch.setattr(inject, "_preflight_fn", lambda h: inject.NOT_EDITABLE)
+        monkeypatch.setattr(inject, "_notify_failure", lambda m: failures.append(m))
+        status = inject.inject_text("hello", 1234)
+        # A distinct status, not a plain CLIPBOARD: the recovery panel names the
+        # reason, and there are five other clipboard fallbacks it must not be
+        # confused with.
+        assert status == inject.REFUSED_NOT_EDITABLE
+        assert not inject.landed(status)
+        assert not inject.should_restore_clipboard(status)
+        assert probe_target == []
+        assert failures
+
+    def test_not_editable_with_a_dead_clipboard_reports_failed(self, monkeypatch, probe_target):
+        monkeypatch.setattr(inject, "_preflight_fn", lambda h: inject.NOT_EDITABLE)
+        monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: False)
+        assert inject.inject_text("hello", 1234) == inject.FAILED
+        assert probe_target == []
+
+    def test_unknown_still_inserts(self, monkeypatch, probe_target):
+        monkeypatch.setattr(inject, "_preflight_fn", lambda h: inject.UNKNOWN)
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
+        assert probe_target == ["hello"]
+
+    def test_editable_still_inserts(self, monkeypatch, probe_target):
+        monkeypatch.setattr(inject, "_preflight_fn", lambda h: inject.EDITABLE)
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
+        assert probe_target == ["hello"]
+
+    def test_a_raising_probe_never_blocks_the_insert(self, monkeypatch, probe_target):
+        def _boom(hwnd):
+            raise RuntimeError("probe thread died")
+
+        monkeypatch.setattr(inject, "_preflight_fn", _boom)
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
+        assert probe_target == ["hello"]
+
+    def test_a_nonsense_verdict_is_treated_as_unknown(self, monkeypatch, probe_target):
+        monkeypatch.setattr(inject, "_preflight_fn", lambda h: "maybe?")
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
+        assert probe_target == ["hello"]
+
+    def test_setters_store_the_hooks(self):
+        marker = object()
+        try:
+            inject.set_preflight_callback(marker)
+            inject.set_verify_callback(marker)
+            assert inject._preflight_fn is marker
+            assert inject._verify_fn is marker
+        finally:
+            inject.set_preflight_callback(None)
+            inject.set_verify_callback(None)
 
 
 class TestCaptureForeground:
@@ -457,3 +665,97 @@ class TestModifierFlush:
         _win32gui.GetForegroundWindow.return_value = 11
         inject.flush_rdp_if_foreground()
         assert sent == []
+
+
+class _InlineThreads:
+    """Stand-in for inject's `threading` module: Thread(...).start() runs the
+    target inline, so the foreground watcher's dispatch is observable without
+    real threads or sleeps."""
+
+    class Thread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=False, name=None):
+            self._target = target
+            self._args = args or ()
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            if self._target:
+                self._target(*self._args, **self._kwargs)
+
+
+class TestForegroundWatcher:
+    """RDP round 5. The 4s post-hotkey window provably never fired: every
+    release in app.log logged "RDP never took foreground within 4s" while Ctrl
+    stayed latched remotely. The flush therefore moved to a persistent
+    EVENT_SYSTEM_FOREGROUND hook with no window of observation at all."""
+
+    _RELEASE_SCANS = {s for s, _ in inject._MOD_RELEASE_SCANCODES}
+
+    def _sent_scancodes(self, sent: list) -> set:
+        return {inp.ki.wScan for batch in sent for inp in batch}
+
+    def test_callback_never_propagates_an_exception(self, monkeypatch):
+        """A WinEvent proc that raises gets torn down by Windows and the watcher
+        is silently lost for the rest of the session."""
+        def _boom(hwnd):
+            raise RuntimeError("handler exploded")
+        monkeypatch.setattr(inject, "_handle_foreground_window", _boom)
+        assert inject._on_foreground_change(0, 0x0003, 77, 0, 0, 0, 0) is None
+
+    def test_rate_limiter_allows_one_flush_per_250ms(self, monkeypatch):
+        fake = _FakeTime()
+        monkeypatch.setattr(inject, "time", fake)
+        monkeypatch.setattr(inject, "_last_fg_flush", 0.0)
+        assert inject._fg_flush_allowed() is True
+        assert inject._fg_flush_allowed() is False
+        fake.sleep(0.3)
+        assert inject._fg_flush_allowed() is True
+
+    def test_rapid_alt_tabbing_cannot_flood_sendinput(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(inject, "time", _FakeTime())
+        monkeypatch.setattr(inject, "threading", _InlineThreads)
+        monkeypatch.setattr(inject, "_last_fg_flush", 0.0)
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: True)
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        inject._handle_foreground_window(77)
+        inject._handle_foreground_window(77)
+        assert len(sent) == 1
+        assert self._sent_scancodes(sent) == self._RELEASE_SCANS
+
+    def test_non_rdp_foreground_is_never_flushed(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(inject, "time", _FakeTime())
+        monkeypatch.setattr(inject, "threading", _InlineThreads)
+        monkeypatch.setattr(inject, "_last_fg_flush", 0.0)
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        inject._handle_foreground_window(11)
+        assert sent == []
+
+
+class TestUnstickModifiers:
+    """The escape hatch: no detection, so no heuristic can defeat it."""
+
+    def test_flushes_key_ups_into_whatever_holds_focus(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: False)
+        monkeypatch.setattr(inject, "_get_exe_name", lambda h: "notepad.exe")
+        monkeypatch.setattr(inject, "_get_class", lambda h: "Notepad")
+        _win32gui.GetForegroundWindow.return_value = 11
+        result = inject.unstick_modifiers()
+        events = [(inp.ki.wScan, bool(inp.ki.dwFlags & inject._KEYEVENTF_KEYUP))
+                  for batch in sent for inp in batch]
+        assert events == [(s, True) for s, _ in inject._MOD_RELEASE_SCANCODES]
+        assert "notepad.exe" in result
+
+    def test_survives_a_dead_foreground(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(inject, "_send_inputs", lambda inputs: sent.append(inputs) or len(inputs))
+        _win32gui.GetForegroundWindow.side_effect = OSError("no foreground")
+        assert isinstance(inject.unstick_modifiers(), str)
+        assert self._sent_scancodes(sent) == {s for s, _ in inject._MOD_RELEASE_SCANCODES}
+
+    def _sent_scancodes(self, sent: list) -> set:
+        return {inp.ki.wScan for batch in sent for inp in batch}
