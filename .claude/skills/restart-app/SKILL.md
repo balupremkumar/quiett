@@ -8,7 +8,7 @@ description: Cleanly restart the Voice Dictation app. Use after ANY code change 
 Run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "D:\Dev\ai\projects\active\voice-dictation\scripts\restart_app.ps1"
+powershell -ExecutionPolicy Bypass -File "D:\Dev\ai\projects\active\quiett\scripts\restart_app.ps1"
 ```
 
 The script prints which stale PIDs were killed, the new PID with its start timestamp, and the last 15 lines of app.log.
