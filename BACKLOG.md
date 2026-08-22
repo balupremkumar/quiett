@@ -112,6 +112,7 @@ Items 51-100, generated inline against the first sweep's research and codebase a
 65. [ ] Taskbar jump list: Recent dictations / Settings / Pause (pywin32). (L/M)
 66. [ ] Native Windows toasts for background events (task captured while in another app), quiet-hours aware. (M/M)
 67. [ ] Fullscreen/game detection: suppress the popup, confirm via edge flash + sound, park text on the clipboard. (H/M)
+    NOTE 2026-08-22: measured, and it is worse than assumed. While a protected fullscreen game holds the foreground, NO keyboard hook receives events at all (raw WH_KEYBOARD_LL with a valid handle and live pump saw zero; the keyboard library saw zero), and SetForegroundWindow cannot move focus off it. So the hotkey itself is dead, not just the popup, and nothing in-app can fix it. The realistic scope of this item is detecting the state and telling the user, not working around it.
 
 ### Tray, beyond items 21-26
 
@@ -216,7 +217,9 @@ Impact H/M/L, Effort S/M/L.
 136. [ ] Target picker in the panel: choose which window to insert into when the captured one is gone or wrong. (H/M)
 137. [ ] Remember the last five insert targets and offer them as a fallback list. (M/M)
 138. [ ] Retry a failed insert once automatically before falling back to the clipboard. (H/S)
+    NOTE 2026-08-22: partly overtaken. A confident NOT_EDITABLE pre-flight now refuses rather than retries, and the numpad . place key makes a manual retry one keypress. An automatic retry is only still worth it for the transient focus-drift case.
 139. [x] Make the clipboard fallback loud: a persistent toast with a "Paste now" action that re-attempts the insert. (H/S)
+    SUPERSEDED 2026-08-22: the toast was invisible anyway (drawn on the primary monitor only). Replaced by a recovery panel at the cursor plus a tray dot, and deliberately made QUIET on unconfirmed inserts, because verification returns no signal for terminals and RDP so a loud fallback would fire on most successful inserts.
 140. [ ] Verify the insert landed by reading back the target's text length where the control allows it. (M/L)
 141. [ ] Per-app insert method learning: record which method worked per exe and prefer it next time. (H/M)
 142. [ ] Detect a UAC-elevated target before recording, not at insert time, while there is still time to switch windows. (M/S)
@@ -251,7 +254,7 @@ Impact H/M/L, Effort S/M/L.
 165. [ ] Panel remembers its size per monitor as well as its position. (L/S)
 166. [ ] Append mode: hold the hotkey again within N seconds to add to the open panel instead of replacing it. (H/M)
 167. [ ] Quick actions on the panel: insert as bullet list, as quote, as lowercase. (M/M)
-168. [ ] Escape-to-dismiss should offer to keep the text on the clipboard rather than dropping it. (H/S)
+168. [x] (2026-08-22) Satisfied by conditional clipboard retention: the dictation now stays on the clipboard whenever the insert is not confirmed, and stays parked in stash.py with a tray dot until placed.
 169. [ ] Auto-dismiss countdown pauses on hover or keypress. (M/S)
 170. [ ] Multi-monitor: place the panel on the target window's monitor, not the cursor's, when they differ. (M/S)
 
