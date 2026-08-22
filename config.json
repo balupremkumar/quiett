@@ -130,7 +130,7 @@
   "recording_retention_days": "0",
   "dashboard_window": {
     "x": -8,
-    "y": -8,
+    "y": 0,
     "w": 2576,
     "h": 1408
   },
@@ -142,6 +142,10 @@
     "\\\\.\\DISPLAY2": {
       "x": -1018,
       "y": 446
+    },
+    "\\\\.\\DISPLAY7": {
+      "x": 1219,
+      "y": 502
     }
   },
   "dashboard_scale": "125",
@@ -155,6 +159,7 @@
   "clipboard_retain_on_unconfirmed": true,
   "target_probe": true,
   "target_ring": true,
-  "place_hotkey": "shift+alt+z",
+  "place_key": "numpad_decimal",
+  "place_hotkey": "",
   "unstick_hotkey": "ctrl+shift+u"
 }

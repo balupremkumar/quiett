@@ -4,6 +4,7 @@ Everything here is headless: no Tk root, no real mouse hook, no live desktop.
 The state machine, the timeout and the escalation table are all reachable as
 plain functions, which is the point of keeping them out of the widget code.
 """
+import ctypes
 import json
 import threading
 import time
@@ -84,6 +85,7 @@ class FakePreview:
         self.toasts = []
         self.overlays = []        # text on arm, None on disarm
         self.rings = []           # hwnd, or None on hide
+        self.recoveries = []      # (text, reason) per recovery panel
 
     def show_toast(self, message, kind="info", action_label="", action_cb=None,
                    dwell_ms=0, target_hwnd=0):
@@ -105,7 +107,7 @@ class FakePreview:
         pass
 
     def show_recovery_panel(self, text, reason, on_place, on_dismiss):
-        pass
+        self.recoveries.append((text, reason))
 
 
 class FakeHotkey:
@@ -160,8 +162,9 @@ class FakeTray:
 
 
 class FakeInject:
-    def __init__(self):
+    def __init__(self, status="inserted"):
         self.calls = []
+        self.status = status
         self.done = threading.Event()
 
     def capture_foreground(self, quiet=False):
@@ -173,12 +176,13 @@ class FakeInject:
     def inject_text(self, text, hwnd):
         self.calls.append((text, hwnd))
         self.done.set()
-        return "inserted"
+        return self.status
 
     INSERTED = "inserted"
     INSERTED_UNCONFIRMED = "inserted_unconfirmed"
     CLIPBOARD = "clipboard"
     FAILED = "failed"
+    REFUSED_NOT_EDITABLE = "refused_not_editable"
 
     @staticmethod
     def landed(status):
@@ -598,3 +602,346 @@ class TestClickCapture:
         hotkey._click_hook_proc(-1, hotkey._WM_LBUTTONUP, None)
         assert not fired.wait(0.2)
         monkeypatch.setattr(hotkey, "_click_cb", None)
+
+
+# ---------------------------------------------------------------------------
+# The reserved place key (one key, no modifiers)
+# ---------------------------------------------------------------------------
+
+class TestPlaceKey:
+    """The key places into the field that already has focus. Arming is the
+    fallback, not the default, because by the time the user hits the key they
+    have already clicked where they want the text."""
+
+    def test_nothing_stashed_says_so_and_inserts_nothing(self, place):
+        fp, _, _, _, fi = place
+        assert main.place_key_pressed() == "empty"
+        assert fp.toasts == [{"message": "Nothing to place yet", "kind": "info"}]
+        assert fi.calls == []
+        assert not main.place_mode_armed()
+
+    def test_a_consumed_item_counts_as_nothing_stashed(self, place):
+        fp, _, _, _, fi = place
+        stash.put("already placed", 4242)
+        stash.mark_consumed()
+        assert main.place_key_pressed() == "empty"
+        assert fp.toasts[0]["message"] == "Nothing to place yet"
+        assert fi.calls == []
+
+    def test_a_blank_stash_item_counts_as_nothing_stashed(self, place):
+        fp, _, _, _, fi = place
+        stash.put("   ", 4242)
+        assert main.place_key_pressed() == "empty"
+        assert fi.calls == []
+
+    def test_a_stashed_item_goes_straight_into_the_focused_field(self, place):
+        fp, fh, _, _, fi = place
+        stash.put("remember the milk", 4242)
+        assert main.place_key_pressed() == "placed"
+        # hwnd 0: resolved at press time, which is what "put it HERE" means.
+        assert fi.calls == [("remember the milk", 0)]
+        assert not main.place_mode_armed()
+        assert fh.capture_calls == 0        # no overlay, no mouse hook
+        assert fp.overlays == []
+        assert not stash.has_unconsumed()   # confirmed landed
+
+    def test_a_confident_refusal_arms_place_mode_instead(self, place):
+        """Only a CONFIDENT "there is no field here" earns the overlay."""
+        fp, fh, _, _, fi = place
+        fi.status = main._REFUSED_NOT_EDITABLE
+        stash.put("parked", 4242)
+        assert main.place_key_pressed() == "armed"
+        assert main.place_mode_armed()
+        assert fp.overlays == ["parked"]
+        assert fh.capture_calls == 1
+        assert stash.has_unconsumed()       # nothing landed, nothing consumed
+
+    def test_a_refusal_gives_one_notice_not_two(self, place):
+        """The overlay IS the notice. A recovery panel on top of it is the
+        double-notice the design rules out."""
+        fp, _, _, _, fi = place
+        fi.status = main._REFUSED_NOT_EDITABLE
+        stash.put("parked", 4242)
+        main.place_key_pressed()
+        assert fp.recoveries == []
+        assert fp.toasts == []
+
+    def test_a_real_miss_still_escalates_and_does_not_arm(self, place):
+        """Clipboard fallback is evidence the text missed, not evidence that
+        there was no field, so the recovery panel is still the right answer."""
+        fp, _, _, _, fi = place
+        fi.status = "clipboard"
+        stash.put("parked", 4242)
+        assert main.place_key_pressed() == "placed"
+        assert len(fp.recoveries) == 1
+        assert not main.place_mode_armed()
+
+    def test_an_unconfirmed_insert_stays_silent(self, place):
+        """Terminals, RDP and anything with no accessibility layer land here."""
+        fp, _, _, _, fi = place
+        fi.status = "inserted_unconfirmed"
+        stash.put("parked", 4242)
+        assert main.place_key_pressed() == "placed"
+        assert fp.recoveries == []
+        assert fp.toasts == []
+        assert stash.has_unconsumed()
+
+    def test_pressing_it_again_while_armed_disarms(self, place):
+        fp, _, _, _, fi = place
+        fi.status = main._REFUSED_NOT_EDITABLE
+        stash.put("parked", 4242)
+        main.place_key_pressed()
+        assert main.place_key_pressed() == "disarmed"
+        assert not main.place_mode_armed()
+        assert fp.overlays[-1] is None
+        assert len(fi.calls) == 1       # the second press placed nothing
+
+    def test_the_chord_and_the_key_share_one_armed_state(self, place):
+        _, _, _, _, fi = place
+        fi.status = main._REFUSED_NOT_EDITABLE
+        stash.put("parked", 4242)
+        main.place_key_pressed()
+        assert main.toggle_place_mode() == "disarmed"
+
+
+class TestInsertEscalationOptOut:
+    """escalate=False exists for exactly one caller: the place key, which has
+    its own answer to a refusal."""
+
+    def test_it_shows_nothing(self, place):
+        fp, _, _, _, fi = place
+        fi.status = "clipboard"
+        assert main.insert_text_now("parked", escalate=False) == "clipboard"
+        assert fp.recoveries == []
+
+    def test_it_still_consumes_a_confirmed_insert(self, place):
+        stash.put("parked", 4242)
+        main.insert_text_now("parked", escalate=False)
+        assert not stash.has_unconsumed()
+
+    def test_escalation_is_still_the_default(self, place):
+        fp, _, _, _, fi = place
+        fi.status = "clipboard"
+        main.insert_text_now("parked")
+        assert len(fp.recoveries) == 1
+
+
+# ---------------------------------------------------------------------------
+# hotkey.py: the dedicated WH_KEYBOARD_LL hook behind the reserved key
+#
+# All headless. The scan-code/extended-flag decision is a pure function and
+# the hook proc is driven with a real KBDLLHOOKSTRUCT, so nothing here needs a
+# human to press anything.
+# ---------------------------------------------------------------------------
+
+def _kbd_event(scan_code, flags=0, vk=110):
+    """A real KBDLLHOOKSTRUCT, so the hook proc's ctypes.cast is exercised
+    rather than mocked away."""
+    return hotkey._KBDLLHOOKSTRUCT(vkCode=vk, scanCode=scan_code, flags=flags,
+                                   time=0, dwExtraInfo=0)
+
+
+class TestReservedKeyMatching:
+    """The Delete regression lives here. The numpad "." and the nav-cluster
+    Delete share base scan code 83; only the extended flag tells them apart."""
+
+    def test_the_numpad_dot_matches(self):
+        spec = hotkey.RESERVED_KEYS["numpad_decimal"]
+        assert hotkey.reserved_key_matches(83, 0, spec) is True
+
+    def test_the_real_delete_key_is_never_matched(self):
+        """Swallowing scan 83 with the extended bit set would break Delete
+        system-wide. This is the regression test for that."""
+        spec = hotkey.RESERVED_KEYS["numpad_decimal"]
+        assert hotkey.reserved_key_matches(83, hotkey._LLKHF_EXTENDED, spec) is False
+
+    def test_other_flag_bits_do_not_stop_a_match(self):
+        """Only bit 0 is the extended flag; injected (0x10) and alt-down
+        (0x20) ride along on perfectly real presses."""
+        spec = hotkey.RESERVED_KEYS["numpad_decimal"]
+        assert hotkey.reserved_key_matches(83, 0x10, spec) is True
+        assert hotkey.reserved_key_matches(83, 0x30, spec) is True
+        assert hotkey.reserved_key_matches(83, 0x11, spec) is False
+
+    def test_a_different_scan_code_never_matches(self):
+        spec = hotkey.RESERVED_KEYS["numpad_decimal"]
+        for scan in (82, 78, 74, 55, 69, 30):
+            assert hotkey.reserved_key_matches(scan, 0, spec) is False
+
+    def test_numpad_star_is_told_apart_from_printscreen(self):
+        spec = hotkey.RESERVED_KEYS["numpad_multiply"]
+        assert hotkey.reserved_key_matches(55, 0, spec) is True
+        assert hotkey.reserved_key_matches(55, hotkey._LLKHF_EXTENDED, spec) is False
+
+    def test_no_spec_matches_nothing(self):
+        assert hotkey.reserved_key_matches(83, 0, None) is False
+        assert hotkey.reserved_key_matches(83, 0, ()) is False
+
+    def test_every_supported_name_carries_a_scan_code_and_a_flag(self):
+        assert "numpad_decimal" in hotkey.RESERVED_KEYS
+        for name, (scan, extended) in hotkey.RESERVED_KEYS.items():
+            assert isinstance(scan, int) and scan > 0, name
+            assert isinstance(extended, bool), name
+
+    def test_no_two_names_claim_the_same_key(self):
+        specs = list(hotkey.RESERVED_KEYS.values())
+        assert len(set(specs)) == len(specs)
+
+
+class TestReservedKeyDebounce:
+    @pytest.fixture(autouse=True)
+    def _reset(self, monkeypatch):
+        monkeypatch.setattr(hotkey, "_reserved_last_fire", 0.0)
+
+    def test_the_window_is_300ms(self):
+        assert hotkey._RESERVED_DEBOUNCE_SECONDS == 0.30
+
+    def test_the_first_press_always_fires(self):
+        assert hotkey._reserved_debounced(1000.0) is False
+
+    def test_auto_repeat_inside_the_window_is_swallowed(self):
+        assert hotkey._reserved_debounced(1000.0) is False
+        assert hotkey._reserved_debounced(1000.05) is True
+        assert hotkey._reserved_debounced(1000.29) is True
+
+    def test_a_deliberate_second_press_fires(self):
+        hotkey._reserved_debounced(1000.0)
+        assert hotkey._reserved_debounced(1000.31) is False
+        assert hotkey._reserved_debounced(1000.62) is False
+
+    def test_a_swallowed_repeat_does_not_extend_the_window(self):
+        """Holding the key down must not push the next real press out."""
+        hotkey._reserved_debounced(1000.0)
+        hotkey._reserved_debounced(1000.2)      # repeat, swallowed
+        assert hotkey._reserved_debounced(1000.31) is False
+
+
+class TestReservedKeyHookProc:
+    @pytest.fixture(autouse=True)
+    def _reserved(self, monkeypatch):
+        monkeypatch.setattr(hotkey, "_reserved_last_fire", 0.0)
+        monkeypatch.setattr(hotkey, "_reserved_spec",
+                            hotkey.RESERVED_KEYS["numpad_decimal"])
+        monkeypatch.setattr(hotkey, "_reserved_cb", None)
+
+    def test_the_key_down_is_swallowed_and_fires_off_the_hook_thread(self, monkeypatch):
+        fired = threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fired.set())
+        ev = _kbd_event(83)
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) == 1
+        assert fired.wait(2.0)
+
+    def test_the_key_up_is_swallowed_too_but_fires_nothing(self, monkeypatch):
+        """A stray key-up for a key the app never saw pressed confuses some
+        editors, so both halves of the press are eaten."""
+        fired = threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fired.set())
+        ev = _kbd_event(83)
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYUP, ctypes.addressof(ev)) == 1
+        assert not fired.wait(0.2)
+
+    def test_the_syskey_variants_are_handled_the_same(self, monkeypatch):
+        fired = threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fired.set())
+        ev = _kbd_event(83)
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_SYSKEYDOWN, ctypes.addressof(ev)) == 1
+        assert fired.wait(2.0)
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_SYSKEYUP, ctypes.addressof(ev)) == 1
+
+    def test_the_real_delete_key_passes_straight_through(self, monkeypatch):
+        fired = threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fired.set())
+        ev = _kbd_event(83, flags=hotkey._LLKHF_EXTENDED, vk=0x2E)
+        for msg in (hotkey._WM_KEYDOWN, hotkey._WM_KEYUP):
+            assert hotkey._reserved_hook_proc(0, msg, ctypes.addressof(ev)) != 1
+        assert not fired.wait(0.2)
+
+    def test_every_other_key_passes_straight_through(self, monkeypatch):
+        fired = threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fired.set())
+        ev = _kbd_event(30)     # "a"
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) != 1
+        assert not fired.wait(0.2)
+
+    def test_nothing_reserved_means_nothing_swallowed(self, monkeypatch):
+        monkeypatch.setattr(hotkey, "_reserved_spec", None)
+        ev = _kbd_event(83)
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) != 1
+
+    def test_a_negative_ncode_passes_straight_through(self, monkeypatch):
+        fired = threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fired.set())
+        ev = _kbd_event(83)
+        assert hotkey._reserved_hook_proc(-1, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) != 1
+        assert not fired.wait(0.2)
+
+    def test_a_garbage_lparam_never_raises(self, monkeypatch):
+        """A hook proc that throws is torn down by Windows, taking every
+        keystroke after it with it."""
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: None)
+        assert isinstance(hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, None), int)
+
+    def test_a_raising_callback_never_escapes_the_hook(self, monkeypatch):
+        done = threading.Event()
+
+        def _boom():
+            done.set()
+            raise RuntimeError("callback exploded")
+
+        monkeypatch.setattr(hotkey, "_reserved_cb", _boom)
+        ev = _kbd_event(83)
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) == 1
+        assert done.wait(2.0)
+
+    def test_auto_repeat_fires_once_but_is_swallowed_every_time(self, monkeypatch):
+        calls = []
+        first = threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_cb",
+                            lambda: (calls.append(1), first.set()))
+        ev = _kbd_event(83)
+        for _ in range(6):
+            assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) == 1
+        assert first.wait(2.0)
+        time.sleep(0.15)
+        assert len(calls) == 1
+
+
+class TestReservedKeyRegistration:
+    def test_an_unknown_name_reserves_nothing(self):
+        assert hotkey.register_reserved_key("f13", lambda: None) is False
+        assert hotkey.reserved_key_active() is False
+
+    def test_a_blank_name_reserves_nothing(self):
+        assert hotkey.register_reserved_key("", lambda: None) is False
+        assert hotkey.register_reserved_key(None, lambda: None) is False
+
+    def test_a_null_callback_reserves_nothing(self):
+        assert hotkey.register_reserved_key("numpad_decimal", None) is False
+        assert hotkey.reserved_key_active() is False
+
+    def test_unregistering_with_nothing_reserved_is_safe(self):
+        hotkey.unregister_reserved_key()        # must not raise
+        assert hotkey.reserved_key_active() is False
+
+    def test_simulating_a_press_with_nothing_reserved_does_nothing(self):
+        assert hotkey.simulate_reserved_key_press() is False
+
+    def test_install_fire_and_release(self, monkeypatch):
+        """Installs the real hook. The key is reserved only for the
+        milliseconds between these two calls."""
+        monkeypatch.setattr(hotkey, "_reserved_last_fire", 0.0)
+        fired = threading.Event()
+        if not hotkey.register_reserved_key("numpad_decimal", lambda: fired.set()):
+            pytest.skip("Windows would not give this process a keyboard hook")
+        try:
+            assert hotkey.reserved_key_active() is True
+            assert hotkey.reserved_key_name() == "numpad_decimal"
+            assert hotkey._reserved_spec == (83, False)
+            assert hotkey._reserved_proc is not None    # kept alive, or Windows calls freed memory
+            assert hotkey.simulate_reserved_key_press() is True
+            assert fired.wait(2.0)
+        finally:
+            hotkey.unregister_reserved_key()
+        assert hotkey.reserved_key_active() is False
+        assert hotkey.reserved_key_name() == ""
+        assert hotkey.simulate_reserved_key_press() is False

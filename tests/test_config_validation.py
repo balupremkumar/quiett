@@ -110,3 +110,42 @@ class TestReadAloudConfig:
         assert main._validate_config({"tts_max_chunk_chars": -5})["tts_max_chunk_chars"] == 0
         assert main._validate_config({"tts_max_chunk_chars": "x"})["tts_max_chunk_chars"] == 120
 
+
+
+class TestPlaceKeyValidation:
+    """place_key names a physical key Quiett reserves outright, so an unknown
+    name cannot be honoured at all: it falls back rather than leaving place
+    mode with no key. "" is a deliberate "no reserved key"."""
+
+    def test_the_default_is_the_numpad_dot(self):
+        assert main._validate_config({})["place_key"] == "numpad_decimal"
+
+    def test_a_known_name_is_kept_and_normalised(self):
+        assert main._validate_config({"place_key": "  Numpad_Plus "})["place_key"] == "numpad_plus"
+
+    def test_an_unknown_name_falls_back(self):
+        assert main._validate_config({"place_key": "f13"})["place_key"] == "numpad_decimal"
+
+    def test_a_non_string_falls_back(self):
+        assert main._validate_config({"place_key": 83})["place_key"] == "numpad_decimal"
+        assert main._validate_config({"place_key": None})["place_key"] == "numpad_decimal"
+
+    def test_an_empty_string_disables_it(self):
+        assert main._validate_config({"place_key": ""})["place_key"] == ""
+        assert main._validate_config({"place_key": "   "})["place_key"] == ""
+
+    def test_every_reservable_name_survives_validation(self):
+        import hotkey
+        for name in hotkey.RESERVED_KEYS:
+            assert main._validate_config({"place_key": name})["place_key"] == name
+
+    def test_the_chord_no_longer_defaults_to_anything(self):
+        """One key replaced it. The chord stays supported for anyone who wants
+        an extra one, it just is not the way in any more."""
+        assert main._validate_config({})["place_hotkey"] == ""
+
+    def test_a_chord_is_still_honoured_when_set(self):
+        assert main._validate_config({"place_hotkey": " Shift+Alt+Z "})["place_hotkey"] == "shift+alt+z"
+
+    def test_the_unstick_hotkey_default_is_untouched(self):
+        assert main._validate_config({})["unstick_hotkey"] == "ctrl+shift+u"

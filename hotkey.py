@@ -365,3 +365,244 @@ def cancel_click_capture() -> None:
 
 def click_capture_active() -> bool:
     return _click_cb is not None
+
+
+# ---------------------------------------------------------------------------
+# Reserved single key (PASTE_UX_PLAN section 4, revised 2026-08-22)
+#
+# Place mode's everyday entry point is ONE key with no modifiers, on a key
+# nobody uses, reserved by Quiett for as long as it runs. A chord was rejected:
+# this fires constantly and a chord is too much work for it.
+#
+# Why a hand-rolled WH_KEYBOARD_LL hook instead of the keyboard library:
+#
+#  1. keyboard shares ONE low-level hook across the whole library, and asking
+#     any part of it to suppress switches that shared hook into blocking mode.
+#     That would put the library's Python callbacks on the critical path of
+#     every keystroke the machine sees. Unacceptable in a dictation app.
+#  2. The numpad "." and the nav-cluster Delete share base scan code 83, so
+#     matching on the scan code alone would swallow Delete everywhere. They are
+#     told apart ONLY by the extended flag: Delete is E0-prefixed
+#     (LLKHF_EXTENDED set), the numpad key is not. Every entry below therefore
+#     carries the extended value it expects, and a mismatch is passed straight
+#     through untouched.
+#
+# The hold-to-record hook above and the tap hotkeys are untouched by any of
+# this: separate hook, separate thread, separate state.
+# ---------------------------------------------------------------------------
+
+_WH_KEYBOARD_LL = 13
+_WM_KEYDOWN     = 0x0100
+_WM_KEYUP       = 0x0101
+_WM_SYSKEYDOWN  = 0x0104
+_WM_SYSKEYUP    = 0x0105
+_LLKHF_EXTENDED = 0x01
+
+_KEY_DOWN_MESSAGES = (_WM_KEYDOWN, _WM_SYSKEYDOWN)
+_KEY_MESSAGES      = (_WM_KEYDOWN, _WM_SYSKEYDOWN, _WM_KEYUP, _WM_SYSKEYUP)
+
+# name -> (scan code, extended flag expected)
+RESERVED_KEYS = {
+    "numpad_decimal":  (83, False),   # the . / Del key on the numpad; extended 83 is the real Delete
+    "numpad_plus":     (78, False),
+    "numpad_minus":    (74, False),
+    "numpad_multiply": (55, False),   # extended 55 is PrintScreen, so False matters here
+    "numpad_0":        (82, False),
+    "num_lock":        (69, False),
+}
+
+_RESERVED_DEBOUNCE_SECONDS = 0.30   # auto-repeat must not fire the same press twice
+
+
+class _KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("vkCode",      ctypes.c_uint),
+                ("scanCode",    ctypes.c_uint),
+                ("flags",       ctypes.c_uint),
+                ("time",        ctypes.c_uint),
+                ("dwExtraInfo", ctypes.c_size_t)]
+
+
+_reserved_lock      = threading.Lock()
+_reserved_cb        = None      # fn(), called on a worker thread
+_reserved_spec      = None      # (scan code, extended expected) currently reserved
+_reserved_name      = ""
+_reserved_hook      = None      # HHOOK
+_reserved_tid       = 0         # thread id of the pump, for the WM_QUIT
+_reserved_thread    = None
+_reserved_last_fire = 0.0
+# Module-level reference on purpose: a hook proc that gets garbage collected
+# leaves Windows calling into freed memory. Classic silent failure for this API.
+_reserved_proc = None
+
+
+def reserved_key_matches(scan_code: int, flags: int, spec) -> bool:
+    """The whole Delete-vs-numpad decision, as a pure function.
+
+    scan 83 with LLKHF_EXTENDED set is the nav-cluster Delete and must NEVER
+    match: swallowing that would break Delete system-wide.
+    """
+    if not spec:
+        return False
+    want_scan, want_extended = spec
+    return scan_code == want_scan and bool(flags & _LLKHF_EXTENDED) == bool(want_extended)
+
+
+def _reserved_debounced(now: float) -> bool:
+    """True when this press lands inside the debounce window of the last one,
+    i.e. it is auto-repeat rather than a new press."""
+    global _reserved_last_fire
+    if now - _reserved_last_fire < _RESERVED_DEBOUNCE_SECONDS:
+        return True
+    _reserved_last_fire = now
+    return False
+
+
+def _reserved_hook_proc(n_code, w_param, l_param):
+    """Low-level keyboard hook. Incapable of raising: a hook proc that throws
+    is torn down by Windows and every keystroke after it stops being seen.
+
+    Returns 1 (swallow) only on an exact scan-code AND extended-flag match, for
+    the key-down and the key-up alike. Swallowing the up as well matters: a
+    stray key-up for a key the app never saw pressed confuses some editors.
+    """
+    try:
+        if n_code == 0 and w_param in _KEY_MESSAGES and _reserved_spec is not None:
+            info = ctypes.cast(l_param, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
+            if reserved_key_matches(info.scanCode, info.flags, _reserved_spec):
+                if w_param in _KEY_DOWN_MESSAGES:
+                    _dispatch_reserved()
+                return 1
+    except Exception:
+        pass
+    try:
+        return _user32.CallNextHookEx(None, n_code, w_param, l_param)
+    except Exception:
+        return 0
+
+
+def _dispatch_reserved() -> None:
+    """Hand the press to a worker. Never does the work inline: the callback
+    inserts text, which takes hundreds of milliseconds, and a low-level hook
+    that blocks that long is removed by Windows, freezing the keyboard for
+    every other app meanwhile."""
+    cb = _reserved_cb
+    if cb is None:
+        return
+    if _reserved_debounced(time.monotonic()):
+        return
+    threading.Thread(target=_run_reserved_callback, args=(cb,), daemon=True,
+                     name="quiett-reserved-key").start()
+
+
+def _run_reserved_callback(cb) -> None:
+    try:
+        cb()
+    except Exception as exc:
+        warn("hotkey", f"reserved key callback failed: {exc}")
+
+
+def _reserved_pump(ready: threading.Event) -> None:
+    global _reserved_hook, _reserved_tid, _reserved_proc
+    try:
+        _reserved_tid = _kernel32.GetCurrentThreadId()
+        _reserved_proc = _HOOKPROC(_reserved_hook_proc)
+        _reserved_hook = _user32.SetWindowsHookExW(_WH_KEYBOARD_LL, _reserved_proc, None, 0)
+        if not _reserved_hook:
+            warn("hotkey", f"reserved key hook failed: {ctypes.get_last_error()}")
+            return
+    except Exception as exc:
+        warn("hotkey", f"reserved key hook could not be installed: {exc}")
+        return
+    finally:
+        ready.set()
+
+    try:
+        # A low-level hook only receives events while its owning thread pumps
+        # messages, so this loop is not optional bookkeeping.
+        msg = ctypes.create_string_buffer(64)
+        while _user32.GetMessageW(msg, None, 0, 0) > 0:
+            pass
+    except Exception as exc:
+        warn("hotkey", f"reserved key hook pump stopped: {exc}")
+    finally:
+        hook = _reserved_hook
+        _reserved_hook = None
+        _reserved_tid = 0
+        try:
+            if hook:
+                _user32.UnhookWindowsHookEx(hook)
+        except Exception:
+            pass
+
+
+def register_reserved_key(name: str, cb) -> bool:
+    """Reserve one key, by name from RESERVED_KEYS, for as long as the app
+    runs. `cb()` fires once per press, on a worker thread, and the key never
+    reaches the focused app. Returns True when the hook is live."""
+    global _reserved_cb, _reserved_spec, _reserved_name, _reserved_thread
+    key = (name or "").strip().lower()
+    spec = RESERVED_KEYS.get(key)
+    if spec is None or cb is None:
+        if key:
+            warn("hotkey", f"reserved key {key} is not one this build can reserve")
+        return False
+    unregister_reserved_key()
+    ready = threading.Event()
+    with _reserved_lock:
+        _reserved_cb     = cb
+        _reserved_spec   = spec
+        _reserved_name   = key
+        _reserved_thread = threading.Thread(target=_reserved_pump, args=(ready,),
+                                            daemon=True, name="quiett-reserved-key-hook")
+        _reserved_thread.start()
+    ready.wait(1.0)
+    if not _reserved_hook:
+        with _reserved_lock:
+            _reserved_cb     = None
+            _reserved_spec   = None
+            _reserved_name   = ""
+            _reserved_thread = None
+        return False
+    log("hotkey", f"reserved key: {key} (scan {spec[0]}, extended {spec[1]})")
+    return True
+
+
+def unregister_reserved_key() -> None:
+    """Give the key back to Windows. Safe to call when nothing is reserved."""
+    global _reserved_cb, _reserved_spec, _reserved_name, _reserved_thread
+    with _reserved_lock:
+        _reserved_cb   = None
+        _reserved_spec = None
+        name = _reserved_name
+        _reserved_name = ""
+        tid, thread = _reserved_tid, _reserved_thread
+        _reserved_thread = None
+    if not tid:
+        return
+    try:
+        _user32.PostThreadMessageW(ctypes.c_ulong(tid), _WM_QUIT, 0, 0)
+    except Exception as exc:
+        warn("hotkey", f"could not stop the reserved key hook pump: {exc}")
+        return
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=1.0)
+    log("hotkey", f"reserved key released: {name or 'none'}")
+
+
+def reserved_key_active() -> bool:
+    return _reserved_cb is not None
+
+
+def reserved_key_name() -> str:
+    return _reserved_name
+
+
+def simulate_reserved_key_press() -> bool:
+    """Fire the reserved key's callback exactly as a real press does, without
+    touching the keyboard, for end-to-end testing of everything behind the key.
+    Returns False when no key is reserved or the debounce swallowed it."""
+    if _reserved_cb is None:
+        return False
+    before = _reserved_last_fire
+    _dispatch_reserved()
+    return _reserved_last_fire != before
