@@ -822,7 +822,22 @@ def _show_anchored_toast(t: dict) -> None:
 def _show_edge_flash(colour: str) -> None:
     """Thin horizontal bar along the top of the work area the cursor is on,
     fades in then out fast. Cursor-anchored, not primary-anchored: a hotkey
-    confirmation the user cannot see confirms nothing (PASTE_UX_PLAN D2)."""
+    confirmation the user cannot see confirms nothing (PASTE_UX_PLAN D2).
+
+    This is a FAILURE signal only (item 46): the badge's own entrance is the
+    "hotkey registered" cue, and every caller here is a fallback for a surface
+    that would not build. Balu reported seeing it at recording start on
+    2026-08-23 while app.log held zero ERROR lines, so no known caller can
+    account for it. Rather than guess again, every fire now names its own
+    caller — the same trick that made the RDP decline log useful.
+    """
+    try:
+        import traceback
+        frames = traceback.format_stack(limit=4)[:-1]
+        caller = " | ".join(f.strip().replace(chr(10), " ") for f in frames)
+        warn("preview", f"edge flash fired (this is a failure fallback) <- {caller}")
+    except Exception:
+        pass
     win = tk.Toplevel(_root)
     win.overrideredirect(True)
     win.attributes("-topmost", True)

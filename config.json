@@ -159,7 +159,7 @@
   "clipboard_retain_on_unconfirmed": true,
   "target_probe": true,
   "target_ring": true,
-  "place_key": "numpad_decimal",
+  "place_key": "",
   "place_hotkey": "",
   "unstick_hotkey": "ctrl+shift+u"
 }

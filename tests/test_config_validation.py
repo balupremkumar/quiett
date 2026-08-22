@@ -113,22 +113,25 @@ class TestReadAloudConfig:
 
 
 class TestPlaceKeyValidation:
-    """place_key names a physical key Quiett reserves outright, so an unknown
-    name cannot be honoured at all: it falls back rather than leaving place
-    mode with no key. "" is a deliberate "no reserved key"."""
+    """place_key names a physical key Quiett reserves outright, so anything
+    that is not a name this build can reserve resolves to "" — reserve nothing
+    — rather than to a guess. Reserving a key nobody asked for is how the
+    2026-08-23 repeat storm reached a user in the first place."""
 
-    def test_the_default_is_the_numpad_dot(self):
-        assert main._validate_config({})["place_key"] == "numpad_decimal"
+    def test_nothing_is_reserved_by_default(self):
+        """Disabled 2026-08-23 while the reserved-key approach is re-thought.
+        Place mode still reaches the tray item and the recovery panel."""
+        assert main._validate_config({})["place_key"] == ""
 
     def test_a_known_name_is_kept_and_normalised(self):
         assert main._validate_config({"place_key": "  Numpad_Plus "})["place_key"] == "numpad_plus"
 
-    def test_an_unknown_name_falls_back(self):
-        assert main._validate_config({"place_key": "f13"})["place_key"] == "numpad_decimal"
+    def test_an_unknown_name_reserves_nothing(self):
+        assert main._validate_config({"place_key": "f13"})["place_key"] == ""
 
-    def test_a_non_string_falls_back(self):
-        assert main._validate_config({"place_key": 83})["place_key"] == "numpad_decimal"
-        assert main._validate_config({"place_key": None})["place_key"] == "numpad_decimal"
+    def test_a_non_string_reserves_nothing(self):
+        assert main._validate_config({"place_key": 83})["place_key"] == ""
+        assert main._validate_config({"place_key": None})["place_key"] == ""
 
     def test_an_empty_string_disables_it(self):
         assert main._validate_config({"place_key": ""})["place_key"] == ""

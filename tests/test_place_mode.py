@@ -755,13 +755,32 @@ class TestReservedKeyMatching:
         spec = hotkey.RESERVED_KEYS["numpad_decimal"]
         assert hotkey.reserved_key_matches(83, hotkey._LLKHF_EXTENDED, spec) is False
 
-    def test_other_flag_bits_do_not_stop_a_match(self):
-        """Only bit 0 is the extended flag; injected (0x10) and alt-down
-        (0x20) ride along on perfectly real presses."""
+    def test_alt_down_does_not_stop_a_match(self):
+        """Bit 5 (0x20, alt-down) rides along on perfectly real presses and
+        must not stop the match. Bit 0 is the extended flag and must."""
         spec = hotkey.RESERVED_KEYS["numpad_decimal"]
-        assert hotkey.reserved_key_matches(83, 0x10, spec) is True
-        assert hotkey.reserved_key_matches(83, 0x30, spec) is True
-        assert hotkey.reserved_key_matches(83, 0x11, spec) is False
+        assert hotkey.reserved_key_matches(83, 0x20, spec) is True
+        assert hotkey.reserved_key_matches(83, 0x21, spec) is False
+
+    def test_our_own_injected_capital_S_is_never_a_place_key(self):
+        """The 2026-08-23 repeat storm. inject.py types via SendInput
+        KEYEVENTF_UNICODE, which carries the UTF-16 code unit in wScan, and
+        ord("S") == 83 — the numpad "." scan code. Matching that made the app
+        swallow the S out of its own insert (so verification failed and the
+        stash stayed unconsumed) and re-fire place mode, typing the same text
+        again. One press produced 14 inserts."""
+        spec = hotkey.RESERVED_KEYS["numpad_decimal"]
+        assert hotkey.reserved_key_matches(83, hotkey._LLKHF_INJECTED, spec) is False
+        assert hotkey.reserved_key_matches(83, 0x30, spec) is False
+
+    def test_no_reserved_key_can_be_hit_by_our_own_typing(self):
+        """Every reserved key's scan code collides with a printable ASCII
+        character (78='N', 74='J', 55='7', 83='S', 82='R', 69='E'), so the
+        injected gate has to hold for all of them, not just the default."""
+        for name, spec in hotkey.RESERVED_KEYS.items():
+            scan = spec[0]
+            assert hotkey.reserved_key_matches(
+                scan, hotkey._LLKHF_INJECTED, spec) is False, name
 
     def test_a_different_scan_code_never_matches(self):
         spec = hotkey.RESERVED_KEYS["numpad_decimal"]
@@ -868,6 +887,32 @@ class TestReservedKeyHookProc:
         ev = _kbd_event(83)
         assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYUP, ctypes.addressof(ev)) != 1
         assert not fired.wait(0.2)
+
+    def test_auto_repeat_fires_once_per_press(self, monkeypatch):
+        """A held key repeats WM_KEYDOWN with no keyup in between. The 300ms
+        time debounce alone let a held key fire every 300ms; only the leading
+        edge of a press is a press."""
+        fires = []
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fires.append(1))
+        ev = _kbd_event(83)
+        for _ in range(20):
+            assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) == 1
+            monkeypatch.setattr(hotkey, "_reserved_last_fire", 0.0)  # defeat the time debounce
+        time.sleep(0.4)
+        assert len(fires) == 1
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYUP, ctypes.addressof(ev)) == 1
+
+    def test_our_own_injected_text_never_fires_the_key(self, monkeypatch):
+        """THE REPEAT-STORM REGRESSION. inject.py types via SendInput
+        KEYEVENTF_UNICODE with the code unit in wScan, and ord("S") == 83.
+        A matching injected event both swallowed the S out of the insert and
+        re-fired place mode, which typed the same text again."""
+        fired = threading.Event()
+        monkeypatch.setattr(hotkey, "_reserved_cb", lambda: fired.set())
+        ev = _kbd_event(83, flags=hotkey._LLKHF_INJECTED)
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYDOWN, ctypes.addressof(ev)) != 1
+        assert hotkey._reserved_hook_proc(0, hotkey._WM_KEYUP, ctypes.addressof(ev)) != 1
+        assert not fired.wait(0.3)
 
     def test_the_hook_proc_creates_no_threads(self, monkeypatch):
         """A low-level keyboard hook blocks ALL keyboard input on the machine

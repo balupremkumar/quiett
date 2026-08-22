@@ -397,6 +397,7 @@ _WM_KEYUP       = 0x0101
 _WM_SYSKEYDOWN  = 0x0104
 _WM_SYSKEYUP    = 0x0105
 _LLKHF_EXTENDED = 0x01
+_LLKHF_INJECTED = 0x10   # set on anything SendInput generated, including our own typing
 
 _KEY_DOWN_MESSAGES = (_WM_KEYDOWN, _WM_SYSKEYDOWN)
 _KEY_MESSAGES      = (_WM_KEYDOWN, _WM_SYSKEYDOWN, _WM_KEYUP, _WM_SYSKEYUP)
@@ -450,10 +451,28 @@ _reserved_proc = None
 def reserved_key_matches(scan_code: int, flags: int, spec) -> bool:
     """The whole Delete-vs-numpad decision, as a pure function.
 
-    scan 83 with LLKHF_EXTENDED set is the nav-cluster Delete and must NEVER
-    match: swallowing that would break Delete system-wide.
+    Three gates, each one a bug that has already bitten:
+
+    1. scan 83 with LLKHF_EXTENDED set is the nav-cluster Delete and must NEVER
+       match: swallowing that would break Delete system-wide.
+    2. LLKHF_INJECTED must NEVER match. inject.py types via SendInput
+       KEYEVENTF_UNICODE, which puts the UTF-16 code unit in wScan, and
+       ord("S") == 83 — the numpad "." scan code. Without this gate the app
+       sees its own capital S as a place-key press: it swallows the S out of
+       the text it is inserting (so verification fails and the stash is never
+       consumed) and re-fires place mode, which types the same text again.
+       That is a self-feeding loop; app.log 2026-08-23 09:57-09:58 shows it
+       running 14 times off one press. Every reserved key has the same hole:
+       78='N', 74='J', 55='7', 82='R', 69='E'.
+    3. The scan code itself must match.
+
+    The cost of gate 2 is that a keyboard remapper or on-screen keyboard
+    driving the reserved key through SendInput will not trigger it. Correct
+    trade: never react to synthetic input we cannot tell from our own.
     """
     if not spec:
+        return False
+    if flags & _LLKHF_INJECTED:
         return False
     want_scan, want_extended = spec
     return scan_code == want_scan and bool(flags & _LLKHF_EXTENDED) == bool(want_extended)
@@ -489,8 +508,12 @@ def _reserved_hook_proc(n_code, w_param, l_param):
             info = ctypes.cast(l_param, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
             if reserved_key_matches(info.scanCode, info.flags, spec):
                 if w_param in _KEY_DOWN_MESSAGES:
+                    # A held key repeats WM_KEYDOWN with no keyup in between.
+                    # Only the leading edge of a press is a press; the time
+                    # debounce alone let a held key fire every 300ms.
+                    repeat = _reserved_down_swallowed
                     _reserved_down_swallowed = True
-                    if not _reserved_debounced(time.monotonic()):
+                    if not repeat and not _reserved_debounced(time.monotonic()):
                         sig = _reserved_signal
                         if sig is not None:
                             sig.set()

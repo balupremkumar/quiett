@@ -128,7 +128,10 @@ _CONFIG_DEFAULTS = {
     "target_ring":                 True,    # outline the resolved target while recording
     # Place mode's everyday entry point: ONE key, no modifiers, reserved by
     # Quiett while it runs (hotkey.RESERVED_KEYS lists the names). "" disables.
-    "place_key":                   "numpad_decimal",
+    # Disabled 2026-08-23 on Balu's instruction while the reserved-key
+    # approach is re-thought against how shipped dictation apps do this.
+    # Place mode still reaches the tray item and the recovery panel.
+    "place_key":                   "",
     # Optional extra chord for place mode, off by default now the key above
     # exists. NEVER pick a ctrl+alt+<x> combo here: ctrl+alt is the record hold
     # and hotkey._on_key only tests that every modifier is down, so extra keys
@@ -291,12 +294,12 @@ def _validate_config(raw: dict) -> dict:
     # place_key names a physical key Quiett reserves outright, so an unknown
     # name cannot be honoured at all: fall back rather than silently leaving
     # place mode with no key. "" is a deliberate "no reserved key".
-    raw_place_key = cfg.get("place_key", "numpad_decimal")
+    raw_place_key = cfg.get("place_key", "")
     place_key = raw_place_key.strip().lower() if isinstance(raw_place_key, str) else None
     if place_key is None or (place_key and place_key not in hotkey.RESERVED_KEYS):
         warn("main", f"place_key {raw_place_key!r} is not a key Quiett can reserve, "
-                     "using numpad_decimal")
-        place_key = "numpad_decimal"
+                     "reserving nothing")
+        place_key = ""
     cfg["place_key"] = place_key
     return cfg
 
@@ -930,7 +933,7 @@ def main() -> None:
     # own low-level hook so the key is swallowed before the focused app sees
     # it. The nav-cluster Delete shares scan code 83 with the numpad "." and is
     # told apart by the extended flag, so it keeps working (hotkey.py).
-    _place_key = _cfg.get("place_key", "numpad_decimal")
+    _place_key = _cfg.get("place_key", "")
     if _place_key:
         if hotkey.register_reserved_key(_place_key, place_key_pressed):
             _scan = hotkey.RESERVED_KEYS.get(_place_key, ("?",))[0]
