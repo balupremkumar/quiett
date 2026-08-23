@@ -19,15 +19,17 @@ Place mode keeps the tray `Place last dictation` item, the recovery panel, the o
 **Terminals now paste with Shift+Insert, not Ctrl+Shift+V** (2026-08-23). Legacy conhost has no Ctrl+Shift+V binding, which is why right-click was the only paste that worked; a control run typed a literal `^V` into the console. Shift+Insert is bound in conhost, Windows Terminal, mintty, ConEmu and Alacritty alike. Verified end to end against a live conhost by reading the console screen buffer back. `VK_INSERT` must carry `KEYEVENTF_EXTENDED` or scan 0x52 is numpad 0 and it types a literal "0" with NumLock on.
 Tauri windows (`Tauri Window` class, Flightdeck) now route to clipboard Ctrl+V with the webview settle delay. They matched no rule and fell through to character typing, which failed six inserts in a row on 2026-08-23.
 
+**Doubled dictations fixed** (2026-08-23, `1b4db7c`). Two of Balu's messages arrived with the same 137-char block verbatim twice. `verify_landed` graded "same signal before and after" as a confident NO, but a WebView2 host hands UIA an element whose value reads "" whichever way the paste went, so every Flightdeck insert compared 0 to 0 and was reported failed. That fired the recovery panel, Balu placed the text again, and it landed twice. No possible delta now means no signal, not a negative verdict; an unchanged NON-zero length is still a real failure. Every non-yes verdict logs the numbers and signal kind it saw.
+
 Also on: `ctrl+shift+u` unstick modifiers, tray `Unstick modifiers`.
 
-524 tests green (51 reserved-key tests removed, 12 paste-method tests added). Not yet pushed.
+528 tests green. Not yet pushed.
 
 ## Next steps
 
 - [ ] Delete the empty `D:\Dev\ai\projects\active\voice-dictation` folder. It survived the rename because a shell was parked inside it, which pins a directory on Windows.
 - [ ] Confirm the Stop hook's `state_check.py` still fires after the rename; it may point at the old path.
-- [ ] Balu to confirm in real use: dictate into a terminal and into Flightdeck, both should land first go now.
+- [ ] **Balu is mid-test as of 13:37** (PID 16264). Dictate into Flightdeck (should land once, no recovery panel), into a terminal (the Shift+Insert path, never voice-tested), press numpad `.` (should behave as an ordinary key), and one long dictation containing a capital S. Then read `app.log` for the new `[targetprobe] verify:` lines, which name the numbers rather than leaving it to inference.
 - [ ] Hook watchdog. Windows silently removes a low-level hook that overruns `LowLevelHooksTimeout` and never tells the app. The reserved-key hook is gone but the hold-to-record path still uses the `keyboard` library's shared hook, so the failure mode survives.
 - [ ] Consider Handy's other two insert settings: a tunable paste delay (defaults to 60ms there) and an explicit clipboard-restore toggle.
 - [ ] Hands-on, needs no fullscreen game running: target ring and armed overlay render, are click-through, correct at 125% DPI on the second monitor; a toast lands on DISPLAY2; RDP behaviour.
