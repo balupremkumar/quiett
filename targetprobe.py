@@ -835,9 +835,28 @@ def verify_landed(hwnd: int, token: object, budget_ms: int = 300) -> bool | None
         if after.value > token.value:
             return True
         if after.value == token.value:
+            if token.value == 0:
+                # Nothing readable before, nothing readable after, and we just
+                # sent characters. That is not evidence the paste failed, it is
+                # evidence this target's signal cannot see the field at all.
+                # WebView2 hosts (Tauri, Electron) hand UIA an element whose
+                # value is "" whichever way the paste went, so grading 0 == 0
+                # as a confident NO produced a false failure on every insert,
+                # which fired the recovery panel and invited the user to place
+                # the same text a second time. Balu got doubled dictations from
+                # exactly this on 2026-08-23 (app.log 12:08 to 13:34).
+                # Same rule the text cap already follows: no possible delta
+                # means no signal, not a negative verdict.
+                log(_TAG, f"verify: no readable signal either side "
+                          f"(kind={after.kind}), claiming nothing")
+                return None
+            log(_TAG, f"verify: signal unchanged at {after.value} "
+                      f"(kind={after.kind}), reporting NOT landed")
             return False
         # Shorter than before. Something changed, but not in a way that proves
         # our text landed, so claim nothing.
+        log(_TAG, f"verify: signal shrank {token.value} -> {after.value} "
+                  f"(kind={after.kind}), claiming nothing")
         return None
     except Exception as e:
         warn(_TAG, f"verify_landed failed: {e}")

@@ -1,4 +1,4 @@
-"""Tests for targetprobe.py - the "can text actually land here" probe.
+"""Tests for tp.py - the "can text actually land here" probe.
 
 Headless by construction: every verdict test drives _classify_uia with a fake
 property dict, so nothing here touches live UI Automation, COM, or a real
@@ -365,3 +365,49 @@ class TestMirroredFromInject:
         mine = [name for name, _typ in tp._GUITHREADINFO._fields_]
         assert theirs == mine
         assert ctypes.sizeof(tp._GUITHREADINFO) > 0
+
+
+class TestVerifyLandedZeroSignal:
+    """THE DOUBLED-DICTATION REGRESSION (2026-08-23).
+
+    verify_landed graded "same length before and after" as a confident NO.
+    A WebView2 host (Tauri, Electron) hands UIA an element whose value reads
+    "" whichever way the paste went, so every insert into Flightdeck came back
+    0 == 0 and was reported as failed. That fired the recovery panel, Balu
+    placed the text again, and the dictation arrived twice. app.log 12:08 to
+    13:34 shows six of them in a row.
+
+    No possible delta means no signal, not a negative verdict, which is the
+    rule _read_signal already applies to a capped text read.
+    """
+
+    def _sig(self, value, kind="value", rid=(1, 2)):
+        return tp.TargetSignal(kind, value, rid, 1)
+
+    def test_zero_both_sides_claims_nothing(self, monkeypatch):
+        monkeypatch.setattr(tp, "_is_window", lambda h: True)
+        monkeypatch.setattr(tp, "_run_with_deadline",
+                            lambda fn, budget: self._sig(0))
+        assert tp.verify_landed(1, self._sig(0)) is None
+
+    def test_a_real_unchanged_length_is_still_a_no(self, monkeypatch):
+        """A field that genuinely held 40 characters before and holds 40 now
+        did not receive the insert. That verdict must survive."""
+        monkeypatch.setattr(tp, "_is_window", lambda h: True)
+        monkeypatch.setattr(tp, "_run_with_deadline",
+                            lambda fn, budget: self._sig(40))
+        assert tp.verify_landed(1, self._sig(40)) is False
+
+    def test_growth_from_zero_is_still_a_yes(self, monkeypatch):
+        monkeypatch.setattr(tp, "_is_window", lambda h: True)
+        monkeypatch.setattr(tp, "_run_with_deadline",
+                            lambda fn, budget: self._sig(138))
+        assert tp.verify_landed(1, self._sig(0)) is True
+
+    def test_a_caret_that_never_moved_off_zero_claims_nothing(self, monkeypatch):
+        """The text-pattern signal is a caret offset, so 0 -> 0 means the caret
+        is at the start of a document UIA cannot see into."""
+        monkeypatch.setattr(tp, "_is_window", lambda h: True)
+        monkeypatch.setattr(tp, "_run_with_deadline",
+                            lambda fn, budget: self._sig(0, kind="text"))
+        assert tp.verify_landed(1, self._sig(0, kind="text")) is None
