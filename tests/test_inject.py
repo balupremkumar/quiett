@@ -216,17 +216,27 @@ class TestInjectStatus:
         monkeypatch.setattr(inject, "_notify_failure", lambda m: None)
         assert inject.inject_text("secret", 1234) == inject.FAILED
 
-    def test_modifiers_still_held_reports_clipboard(self, monkeypatch):
+    def test_modifiers_still_held_flushes_and_injects_anyway(self, monkeypatch):
+        """A modifier that never comes up used to abort the insert and fire the
+        recovery panel. Windows loses a key-up around a focus change often
+        enough that refusing cost real inserts, and the text is on the
+        clipboard either way, so flush and send."""
         _win32gui.IsWindow.return_value = True
-        copied = []
+        copied, flushed = [], []
         monkeypatch.setattr(inject, "_is_higher_integrity_target", lambda h: False)
         monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
         monkeypatch.setattr(inject, "_force_foreground", lambda h: None)
         monkeypatch.setattr(inject, "_wait_modifiers_released", lambda timeout_ms=400: False)
+        monkeypatch.setattr(inject, "_modifiers_physically_down", lambda: [17, 18])
+        monkeypatch.setattr(inject, "_flush_all_modifiers",
+                            lambda force=False: flushed.append(force))
+        monkeypatch.setattr(inject, "_send_unicode_text",
+                            lambda t, batch=32, batch_delay_ms=2: len(t))
         monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: copied.append(t) or True)
         monkeypatch.setattr(inject, "_notify_failure", lambda m: None)
-        assert inject.inject_text("hello", 1234) == inject.CLIPBOARD
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
         assert copied == ["hello"]
+        assert True in flushed
 
     def test_typed_text_reports_unconfirmed_without_a_verifier(self, monkeypatch, live_target):
         """SendInput accepting the events is not proof the target took them, so
@@ -237,8 +247,8 @@ class TestInjectStatus:
                             lambda t, batch=32, batch_delay_ms=2: len(t))
         monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: copied.append(t) or True)
         assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
-        # The type path never touches the clipboard on its own, so an
-        # unconfirmed insert has to park the text there or nothing is left.
+        # Every insert parks the text on the clipboard before it sends
+        # anything, whatever the method and whatever the verdict.
         assert copied == ["hello"]
 
     def test_typed_text_reports_inserted_when_verified(self, monkeypatch, live_target):
@@ -248,14 +258,17 @@ class TestInjectStatus:
         monkeypatch.setattr(inject, "_verify_fn", lambda hwnd, token: True)
         assert inject.inject_text("hello", 1234) == inject.INSERTED
 
-    def test_typed_text_verified_as_missing_reports_clipboard(self, monkeypatch, live_target):
+    def test_a_negative_verdict_cannot_demote_an_insert(self, monkeypatch, live_target):
+        """The verifier is advisory: it can promote to INSERTED, never demote.
+        Measured 2026-08-23, it graded Notepad, conhost, a Chrome textarea and
+        Flightdeck as unlanded on inserts a screenshot showed landing."""
         copied = []
         monkeypatch.setattr(inject, "_decide_method", lambda h: "type")
         monkeypatch.setattr(inject, "_send_unicode_text",
                             lambda t, batch=32, batch_delay_ms=2: len(t))
         monkeypatch.setattr(inject, "_verify_fn", lambda hwnd, token: False)
         monkeypatch.setattr(inject, "_clipboard_set_text", lambda t: copied.append(t) or True)
-        assert inject.inject_text("hello", 1234) == inject.CLIPBOARD
+        assert inject.inject_text("hello", 1234) == inject.INSERTED_UNCONFIRMED
         assert copied == ["hello"]
 
     def test_a_raising_verifier_is_no_signal(self, monkeypatch, live_target):
@@ -349,29 +362,21 @@ class TestLanded:
 
 
 class TestRetentionDecision:
-    """The retention table, as a pure function: restoring the old clipboard
-    over an unconfirmed insert is what destroyed dictations (plan D1)."""
+    """The last dictation always stays on the clipboard. No status and no
+    setting brings the previous clipboard back, because the restore is what
+    destroyed dictations and the verdict it was gated on is unreliable."""
 
-    def test_confirmed_insert_always_restores(self):
-        assert inject.should_restore_clipboard(inject.INSERTED, True)
-        assert inject.should_restore_clipboard(inject.INSERTED, False)
-
-    def test_unconfirmed_insert_keeps_the_text_when_retaining(self):
-        assert not inject.should_restore_clipboard(inject.INSERTED_UNCONFIRMED, True)
-
-    def test_unconfirmed_insert_restores_when_retention_is_off(self):
-        assert inject.should_restore_clipboard(inject.INSERTED_UNCONFIRMED, False)
-
-    def test_failure_paths_keep_the_text_when_retaining(self):
-        for status in (inject.CLIPBOARD, inject.FAILED):
+    def test_nothing_ever_restores_the_previous_clipboard(self):
+        for status in (inject.INSERTED, inject.INSERTED_UNCONFIRMED,
+                       inject.CLIPBOARD, inject.FAILED,
+                       inject.REFUSED_NOT_EDITABLE):
             assert not inject.should_restore_clipboard(status, True)
-            assert inject.should_restore_clipboard(status, False)
+            assert not inject.should_restore_clipboard(status, False)
 
-    def test_defaults_to_the_configured_flag(self, monkeypatch):
-        monkeypatch.setattr(inject, "_retain_on_unconfirmed", True)
-        assert not inject.should_restore_clipboard(inject.INSERTED_UNCONFIRMED)
+    def test_the_retention_setting_can_no_longer_turn_it_back_on(self, monkeypatch):
         monkeypatch.setattr(inject, "_retain_on_unconfirmed", False)
-        assert inject.should_restore_clipboard(inject.INSERTED_UNCONFIRMED)
+        assert not inject.should_restore_clipboard(inject.INSERTED_UNCONFIRMED)
+        assert not inject.should_restore_clipboard(inject.INSERTED)
 
     def test_configure_sets_the_flag(self):
         try:
@@ -382,8 +387,8 @@ class TestRetentionDecision:
         finally:
             inject.configure(restore_delay_ms=150)
 
-    def test_unconfirmed_paste_does_not_start_the_restore_thread(self, monkeypatch):
-        """The same rule end to end: no restore thread means the dictated text
+    def test_no_paste_ever_starts_a_restore_thread(self, monkeypatch):
+        """End to end: no restore thread on any verdict, so the dictated text
         stays on the clipboard instead of being overwritten 150ms later."""
         threads = []
         _win32gui.IsWindow.return_value = True
@@ -404,7 +409,7 @@ class TestRetentionDecision:
 
         monkeypatch.setattr(inject, "_verify_fn", lambda hwnd, token: True)
         assert inject.inject_text("hello", 1234) == inject.INSERTED
-        assert len(threads) == 1
+        assert threads == []
 
 
 class TestPreflightGate:
@@ -779,32 +784,50 @@ class TestPasteMethodChoice:
         monkeypatch.setattr(inject, "_get_class", lambda h: cls)
         monkeypatch.setattr(inject, "_get_exe_name", lambda h: exe)
 
-    def test_legacy_conhost_gets_shift_insert(self, monkeypatch):
-        """cmd.exe and the old PowerShell console have NO Ctrl+Shift+V binding,
-        which is why right-click was the only paste that worked there."""
-        self._target(monkeypatch, "ConsoleWindowClass", "cmd.exe")
-        assert inject._decide_method(1) == "shift_insert"
-
-    def test_every_terminal_class_gets_the_same_keystroke(self, monkeypatch):
-        """Shift+Insert is bound in conhost, Windows Terminal, mintty, ConEmu
-        and Alacritty alike, so one keystroke covers every terminal we detect."""
+    def test_every_terminal_class_is_typed_into(self, monkeypatch):
+        """Measured against a live conhost 2026-08-23: typing lands,
+        Shift+Insert inserts nothing, and Ctrl+Shift+V types a literal "^V"."""
         for cls in inject._TERMINAL_CLASSES:
             self._target(monkeypatch, cls)
-            assert inject._decide_method(1) == "shift_insert", cls
+            assert inject._decide_method(1) == "type", cls
 
-    def test_tauri_goes_to_the_clipboard_not_the_keyboard(self, monkeypatch):
-        """Flightdeck is a Tauri (WebView2) app. Its class matched no rule, so
-        it fell through to character typing and failed six inserts in a row on
-        2026-08-23 before one finally verified."""
+    def test_tauri_is_typed_into_not_pasted(self, monkeypatch):
+        """Flightdeck is a Tauri (WebView2) app hosting an xterm.js terminal
+        with no Ctrl+V paste binding: scan-code events, virtual-key events,
+        both together and keybd_event all pasted NOTHING. Typing lands every
+        time. Routing it to Ctrl+V on 2026-08-23 (a3339a5) is the regression
+        Balu reported."""
         self._target(monkeypatch, "Tauri Window", "fd-scaffold.exe")
+        assert inject._decide_method(1) == "type"
+
+    def test_an_ordinary_editable_target_gets_ctrl_v(self, monkeypatch):
+        """Windows 11 Notepad SILENTLY CORRUPTS typed text - "FIXED notepad ok"
+        arrived as "FIXED kkkkkkkkkk" - because its WinUI/TSF stack resolves
+        each VK_PACKET against the current async key state. Ctrl+V is
+        byte-exact, so a normal editable target gets Ctrl+V."""
+        for cls, exe in (("Notepad", "notepad.exe"),
+                         ("Chrome_WidgetWin_1", "chrome.exe"),
+                         ("MozillaWindowClass", "firefox.exe"),
+                         ("#32770", "some.exe")):
+            self._target(monkeypatch, cls, exe)
+            assert inject._decide_method(1) == "ctrl_v", cls
+
+    def test_rdp_keeps_ctrl_v_for_its_own_reason(self, monkeypatch):
+        """KEYEVENTF_UNICODE events frequently do not propagate into a remote
+        session at all, so mstsc must never be typed into."""
+        self._target(monkeypatch, "TscShellContainerClass", "mstsc.exe")
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: True)
+        assert inject._decide_method(1) == "ctrl_v"
+
+    def test_rdp_wins_over_the_terminal_rule(self, monkeypatch):
+        """A console window inside an RDP session is still an RDP target."""
+        self._target(monkeypatch, "ConsoleWindowClass", "mstsc.exe")
+        monkeypatch.setattr(inject, "_is_rdp", lambda h: True)
         assert inject._decide_method(1) == "ctrl_v"
 
     def test_tauri_also_gets_the_webview_settle_delay(self):
         assert any("Tauri" in s for s in inject._SLOW_FOCUS_CLASSES_SUBSTR)
 
-    def test_a_plain_win32_control_still_gets_typed(self, monkeypatch):
-        self._target(monkeypatch, "Notepad", "notepad.exe")
-        assert inject._decide_method(1) == "type"
 
     def test_a_per_app_override_wins_and_accepts_every_method(self, monkeypatch):
         self._target(monkeypatch, "Notepad", "notepad.exe")
@@ -821,7 +844,7 @@ class TestPasteMethodChoice:
     def test_an_unknown_override_is_ignored(self, monkeypatch):
         self._target(monkeypatch, "Notepad", "notepad.exe")
         monkeypatch.setattr(inject, "_per_app_paste", {"notepad.exe": "telepathy"})
-        assert inject._decide_method(1) == "type"
+        assert inject._decide_method(1) == "ctrl_v"
 
 
 class TestShiftInsertKeystroke:

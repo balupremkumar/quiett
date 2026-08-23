@@ -54,3 +54,24 @@ Balu's report: inserts going missing constantly, the "insert failed" notice rare
 **What could not be verified.** A protected fullscreen game held the foreground for most of the session. Measured directly: no keyboard hook of any kind receives events in that state, and focus cannot be moved off the game, so the ring, overlay, DISPLAY2 toasts and RDP all remain untested. Two E2E harnesses produced misleading red results before the cause was found. Balu confirmed the numpad `.` key working in real use.
 
 Commits: `5b85fec`, `a9ff082`, `7151d19`, `55b7fbd`, `412433a`. 559 tests green, main pushed.
+
+## 2026-08-23 — insert rebuilt on measured evidence
+
+Balu reported he could not insert into Flightdeck at all and was down to right-click paste, and that the orange recovery panel kept firing on non-terminal fields.
+Reproduced end to end by injecting into live windows and reading the result back off a screenshot rather than trusting a status string.
+
+The measured matrix (`ctrl_v` / `type` / `shift_insert`): Notepad exact / MANGLED / -; conhost exact / exact / nothing; Chrome textarea exact / exact / -; Flightdeck xterm.js NOTHING / exact / nothing.
+
+Four separate bugs.
+`_set_focus_on_child` destroyed DOM focus inside a WebView2 host, so every keystroke after it went nowhere; the same run with the step removed landed.
+Flightdeck's terminal has no Ctrl+V paste binding at all, so `a3339a5` routing Tauri to Ctrl+V killed every insert there. Scan-code, virtual-key, both, and `keybd_event` all pasted nothing.
+Windows 11 Notepad silently corrupts typed text ("FIXED notepad ok" arrived as "FIXED kkkkkkkkkk") at every batch size and pace tried; that had been shipping quietly for as long as plain Win32 targets were typed into.
+The verifier produced 14 confident false "NOT landed" verdicts, which is what fired the recovery panel repeatedly.
+
+Fixes: routing is per-app override, then RDP `ctrl_v`, then terminals and `Tauri Window` `type`, else `ctrl_v`. The focus-child step is gone.
+The clipboard now always holds the last dictation, set before anything is sent, never restored. Balu's ruling, and it replaces the whole retain/restore machinery.
+The verifier is advisory: it can promote to INSERTED, never demote. The recovery panel opens on `FAILED` only. A stuck modifier is flushed and the insert proceeds instead of aborting.
+
+Note for the next session: a fullscreen MortalShell2 was reclaiming the foreground mid-test and poisoned the first Notepad run. Check the foreground before trusting a red result, per the standing rule.
+
+526 tests green. App restarted and all four targets re-verified by screenshot after the change.

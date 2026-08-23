@@ -31,28 +31,31 @@ class TestEscalationTable:
         assert d["ui"] == main.ESCALATE_NONE
         assert d["reason"] == ""
 
-    def test_no_signal_leaves_the_stash_armed_and_says_nothing(self):
-        """Terminals, RDP and every app with no accessibility layer land here.
-        A notice on all of them would train the user to ignore it."""
+    def test_no_signal_is_the_normal_case_and_says_nothing(self):
+        """Terminals, RDP and every app with no accessibility layer land here,
+        which is nearly everything. It consumes the stash for the same reason:
+        a tray dot lit after every single insert means nothing."""
         d = main.escalation_for("inserted_unconfirmed")
-        assert d["consume_stash"] is False
+        assert d["consume_stash"] is True
         assert d["ui"] == main.ESCALATE_NONE
+        assert d["reason"] == ""
 
-    def test_confirmed_miss_escalates_to_the_recovery_panel(self):
-        d = main.escalation_for("clipboard")
-        assert d["consume_stash"] is False
-        assert d["ui"] == main.ESCALATE_RECOVERY
-        assert "clipboard" in d["reason"].lower()
+    def test_a_send_that_was_refused_stays_quiet_but_keeps_the_stash(self):
+        """Nothing was sent, but the text IS on the clipboard and inject has
+        already shown a toast saying so. The recovery panel firing here is what
+        Balu was seeing repeatedly on inserts that needed no recovery."""
+        for status in ("clipboard", main._REFUSED_NOT_EDITABLE):
+            d = main.escalation_for(status)
+            assert d["consume_stash"] is False, status
+            assert d["ui"] == main.ESCALATE_NONE, status
 
-    def test_hard_failure_admits_the_clipboard_copy_failed_too(self):
+    def test_hard_failure_is_the_only_thing_that_interrupts(self):
+        """Nothing sent AND the clipboard copy failed, so the panel holds the
+        only copy of the text."""
         d = main.escalation_for("failed")
         assert d["ui"] == main.ESCALATE_RECOVERY
+        assert d["consume_stash"] is False
         assert "clipboard copy" in d["reason"].lower()
-
-    def test_preflight_refusal_names_the_real_reason(self):
-        d = main.escalation_for(main._REFUSED_NOT_EDITABLE)
-        assert d["ui"] == main.ESCALATE_RECOVERY
-        assert "no text field" in d["reason"].lower()
 
     def test_clipboard_only_mode_is_never_a_failure(self):
         """Copying instead of inserting is the whole point of that mode."""
@@ -64,16 +67,19 @@ class TestEscalationTable:
     def test_clipboard_only_does_not_consume_the_stash_on_a_confirmed_insert(self):
         assert main.escalation_for("inserted", "clipboard_only")["consume_stash"] is False
 
-    def test_an_unrecognised_status_escalates_rather_than_going_quiet(self):
-        """Failing loud on something unexpected keeps a future inject status
-        from silently losing a dictation."""
+    def test_an_unrecognised_status_keeps_the_stash_armed(self):
+        """An unknown status is not proof of anything, so it stays quiet like
+        the other non-failures but never drops the parked copy."""
         d = main.escalation_for("something_new")
-        assert d["ui"] == main.ESCALATE_RECOVERY
+        assert d["ui"] == main.ESCALATE_NONE
+        assert d["consume_stash"] is False
 
-    def test_only_a_confirmed_insert_ever_consumes_the_stash(self):
-        for status in ("inserted_unconfirmed", "clipboard", "failed",
+    def test_only_an_insert_that_was_actually_sent_consumes_the_stash(self):
+        for status in ("clipboard", "failed",
                        main._REFUSED_NOT_EDITABLE, "something_new"):
-            assert main.escalation_for(status)["consume_stash"] is False
+            assert main.escalation_for(status)["consume_stash"] is False, status
+        for status in ("inserted", "inserted_unconfirmed"):
+            assert main.escalation_for(status)["consume_stash"] is True, status
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +627,9 @@ class TestInsertEscalationOptOut:
         assert not stash.has_unconsumed()
 
     def test_escalation_is_still_the_default(self, place):
+        """Only a hard failure reaches the panel now, so that is what proves
+        the default path still runs the table at all."""
         fp, _, _, _, fi = place
-        fi.status = "clipboard"
+        fi.status = "failed"
         main.insert_text_now("parked")
         assert len(fp.recoveries) == 1

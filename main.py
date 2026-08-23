@@ -325,22 +325,26 @@ def escalation_for(status: str, paste_mode: str = "auto") -> dict:
         # Copying instead of inserting is the whole point of that mode, so
         # nothing here is a failure and nothing here consumed the stash.
         return {"consume_stash": False, "ui": ESCALATE_NONE, "reason": ""}
-    if status == inject.INSERTED:
+    if status in (inject.INSERTED, inject.INSERTED_UNCONFIRMED):
+        # The input went out. Confirmed and unconfirmed are the same outcome to
+        # the user now: nothing on screen, and the dictation is on the
+        # clipboard if it turns out not to have landed. Unconfirmed is the
+        # NORMAL case (most targets expose no readable signal at all), so it
+        # consumes the stash too — otherwise the tray dot is permanently lit
+        # and stops meaning anything.
         return {"consume_stash": True, "ui": ESCALATE_NONE, "reason": ""}
-    if status == inject.INSERTED_UNCONFIRMED:
-        # No signal. Retained clipboard, armed stash, tray dot, no toast.
-        return {"consume_stash": False, "ui": ESCALATE_NONE, "reason": ""}
-    if status == _REFUSED_NOT_EDITABLE:
-        return {"consume_stash": False, "ui": ESCALATE_RECOVERY,
-                "reason": "No text field was focused, so nothing was typed. Click into "
-                          "the field you want, then Place it."}
     if status == inject.FAILED:
+        # The only case worth interrupting for: nothing was sent AND the
+        # clipboard copy failed, so this panel holds the only copy of the text.
         return {"consume_stash": False, "ui": ESCALATE_RECOVERY,
                 "reason": "The text did not reach the field, and the clipboard copy "
                           "failed too. Click into the field you want, then Place it."}
-    return {"consume_stash": False, "ui": ESCALATE_RECOVERY,
-            "reason": "The text did not reach the field. It is on your clipboard. "
-                      "Click into the field you want, then Place it."}
+    # Nothing was sent (no field focused, paste blocked, elevated target). The
+    # text IS on the clipboard and inject.py has already shown a toast saying
+    # so, so the stash stays armed with a tray dot and that is all. The
+    # recovery panel used to fire here and Balu was getting it repeatedly on
+    # inserts that needed no recovery.
+    return {"consume_stash": False, "ui": ESCALATE_NONE, "reason": ""}
 
 
 def _apply_escalation(text: str, decision: dict) -> None:

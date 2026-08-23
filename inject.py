@@ -1281,9 +1281,18 @@ def _post_insert_status(hwnd: int, before_token: dict, text: str,
                         on_clipboard: bool) -> str:
     """Grade an insert that SendInput accepted.
 
-    Accepted is not landed, so this returns INSERTED only on a confident yes,
-    INSERTED_UNCONFIRMED when there is no signal (the normal case until the
-    probe is wired in), and CLIPBOARD/FAILED on a confident no.
+    Accepted is not landed, so this returns INSERTED only on a confident yes
+    and INSERTED_UNCONFIRMED otherwise.
+
+    A negative verdict no longer downgrades the status or puts anything on
+    screen. It cannot be trusted: UI Automation reads a length of 0 for most
+    real targets whichever way the insert went, and the "after" read races the
+    target's own processing of the input we just sent. Measured 2026-08-23,
+    every one of Notepad, conhost, a Chrome textarea and Flightdeck graded
+    "unconfirmed" on inserts that a screenshot showed landing perfectly, and
+    app.log holds 14 confident "NOT landed" verdicts. The verifier is now
+    advisory: it can promote a status to INSERTED, never demote one. The
+    clipboard, not the verdict, is what makes a missed insert recoverable.
     """
     verdict = _verify(hwnd, before_token)
     if verdict is True:
@@ -1291,55 +1300,77 @@ def _post_insert_status(hwnd: int, before_token: dict, text: str,
         return INSERTED
     if verdict is None:
         log("inject", "insert unconfirmed: no verification signal for this target")
-        return INSERTED_UNCONFIRMED
-    warn("inject", "insert verified as NOT landed in the target")
-    copied = on_clipboard or _clipboard_set_text(text)
-    _notify_failure("The text did not reach the field. "
-                    + ("It is on your clipboard, press Ctrl+V to paste."
-                       if copied else "The clipboard copy failed too."))
-    return CLIPBOARD if copied else FAILED
+    else:
+        log("inject", "verifier says not landed; treating as unconfirmed "
+                      "(the text is on the clipboard either way)")
+    return INSERTED_UNCONFIRMED
 
 
 def should_restore_clipboard(status: str, retain_on_unconfirmed: bool | None = None) -> bool:
-    """Whether the user's previous clipboard goes back after an insert.
+    """Never. The last dictation always stays on the clipboard.
 
-    Restoring on an unconfirmed insert is what destroyed dictations: the
-    characters never reached the target and 150-450ms later the old clipboard
-    came back over the top of the only remaining copy. So the previous
-    clipboard only returns on a confirmed insert, unless retention is switched
-    off, which reverts to the old behaviour wholesale.
+    Kept as a function so callers and settings keep working, but the answer is
+    now fixed. Restoring the previous clipboard is what destroyed dictations:
+    the characters did not reach the target and 150-450ms later the old
+    clipboard came back over the top of the only remaining copy. Making the
+    restore conditional on a verdict only narrowed that window, and the verdict
+    turned out to be unreliable. Balu's ruling, 2026-08-23: the last thing he
+    spoke sits in the clipboard, full stop. Older transcripts are in the
+    history page and the tray's recent-dictations submenu.
     """
-    if retain_on_unconfirmed is None:
-        retain_on_unconfirmed = _retain_on_unconfirmed
-    if status == INSERTED:
-        return True
-    return not retain_on_unconfirmed
+    return False
 
 
 def _decide_method(hwnd: int) -> str:
-    """Pick the paste method for this target. Returns one of PASTE_METHODS."""
+    """Pick the paste method for this target. Returns one of PASTE_METHODS.
+
+    Ctrl+V is the default because it is the universal paste gesture and it
+    never corrupts the text. Typing is the exception, for the two target
+    families measured to have no working Ctrl+V.
+
+    Measured end to end 2026-08-23 against live windows, reading back what
+    actually arrived from a screenshot rather than trusting a status string:
+
+        target                      ctrl_v   type            shift_insert
+        Notepad (Win11 WinUI)       exact    MANGLED         -
+        conhost (cmd.exe)           exact    exact           nothing
+        Chrome <textarea>           exact    exact           -
+        Flightdeck xterm.js/Tauri   NOTHING  exact           nothing
+
+    Two findings drive this table:
+
+    Windows 11 Notepad SILENTLY CORRUPTS typed text. "FIXED notepad ok"
+    arrived as "FIXED kkkkkkkkkk" and "AAtype fox" as "AAtype xxx" — a run of
+    characters all replaced by the last one in the burst. Its WinUI/TSF input
+    stack resolves each VK_PACKET against the CURRENT async key state instead
+    of the queued event, so a fast burst collapses. Every batch size and pace
+    tried (32/8/4/1 chars per SendInput, 0-5ms apart) mangled it; only a pace
+    far too slow for a 465-char dictation survives. Ctrl+V is byte-exact
+    there, so Ctrl+V is what a normal editable target gets.
+
+    Flightdeck's terminal is xterm.js inside a WebView2, and it has no Ctrl+V
+    paste binding at all — scan-code events, virtual-key events, both
+    together, and keybd_event all pasted nothing, which is why Balu was down
+    to right-clicking. Typing lands there every time. Routing Tauri to Ctrl+V
+    on 2026-08-23 (a3339a5) is the regression he reported; it was chosen off
+    six "failed" inserts that were really the verifier's false negative, fixed
+    separately in 1b4db7c.
+
+    RDP keeps Ctrl+V for its own reason: KEYEVENTF_UNICODE events frequently
+    do not propagate into a remote session at all.
+    """
     exe = _get_exe_name(hwnd)
     override = _per_app_paste.get(exe)
     if override in PASTE_METHODS:
         return override
-    if _is_terminal(hwnd):
-        # Clipboard paste, not typing: terminals benefit from the speed on long
-        # output. See _TERMINAL_PASTE_METHOD for why it is Shift+Insert.
-        return _TERMINAL_PASTE_METHOD
     if _is_rdp(hwnd):
-        # Synthetic Unicode typing is unreliable over RDP — the KEYEVENTF_UNICODE
-        # events frequently don't propagate into the remote session. Clipboard
-        # Ctrl+V matches what works when pasting into a remote desktop by hand.
         return "ctrl_v"
-    cls = _get_class(hwnd)
-    if any(s in cls for s in ("Chrome_WidgetWin", "MozillaWindowClass", "Tauri Window")):
-        # VS Code / Cursor / Electron / Tauri / browsers: clipboard Ctrl+V is the
-        # reliable default (typing gets swallowed under focus races). Tauri joined
-        # this list 2026-08-23: Flightdeck fell through to typing and failed six
-        # inserts in a row. Configurable via electron_paste_method.
-        return _electron_paste_method
-    # Default: Unicode typing for plain Win32 controls / dialogs.
-    return "type"
+    if _is_terminal(hwnd) or "Tauri Window" in _get_class(hwnd):
+        # Terminals and terminal-hosting webviews. conhost has no working
+        # Shift+Insert and turns Ctrl+Shift+V into a literal "^V"; Flightdeck
+        # answers no paste keystroke at all. Typing lands in both.
+        return "type"
+    return "ctrl_v"
 
 
 _last_insert: dict | None = None   # {"hwnd": int, "chars": int} of the newest insert
@@ -1496,13 +1527,15 @@ def inject_text(text: str, hwnd: int) -> str:
         settle = 0.40
     time.sleep(settle)
 
-    # For Electron: target the actual focused renderer widget directly.
+    # Chromium hosts (Electron, WebView2, browsers) get the longer settle above
+    # and nothing else. We used to AttachThreadInput to the focused
+    # Chrome_RenderWidgetHostHWND and force Win32 focus onto it; that step
+    # DESTROYED the DOM focus inside a WebView2 host, so every keystroke after
+    # it went nowhere. Measured 2026-08-23 against Flightdeck: typing with the
+    # focus step inserted nothing, the identical run with the step removed
+    # inserted the text. Chromium restores its own renderer focus when the
+    # top-level window comes forward; taking it by hand only breaks that.
     is_electron = any(s in target_cls for s in _SLOW_FOCUS_CLASSES_SUBSTR) and not _is_rdp(hwnd)
-    if is_electron:
-        child = _get_focused_child(hwnd)
-        _set_focus_on_child(child)
-        log("inject", f"electron child: hwnd={child} class={_get_class(child)!r}")
-        _wait_focus_settled(child, timeout_ms=250)
 
     # Wait for the user to physically release the recording hotkey before
     # injecting input. Ctrl/Alt still held corrupts either the typed chars or
@@ -1510,14 +1543,16 @@ def inject_text(text: str, hwnd: int) -> str:
     # re-asserted by hardware auto-repeat, so injecting anyway can latch a
     # modifier in the target. If the keys are still down after 3s, do not
     # inject at all: leave the text on the clipboard for a manual paste.
-    if not _wait_modifiers_released(timeout_ms=3000):
-        warn("inject", "modifiers still held after 3s "
-                       f"({_modifiers_physically_down()}), not injecting")
-        if _clipboard_set_text(text):
-            _notify_failure("Keys still held down. Text copied, press Ctrl+V to paste.")
-            return CLIPBOARD
-        _notify_failure("Keys still held down and clipboard copy failed")
-        return FAILED
+    # keys are still down after the wait, flush them and inject anyway rather
+    # than refusing: the text is on the clipboard either way, and refusing was
+    # firing the recovery panel on a condition the user could not see. A
+    # latched Ctrl/Alt that no one is holding (Windows loses a key-up around a
+    # focus change often enough) used to cost the whole insert.
+    if not _wait_modifiers_released(timeout_ms=1500):
+        warn("inject", "modifiers still held after 1.5s "
+                       f"({_modifiers_physically_down()}), flushing and injecting anyway")
+        _flush_all_modifiers(force=True)
+        time.sleep(0.05)
     # Force-flush for RDP: clears modifiers stuck in the remote session (mstsc
     # has focus here, so the key-ups get forwarded) before we send Ctrl+V.
     _flush_all_modifiers(force=_is_rdp(hwnd))
@@ -1554,32 +1589,31 @@ def inject_text(text: str, hwnd: int) -> str:
     # Opaque handle for the verifier: what we are about to send, and when.
     before_token = {"chars": len(text), "method": method, "started": time.monotonic()}
 
+    # The dictation goes on the clipboard BEFORE anything is sent, every time,
+    # whatever the method and whatever happens next. That is the whole safety
+    # net now: if the insert does not land, right-click paste or Ctrl+V always
+    # works, and there is nothing to recover, restore or reason about. Ruled
+    # 2026-08-23: "whatever the last thing I spoke about should sit in the
+    # clipboard."
+    on_clipboard = _clipboard_set_text(text)
+    if not on_clipboard:
+        warn("inject", "clipboard copy failed; the insert is the only chance this text gets")
+
     if method == "type":
-        # Type characters via SendInput KEYEVENTF_UNICODE (no clipboard involvement).
+        # Type characters via SendInput KEYEVENTF_UNICODE.
         sent = _send_unicode_text(text)
         log("inject", f"typed {sent} chars via KEYEVENTF_UNICODE")
         if sent > 0:
             _last_insert = {"hwnd": hwnd, "chars": sent}
-            status = _post_insert_status(hwnd, before_token, text, on_clipboard=False)
-            if status == INSERTED_UNCONFIRMED and _retain_on_unconfirmed:
-                # The type path never touches the clipboard, so an unconfirmed
-                # insert would leave the user nothing to paste. Park it there
-                # (plan section 2); dropping their previous clipboard is the
-                # deliberate trade for never losing a dictation.
-                if _clipboard_set_text(text):
-                    log("inject", f"unconfirmed insert: {len(text)} chars parked on the clipboard")
-                else:
-                    warn("inject", "unconfirmed insert and the clipboard park failed too")
-            return status
+            return _post_insert_status(hwnd, before_token, text, on_clipboard=on_clipboard)
         # SendInput inserted nothing (throttled / blocked / secure desktop). Safe to
         # fall back to clipboard paste because nothing landed — no duplication risk.
         warn("inject", "type path inserted 0 chars; falling back to clipboard Ctrl+V")
         method = "ctrl_v"
 
-    # Clipboard paste path — terminals (Shift+Insert), RDP/Electron/Tauri
-    # (Ctrl+V), and the type-path fallback above.
-    snapshot = _clipboard_snapshot()  # save ALL formats (CF_HDROP, CF_DIB, HTML, etc.)
-    if not _clipboard_set_text(text):
+    # Clipboard paste path — RDP (Ctrl+V), per-app overrides, and the
+    # type-path fallback above.
+    if not on_clipboard:
         _notify_failure("Could not place text on clipboard")
         return FAILED
 
@@ -1623,41 +1657,12 @@ def inject_text(text: str, hwnd: int) -> str:
         time.sleep(0.05)
         _flush_all_modifiers(force=True)
 
-    # Evaluated here, not inside the thread: by the time the worker runs the
-    # target window may be gone and _is_rdp would query a dead hwnd.
-    is_rdp_target = _is_rdp(hwnd)
-
-    def _restore():
-        # Poll until clipboard no longer holds our injected text (paste consumed),
-        # or until the configured deadline — whichever comes first. RDP gets a far
-        # longer deadline: a remote delayed-render request landing after we restore
-        # pastes the OLD clipboard content into the remote session.
-        deadline = time.monotonic() + (_rdp_clipboard_restore_delay_ms / 1000
-                                       if is_rdp_target
-                                       else _restore_delay_ms / 1000 * 3)
-        step = 0.015
-        while time.monotonic() < deadline:
-            time.sleep(step)
-            try:
-                current = _clipboard_get_text()
-                if current != text:
-                    log("inject", "clipboard consumed early, restoring now")
-                    break
-            except Exception:
-                break
-        try:
-            _clipboard_restore_snapshot(snapshot)
-        except Exception as exc:
-            warn("inject", f"clipboard restore failed: {exc}")
-
-    status = _post_insert_status(hwnd, before_token, text, on_clipboard=True)
-    if should_restore_clipboard(status):
-        log("inject", f"clipboard restore armed (status={status})")
-        threading.Thread(target=_restore, daemon=True).start()
-    else:
-        log("inject", f"clipboard restore skipped (status={status}): "
-                      f"{len(text)} chars left on the clipboard for a manual paste")
-    return status
+    # No clipboard restore. The dictation stays on the clipboard until the next
+    # dictation replaces it, so a failed insert is always a right-click or
+    # Ctrl+V away. The save/restore dance is what used to wipe the only
+    # remaining copy of a transcript 150-450ms after an insert that never
+    # landed; dropping the previous clipboard contents is the accepted trade.
+    return _post_insert_status(hwnd, before_token, text, on_clipboard=True)
 
 
 def _is_descendant(child_hwnd: int, ancestor_hwnd: int) -> bool:

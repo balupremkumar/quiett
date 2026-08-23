@@ -2363,9 +2363,11 @@ def _open_window(text: str, hwnd: int, empty: bool = False,
 
         def _insert_worker() -> None:
             status = target_fn(to_paste, hwnd)
-            if status == inject.INSERTED:
-                # Confirmed landed, so nothing is left to recover. Without
-                # this the tray dot stayed lit forever after a panel insert.
+            if status in (inject.INSERTED, inject.INSERTED_UNCONFIRMED):
+                # The input went out, so there is nothing left to recover.
+                # Unconfirmed counts: most targets expose no readable signal at
+                # all, and gating this on INSERTED left the tray dot lit
+                # forever after every normal panel insert.
                 stash.mark_consumed()
             # Escalation table (PASTE_UX_PLAN section 5): only a status that
             # did not land escalates. INSERTED_UNCONFIRMED means no signal,

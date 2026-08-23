@@ -140,26 +140,30 @@ class TestInsertTextNow:
         main.insert_text_now("hello", submit=True)
         assert fi.submit_calls == [("hello", 4242)]
 
-    def test_clipboard_fallback_opens_the_recovery_panel(self, fakes):
+    def test_clipboard_fallback_stays_quiet(self, fakes):
+        """Nothing was sent, but the text IS on the clipboard and inject has
+        already toasted that. The panel here is what Balu was getting over and
+        over on inserts that needed no recovery."""
         fi, fp = fakes
         fi.status = FakeInject.CLIPBOARD
         fi.foreground = 4242
         assert main.insert_text_now("hello") == FakeInject.CLIPBOARD
-        assert fp.toasts == []          # the corner toast is for notices now
-        assert len(fp.recoveries) == 1
-        panel = fp.recoveries[0]
-        assert panel["text"] == "hello"
-        assert "clipboard" in panel["reason"].lower()
-        assert panel["on_place"] is not None
-        assert panel["on_dismiss"] is not None
+        assert fp.toasts == []
+        assert fp.recoveries == []
 
     def test_hard_failure_opens_the_recovery_panel(self, fakes):
+        """The one case left that interrupts: nothing sent AND the clipboard
+        copy failed, so this panel holds the only copy of the text."""
         fi, fp = fakes
         fi.status = FakeInject.FAILED
         fi.foreground = 4242
         assert main.insert_text_now("hello") == FakeInject.FAILED
         assert len(fp.recoveries) == 1
-        assert "clipboard copy" in fp.recoveries[0]["reason"].lower()
+        panel = fp.recoveries[0]
+        assert panel["text"] == "hello"
+        assert "clipboard copy" in panel["reason"].lower()
+        assert panel["on_place"] is not None
+        assert panel["on_dismiss"] is not None
 
     def test_unconfirmed_insert_says_nothing(self, fakes):
         """Corrected escalation policy (PASTE_UX_PLAN section 5): "no signal"
@@ -184,9 +188,21 @@ class TestInsertTextNow:
         assert fp.toasts == []
         assert fp.recoveries == []
 
-    def test_unconfirmed_insert_leaves_the_stash_armed(self, fakes):
+    def test_unconfirmed_insert_consumes_the_stash(self, fakes):
+        """Unconfirmed is the normal outcome, not a failure: most targets
+        expose no readable signal at all. Leaving the stash armed here kept the
+        tray dot permanently lit, which made it mean nothing."""
         fi, _ = fakes
         fi.status = FakeInject.INSERTED_UNCONFIRMED
+        fi.foreground = 4242
+        stash.put("hello", 4242)
+        main.insert_text_now("hello")
+        assert not stash.has_unconsumed()
+
+    def test_a_refused_send_leaves_the_stash_armed(self, fakes):
+        """Nothing went out, so the parked copy is still the safety net."""
+        fi, _ = fakes
+        fi.status = FakeInject.CLIPBOARD
         fi.foreground = 4242
         stash.put("hello", 4242)
         main.insert_text_now("hello")
@@ -211,9 +227,11 @@ class TestInsertTextNow:
 
 
 class TestRetryAction:
+    """The panel only opens on a hard failure now, so that is what these drive."""
+
     def test_place_it_reinserts_into_the_window_focused_at_click_time(self, fakes):
         fi, fp = fakes
-        fi.status = FakeInject.CLIPBOARD
+        fi.status = FakeInject.FAILED
         fi.foreground = 4242
         main.insert_text_now("hello")
 
@@ -227,7 +245,7 @@ class TestRetryAction:
 
     def test_a_retry_that_fails_again_reopens_the_panel(self, fakes):
         fi, fp = fakes
-        fi.status = FakeInject.CLIPBOARD
+        fi.status = FakeInject.FAILED
         fi.foreground = 4242
         main.insert_text_now("hello")
         fi.done.clear()
@@ -237,7 +255,7 @@ class TestRetryAction:
 
     def test_dismiss_drops_the_parked_copy(self, fakes):
         fi, fp = fakes
-        fi.status = FakeInject.CLIPBOARD
+        fi.status = FakeInject.FAILED
         fi.foreground = 4242
         stash.put("hello", 4242)
         main.insert_text_now("hello")
