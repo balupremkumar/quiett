@@ -11,42 +11,24 @@ Hold-to-talk dictation: Ctrl+Alt records, whisper.cpp (large-v3-turbo-q5_0, Vulk
 Read-aloud: Ctrl+Shift+S speaks the selection in the cloned voice (qwentts.cpp, Vulkan). Tray Study Mode switches the same hotkey to a slower teacher delivery.
 Scope ruled 2026-07-25: dictation in, read-aloud out, nothing else. No LLM runs in this app.
 
-Insert reliability overhaul shipped 2026-08-22, then largely superseded on 2026-08-23 (see below): verification no longer decides anything the user can see. `targetprobe.py` still decides whether a field can receive text (Win32 caret, then UI Automation) and a confident "no field" refuses the insert rather than typing into nothing. Notices draw on the monitor the target is on. Design record: `PASTE_UX_PLAN.md`, now out of date on the verification and clipboard sections.
+**Insert.** Routing is per-app override, then RDP -> `ctrl_v`, then terminals and `Tauri Window` -> `type`, everything else -> `ctrl_v`.
+Measured 2026-08-23 by injecting into live windows and screenshotting the result, `ctrl_v` / `type` / `shift_insert`: Notepad (Win11) exact / MANGLED / -; conhost exact / exact / nothing; Chrome textarea exact / exact / -; Flightdeck xterm.js NOTHING / exact / nothing.
+Two traps behind that table. **Windows 11 Notepad silently corrupts typed text** ("FIXED notepad ok" arrived as "FIXED kkkkkkkkkk"); its WinUI/TSF stack resolves each VK_PACKET against the current async key state, and every batch size and pace tried mangled it, so WinUI targets must be pasted, never typed. **Flightdeck's terminal answers no paste keystroke at all** (scan-code, virtual-key, both, and `keybd_event` all pasted nothing), so it must be typed, never pasted.
+`Shift+Insert` and `Ctrl+Shift+V` are gone from the routing; neither works in conhost and the latter types a literal `^V`.
+`_set_focus_on_child` is gone: AttachThreadInput + SetFocus on `Chrome_RenderWidgetHostHWND` DESTROYED DOM focus inside a WebView2 host, so every keystroke after it went nowhere. Chromium restores renderer focus itself.
 
-**The reserved place key is REMOVED** (2026-08-23). It was pressing itself: `inject.py` types via SendInput `KEYEVENTF_UNICODE`, which puts the UTF-16 code unit in `wScan`, and `ord("S") == 83` is the numpad `.` scan code. Every capital S in a dictation was swallowed out of the insert, so verification failed and the stash stayed unconsumed, then re-fired place mode, which typed the same text again. One press, 14 inserts. Do not reinstate an unmodified global key: no shipped dictation tool has one ([[research/2026-08-23-dictation-insert-patterns|dossier]]). The confirm gesture is Enter or Insert inside the preview panel, which already has focus.
-Place mode keeps the tray `Place last dictation` item, the recovery panel, the optional `place_hotkey` chord and click-to-place.
+**The clipboard always holds the last dictation** (Balu's ruling 2026-08-23). It replaces the whole save/restore/retain machinery.
+Text goes on the clipboard BEFORE anything is sent, on every path, and the previous clipboard never comes back.
+The verifier is advisory: it can promote a status to INSERTED, never demote one. It had produced 14 confident false "NOT landed" verdicts, which is what fired the orange recovery panel repeatedly.
+The recovery panel opens on `FAILED` only, meaning nothing was sent AND the clipboard copy failed, so the panel holds the only copy. A refused send is a toast plus the tray dot.
+A modifier still held after 1.5s is flushed and the insert proceeds instead of aborting. An insert that was actually sent consumes the stash, confirmed or not.
+`targetprobe.py` still gates the insert: a confident "no field" refuses rather than typing into nothing. `PASTE_UX_PLAN.md` is out of date on the verification and clipboard sections.
 
-**Insert rebuilt around measured evidence, not verdicts** (2026-08-23).
-Balu could not insert into Flightdeck at all and was down to right-click paste; it turned out not to be a Flightdeck problem alone.
-Every claim below was checked by injecting into a live window and reading the result back off a screenshot.
-
-Measured matrix (`ctrl_v` / `type` / `shift_insert`):
-Notepad (Win11 WinUI) exact / MANGLED / -.
-conhost (cmd.exe) exact / exact / nothing.
-Chrome textarea exact / exact / -.
-Flightdeck xterm.js (Tauri) NOTHING / exact / nothing.
-
-Four bugs came out of it.
-`_set_focus_on_child` (AttachThreadInput + SetFocus on `Chrome_RenderWidgetHostHWND`) DESTROYED DOM focus inside a WebView2 host: typing with that step landed nothing, the identical run without it landed. Removed.
-Flightdeck's terminal has no Ctrl+V paste binding at all, so routing Tauri to Ctrl+V on 2026-08-23 (`a3339a5`) killed every insert there. Scan-code events, virtual-key events, both together and `keybd_event` all pasted nothing; only typing lands.
-Windows 11 Notepad SILENTLY CORRUPTS typed text: "FIXED notepad ok" arrived as "FIXED kkkkkkkkkk". Its WinUI/TSF stack resolves each VK_PACKET against the current async key state, so a fast burst collapses to the last character. Every batch size and pace tried (32/8/4/1 chars per SendInput, 0-5ms apart) mangled it. That bug had been shipping quietly for as long as plain Win32 targets were typed into.
-The verifier produced 14 confident "NOT landed" verdicts on inserts that had landed, which is what fired the orange recovery panel repeatedly.
-
-Routing is now: per-app override, then RDP -> `ctrl_v`, then terminals and `Tauri Window` -> `type`, everything else -> `ctrl_v`.
-`Shift+Insert` and `Ctrl+Shift+V` are gone from the routing; neither works in conhost (the latter types a literal `^V`).
-
-**The clipboard always holds the last dictation** (2026-08-23). Ruled by Balu, and it replaces the whole save/restore/retain machinery.
-Text goes on the clipboard BEFORE anything is sent, on every path, and the previous clipboard never comes back. `should_restore_clipboard` returns False unconditionally.
-The verifier is advisory now: it can promote a status to INSERTED, never demote one. No verdict puts anything on screen.
-The recovery panel opens on `FAILED` only, meaning nothing was sent AND the clipboard copy failed too, so the panel holds the only copy. A refused send is a toast plus the tray dot.
-A modifier still held after 1.5s is flushed and the insert proceeds, instead of aborting into the recovery panel.
-An insert that was actually sent consumes the stash, confirmed or not, so the tray dot means something again.
-
-**Doubled dictations fixed** (2026-08-23, `1b4db7c`). Two of Balu's messages arrived with the same 137-char block verbatim twice. `verify_landed` graded "same signal before and after" as a confident NO, but a WebView2 host hands UIA an element whose value reads "" whichever way the paste went, so every Flightdeck insert compared 0 to 0 and was reported failed. That fired the recovery panel, Balu placed the text again, and it landed twice. No possible delta now means no signal, not a negative verdict; an unchanged NON-zero length is still a real failure. Every non-yes verdict logs the numbers and signal kind it saw.
+**Do not reinstate an unmodified global key.** The reserved numpad `.` was removed 2026-08-23 after it pressed itself; no shipped dictation tool has one ([[research/2026-08-23-dictation-insert-patterns|dossier]]). Confirm is Enter or Insert inside the preview panel. Place mode keeps the tray item, recovery panel, optional `place_hotkey` chord and click-to-place.
 
 Also on: `ctrl+shift+u` unstick modifiers, tray `Unstick modifiers`.
 
-526 tests green. Not yet pushed.
+526 tests green. Pushed through `8782eaf`.
 
 ## Next steps
 
@@ -60,7 +42,7 @@ Also on: `ctrl+shift+u` unstick modifiers, tray `Unstick modifiers`.
 - [ ] Hands-on, needs no fullscreen game running: target ring and armed overlay render, are click-through, correct at 125% DPI on the second monitor; a toast lands on DISPLAY2; RDP behaviour.
 - [ ] Five ambiguous mistranscriptions under Open bugs need Balu's ear before they become corrections.
 - [ ] Balu to answer the 3 open questions at the end of `STUDY_MODE_PLAN.md` before Study Mode P3 (transport controls).
-- [ ] PRODUCTION_PLAN P2: desktop icon design. Pipeline exists (`scripts/make_icons.py`). Accent discrepancy still unresolved: kove.nz showcase runs violet, the shipped app is cyan ion, no ruling covers it.
+- [ ] PRODUCTION_PLAN P2: desktop icon design. Pipeline exists (`scripts/make_icons.py`). The accent question is closed: kove.nz is ice-azure `#43A6F5`, not violet (tokens in `kove-site\styles-v2.css`); the shipped app is cyan ion and that stands.
 - [ ] BACKLOG 51 (streaming transcript) and 72 (diagnostics page) are in scope but not started.
 
 ## Open bugs
