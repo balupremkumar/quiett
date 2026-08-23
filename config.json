@@ -3,7 +3,7 @@
   "model": "large-v3-turbo",
   "language": "en",
   "min_record_seconds": 0.5,
-  "max_record_seconds": 120,
+  "max_record_seconds": 180,
   "filler_words": [
     "um",
     "uh",
@@ -148,7 +148,7 @@
       "y": 502
     }
   },
-  "dashboard_scale": "125",
+  "dashboard_scale": "100",
   "incognito": false,
   "redact_patterns": [],
   "study_mode": false,

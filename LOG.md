@@ -18,9 +18,13 @@ Fixed in `d3af1e2`: reject `LLKHF_INJECTED`, and fire on the leading edge of a p
 
 Tauri windows also routed to clipboard Ctrl+V. Flightdeck's `Tauri Window` class matched no rule and fell through to character typing, failing six inserts in a row before one verified.
 
+**Then the doubled dictations.** Two of Balu's messages arrived with the same 137-character block verbatim, back to back. Not him repeating himself. `verify_landed` graded "same signal before and after" as a confident NO, but a WebView2 host hands UIA a focused element whose value reads "" whichever way the paste went, so every Flightdeck insert compared 0 to 0 and came back failed. Six in a row between 12:08 and 13:34, all `method=ctrl_v`. A false negative is worse than no verdict: it fires the recovery panel, which invites the user to place the same text again, which is exactly what doubled them. Fixed in `1b4db7c`: no possible delta means no signal, not a negative verdict, which is the rule `_read_signal` already applied to a capped text read. An unchanged NON-zero length is still a real failure. Confirmed in Balu's own use at 13:46 and 13:56, with the new diagnostic naming the cause outright: `verify: no readable signal either side (kind=value), claiming nothing`. Messages after that arrived once.
+
+Two lessons compounded here, worth keeping together. Routing Tauri to Ctrl+V was correct but invisible, because the verifier was reporting failure regardless of what the paste did. And the day's two worst bugs were both the same shape: a signal that could not distinguish "no information" from "definitely not", graded as if it could.
+
 **Not solved: the top-of-screen line.** Balu identified it as the full-width 3px bar, which is `_show_edge_flash`. That is a failure fallback only, and all three of its callers write an ERROR first, yet `app.log` holds zero ERROR lines across five days. Nothing in the current code accounts for it. It now logs its own call stack on every fire, so the next occurrence names itself.
 
-524 tests green.
+528 tests green.
 
 ## 2026-08-22 — insert reliability overhaul, rename to Quiett
 
