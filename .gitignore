@@ -22,6 +22,7 @@ graphify-out/
 inspect/
 
 # Runtime data
+*.wav
 history.json
 app.log
 app.log.*
