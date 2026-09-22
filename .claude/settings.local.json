@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -m venv venv)",
-      "Bash(venv/Scripts/pip install *)",
-      "Bash(venv/Scripts/python -c \"import faster_whisper, sounddevice, numpy, pyperclip, keyboard, win32api, PIL, pystray; print\\('All imports OK'\\)\")"
-    ]
-  }
-}

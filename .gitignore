@@ -32,6 +32,7 @@ stderr.txt
 # Claude
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+.claude/settings.local.json
 
 # Large binaries / build outputs (rebuilt locally)
 models/
